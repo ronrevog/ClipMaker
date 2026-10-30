@@ -1,0 +1,210 @@
+:root {
+  --bg-app: #111215;
+  --bg-panel: #181a1f;
+  --bg-panel-header: #14161a;
+  --bg-card: #20232a;
+  --bg-card-hover: #282c35;
+  --bg-input: #121418;
+  --border-subtle: #2a2e37;
+  --border-focus: #3b82f6;
+  --accent-blue: #2d8ceb;
+  --accent-blue-hover: #4299f0;
+  --accent-purple: #8b5cf6;
+  --accent-green: #10b981;
+  --accent-yellow: #f59e0b;
+  --text-main: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-app);
+  color: var(--text-main);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #343844;
+  border-radius: 3px;
+}
+
+/* Studio Shell */
+.studio-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-app);
+}
+
+/* Top Bar */
+.studio-topbar {
+  height: 54px;
+  padding: 0 18px;
+  background: var(--bg-panel-header);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.studio-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.studio-pr-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #2e1065 0%, #1e3a8a 100%);
+  border: 1px solid #60a5fa;
+  color: #93c5fd;
+  font-weight: 800;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Buttons & Inputs */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) {
+  background: var(--bg-card-hover);
+  border-color: #3f4654;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent-blue);
+  border-color: #4ea1f5;
+  color: #ffffff;
+  font-weight: 600;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-blue-hover);
+}
+
+.btn-purple {
+  background: rgba(139, 92, 246, 0.16);
+  border-color: rgba(139, 92, 246, 0.5);
+  color: #ddd6fe;
+}
+.btn-purple:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.28);
+}
+
+.input-field,
+.select-field {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: var(--text-main);
+  font-size: 12.5px;
+  outline: none;
+  width: 100%;
+}
+.input-field:focus,
+.select-field:focus {
+  border-color: var(--accent-blue);
+}
+
+/* Main 3-Column Workspace */
+.studio-workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 330px 1fr 340px;
+  gap: 10px;
+  padding: 10px;
+  min-height: 0;
+}
+
+.studio-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.studio-panel-header {
+  padding: 11px 14px;
+  background: var(--bg-panel-header);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 12.5px;
+  flex-shrink: 0;
+}
+
+.timecode-pill {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: #60a5fa;
+  background: rgba(45, 140, 235, 0.12);
+  border: 1px solid rgba(45, 140, 235, 0.3);
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+
+input[type='range'] {
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
