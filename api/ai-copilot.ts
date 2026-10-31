@@ -25,6 +25,7 @@ export interface CopilotRequestPayload {
 
 export interface CopilotOperation {
   type:
+    | 'generate_edited_clips'
     | 'trim_start'
     | 'trim_end'
     | 'split_at_playhead'
@@ -35,6 +36,9 @@ export interface CopilotOperation {
     | 'update_caption'
     | 'save_scheme_preset'
     | 'center_subject';
+  clipsCount?: number;
+  targetDuration?: number;
+  clipMode?: 'condensed-edit' | 'clip-segment';
   deltaSeconds?: number;
   targetTime?: number;
   offsetX?: number;
@@ -54,14 +58,19 @@ export interface CopilotResponsePayload {
   operations: CopilotOperation[];
 }
 
-const SYSTEM_PROMPT = `You are "Cut Copilot", an expert Adobe Premiere Pro 9:16 social video editor embedded inside ClipMaker.
-The user is giving feedback on a specific 9:16 vertical clip or cut on the timeline.
+const SYSTEM_PROMPT = `You are "Cut Copilot", an expert 9:16 social video editor embedded inside ClipMaker Studio.
+The user is either viewing the Full Uploaded Video or a specific 9:16 clip on the timeline.
+If the user asks to make/create/generate edited clips (or segments) from the video (e.g., "make 3 edited clips of 60s", "create an edit of the video", "make clips from this video"), include a "generate_edited_clips" operation with the desired clipsCount (1..12), targetDuration (5..180 seconds), and clipMode ("condensed-edit" for edited highlight montages or "clip-segment" for continuous segments).
+
 Respond ONLY with valid JSON matching this schema:
 {
-  "reply": "Concise, professional video editor confirmation explaining the exact timecode/framing/cut adjustments made.",
+  "reply": "Concise, professional video editor confirmation explaining the exact clips generated or timecode/framing/cut adjustments made.",
   "operations": [
     {
-      "type": "trim_start" | "trim_end" | "split_at_playhead" | "adjust_tracking_offset" | "adjust_smoothing" | "set_zoom" | "repace_cuts" | "update_caption" | "save_scheme_preset" | "center_subject",
+      "type": "generate_edited_clips" | "trim_start" | "trim_end" | "split_at_playhead" | "adjust_tracking_offset" | "adjust_smoothing" | "set_zoom" | "repace_cuts" | "update_caption" | "save_scheme_preset" | "center_subject",
+      "clipsCount": number (optional, 1..12 when generating clips),
+      "targetDuration": number (optional, 5..180 seconds when generating clips),
+      "clipMode": "condensed-edit" | "clip-segment" (optional),
       "deltaSeconds": number (optional, e.g. -1.5 to start 1.5s earlier or trim 1.5s),
       "targetTime": number (optional, timestamp in seconds),
       "offsetX": number (optional, -0.35 to +0.35 horizontal 9:16 crop bias),
@@ -70,7 +79,7 @@ Respond ONLY with valid JSON matching this schema:
       "pacingMultiplier": number (optional, e.g. 0.7 for 30% faster cuts, 1.3 for slower cuts),
       "captionText": string (optional, updated hook/caption text),
       "schemePresetName": string (optional, if user asks to save as a scheme),
-      "summary": "Short badge label e.g. 'Trim In -1.5s' or 'Punch-In 1.25x'"
+      "summary": "Short badge label e.g. 'Generated 4 Edited Clips (30s)' or 'Trim In -1.5s'"
     }
   ]
 }`;
@@ -193,7 +202,6 @@ export async function handleCopilotRequest(body: CopilotRequestPayload): Promise
     }
   }
 
-  // Deterministic NLE parser fallback when running without external API keys
   return buildDeterministicCopilotResponse(body, provider, model);
 }
 
@@ -206,8 +214,48 @@ function buildDeterministicCopilotResponse(
   const ops: CopilotOperation[] = [];
   const replies: string[] = [];
 
-  const numMatch = p.match(/(\d+(?:\.\d+)?)\s*(?:s|sec|seconds|%)/);
-  const numVal = numMatch ? parseFloat(numMatch[1]) : null;
+  // Parse minutes or seconds if mentioned (e.g. "2 mins", "90s", "45 seconds")
+  const minMatch = p.match(/(\d+(?:\.\d+)?)\s*(?:m|min|mins|minute|minutes)\b/);
+  const secMatch = p.match(/(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)\b/);
+  const countMatch = p.match(/(\d+)\s*(?:clips|clip|edits|edit|videos)\b/);
+
+  const parsedDuration = minMatch
+    ? Math.round(parseFloat(minMatch[1]) * 60)
+    : secMatch
+      ? Math.round(parseFloat(secMatch[1]))
+      : undefined;
+  const parsedCount = countMatch ? Math.max(1, Math.min(12, parseInt(countMatch[1], 10))) : undefined;
+
+  if (
+    p.includes('make clip') ||
+    p.includes('make edit') ||
+    p.includes('create clip') ||
+    p.includes('create an edit') ||
+    p.includes('create edit') ||
+    p.includes('generate clip') ||
+    p.includes('edited clip') ||
+    p.includes('edit the video') ||
+    p.includes('edit this video') ||
+    p.includes('cut this video') ||
+    (body.activeClip.id === '__full_source__' && (p.includes('edit') || p.includes('clip')))
+  ) {
+    const mode: 'condensed-edit' | 'clip-segment' =
+      p.includes('segment') && !p.includes('edit') ? 'clip-segment' : 'condensed-edit';
+    ops.push({
+      type: 'generate_edited_clips',
+      clipsCount: parsedCount,
+      targetDuration: parsedDuration,
+      clipMode: mode,
+      summary: `Generated ${parsedCount ? `${parsedCount} ` : ''}${mode === 'condensed-edit' ? 'Edited Clips' : 'Segment Clips'}${parsedDuration ? ` (${parsedDuration}s)` : ''}`,
+    });
+    replies.push(
+      `Generated ${parsedCount ? `${parsedCount} ` : ''}9:16 ${
+        mode === 'condensed-edit' ? 'condensed highlight edits' : 'segment clips'
+      }${parsedDuration ? ` of ${parsedDuration}s each` : ''} from your uploaded video and loaded Edit #1 onto the timeline.`
+    );
+  }
+
+  const numVal = secMatch ? parseFloat(secMatch[1]) : null;
 
   if (p.includes('start') || p.includes('in point') || p.includes('earlier') || p.includes('beginning')) {
     const delta = p.includes('earlier') || p.includes('extend') ? -(numVal ?? 1.5) : numVal ?? 1.5;
@@ -217,7 +265,7 @@ function buildDeterministicCopilotResponse(
       summary: `In Point ${delta > 0 ? '+' : ''}${delta.toFixed(1)}s`,
     });
     replies.push(
-      `Shifted the clip's In-Point by ${delta > 0 ? '+' : ''}${delta.toFixed(1)}s on V1/A1.`
+      `Shifted the clip's In-Point by ${delta > 0 ? '+' : ''}${delta.toFixed(1)}s.`
     );
   }
 
@@ -239,9 +287,9 @@ function buildDeterministicCopilotResponse(
     ops.push({
       type: 'split_at_playhead',
       targetTime: body.currentPlayhead,
-      summary: `Split @ ${body.currentPlayhead.toFixed(2)}s`,
+      summary: `Razor Cut @ ${body.currentPlayhead.toFixed(2)}s`,
     });
-    replies.push(`Inserted a razor sub-cut at playhead (${body.currentPlayhead.toFixed(2)}s).`);
+    replies.push(`Inserted a razor cut at playhead (${body.currentPlayhead.toFixed(2)}s).`);
   }
 
   if (p.includes('left') || p.includes('right') || p.includes('bias') || p.includes('pan')) {
@@ -252,7 +300,7 @@ function buildDeterministicCopilotResponse(
       summary: `9:16 Crop Bias ${offset > 0 ? 'Right' : 'Left'}`,
     });
     replies.push(
-      `Biased the 9:16 subject tracking window ${offset < 0 ? 'left (-14%)' : 'right (+14%)'} while preserving spring damping.`
+      `Biased the 9:16 subject tracking window ${offset < 0 ? 'left (-14%)' : 'right (+14%)'}.`
     );
   }
 
@@ -264,7 +312,7 @@ function buildDeterministicCopilotResponse(
       summary: 'Re-Center Subject Lock',
     });
     replies.push(
-      `Recalibrated the 9:16 tracking solver to lock onto the primary subject centroid with 88% spring smoothing.`
+      `Recalibrated the 9:16 tracking solver to lock onto the primary subject centroid.`
     );
   }
 
@@ -296,7 +344,7 @@ function buildDeterministicCopilotResponse(
       summary: mult < 1 ? 'Pacing +28% Faster' : 'Pacing -35% Slower',
     });
     replies.push(
-      `Re-computed internal sub-cuts on "${body.activeClip.name}" (${mult < 1 ? 'faster TikTok hook cadence' : 'longer conversational takes'}).`
+      `Re-computed internal sub-cuts on "${body.activeClip.name}" (${mult < 1 ? 'faster hook cadence' : 'longer takes'}).`
     );
   }
 
@@ -308,7 +356,7 @@ function buildDeterministicCopilotResponse(
       captionText: newText,
       summary: `Caption: "${newText.slice(0, 18)}..."`,
     });
-    replies.push(`Updated V3 Program Monitor social caption overlay to "${newText}".`);
+    replies.push(`Updated social caption overlay to "${newText}".`);
   }
 
   if (p.includes('save') && p.includes('scheme')) {
@@ -323,22 +371,35 @@ function buildDeterministicCopilotResponse(
   }
 
   if (ops.length === 0) {
-    ops.push(
-      {
-        type: 'center_subject',
-        offsetX: 0,
-        smoothing: 0.86,
-        summary: 'Refined Subject Lock',
-      },
-      {
-        type: 'set_zoom',
-        zoom: 1.15,
-        summary: 'Punch-In 1.15x',
-      }
-    );
-    replies.push(
-      `Tightened subject centering on "${body.activeClip.name}" and added a subtle 1.15x emphasis zoom at ${body.currentPlayhead.toFixed(1)}s.`
-    );
+    if (body.activeClip.id === '__full_source__') {
+      ops.push({
+        type: 'generate_edited_clips',
+        clipsCount: parsedCount,
+        targetDuration: parsedDuration,
+        clipMode: 'condensed-edit',
+        summary: 'Generated Edited Clips from Full Video',
+      });
+      replies.push(
+        `Created edited 9:16 highlight clips from your full video and loaded the first edit onto the timeline.`
+      );
+    } else {
+      ops.push(
+        {
+          type: 'center_subject',
+          offsetX: 0,
+          smoothing: 0.86,
+          summary: 'Refined Subject Lock',
+        },
+        {
+          type: 'set_zoom',
+          zoom: 1.15,
+          summary: 'Punch-In 1.15x',
+        }
+      );
+      replies.push(
+        `Tightened subject centering on "${body.activeClip.name}" and added a 1.15x emphasis zoom at ${body.currentPlayhead.toFixed(1)}s.`
+      );
+    }
   }
 
   return {

@@ -86,20 +86,6 @@ textarea {
   gap: 10px;
 }
 
-.studio-pr-badge {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  background: linear-gradient(135deg, #2e1065 0%, #1e3a8a 100%);
-  border: 1px solid #60a5fa;
-  color: #93c5fd;
-  font-weight: 800;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
 /* Buttons & Inputs */
 .btn {
   display: inline-flex;
@@ -165,7 +151,7 @@ textarea {
 .studio-workspace {
   flex: 1;
   display: grid;
-  grid-template-columns: 330px 1fr 340px;
+  grid-template-columns: 340px 1fr 340px;
   gap: 10px;
   padding: 10px;
   min-height: 0;

@@ -1,7 +1,7 @@
 // Vercel Serverless Function: /api/ai-analyze-video
 // Sends real sampled video frames + extracted audio clip / waveform telemetry to
 // Gemini (native multimodal audio+video frames), Claude, or OpenAI to detect real
-// viral clip segments, sub-cuts, and actual spoken captions from the uploaded video.
+// viral clip segments, condensed video edits, sub-cuts, and actual spoken captions.
 
 export interface AnalyzeVideoRequestPayload {
   provider: 'gemini' | 'claude' | 'openai';
@@ -11,6 +11,7 @@ export interface AnalyzeVideoRequestPayload {
   duration: number;
   scheme: {
     name: string;
+    clipCreationMode?: 'clip-segment' | 'condensed-edit';
     targetClipDuration: number;
     minClipDuration: number;
     maxClipDuration: number;
@@ -24,13 +25,18 @@ export interface AnalyzeVideoRequestPayload {
   audioPeakTimestamps: number[];
   highEnergyWindows: Array<{ start: number; end: number; avgEnergy: number }>;
   sampledFrames: Array<{ time: number; dataUrl: string }>;
-  audioSampleBase64?: string; // Optional WAV/MP3 snippet for Gemini native audio transcription
+  audioSampleBase64?: string;
   audioMimeType?: string;
 }
 
-const ANALYZE_SYSTEM_PROMPT = `You are an expert AI video editor inside ClipMaker.
+const ANALYZE_SYSTEM_PROMPT = `You are an expert AI video editor inside ClipMaker Studio.
 You are given real frames sampled at specific timestamps from an uploaded video, along with its audio energy windows, scene cut timestamps, and the user's Editing Scheme criteria.
-If audio data is attached, transcribe the actual spoken words for the captions. If no speech is audible, write accurate visual hook captions describing what is actually happening in the frames (NEVER invent unrelated text).
+Pay careful attention to:
+1) "maxClipsCount": Generate EXACTLY the requested number of clips in the "clips" array.
+2) "clipCreationMode":
+   - If "clip-segment": Each clip extracts a single continuous segment [sourceStart, sourceEnd] whose length is approximately targetClipDuration seconds.
+   - If "condensed-edit": Each clip creates an edited cutdown/montage of the video into targetClipDuration seconds by selecting multiple non-contiguous highlight shots in chronological order across the video inside "subCuts": [{ "sourceStart": number, "sourceEnd": number, "label": "Shot description" }] whose combined durations sum to targetClipDuration seconds.
+3) If audio data is attached, transcribe the actual spoken words for the captions. If no speech is audible, write accurate visual hook captions describing what is actually happening in the frames (NEVER invent unrelated text).
 
 Return ONLY valid JSON matching this exact structure:
 {
@@ -40,10 +46,13 @@ Return ONLY valid JSON matching this exact structure:
       "sourceStart": number (in seconds, within [0, duration]),
       "sourceEnd": number (in seconds, within [sourceStart + 4, duration]),
       "viralScore": number (70 to 99),
-      "hookReason": "Why this specific segment works based on visual/audio evidence",
+      "hookReason": "Why this specific segment or edit works based on visual/audio evidence",
       "captionText": "Primary hook headline matching the real content",
+      "subCuts": [
+        { "sourceStart": number, "sourceEnd": number, "label": "Highlight shot label" }
+      ],
       "captions": [
-        { "start": number (relative to clip start, 0..clipDuration), "end": number, "text": "Spoken transcript or real visual caption" }
+        { "start": number (relative to clip timeline 0..clipDuration), "end": number, "text": "Spoken transcript or real visual caption" }
       ]
     }
   ]
@@ -84,6 +93,8 @@ export async function handleAnalyzeVideoRequest(body: AnalyzeVideoRequestPayload
   const telemetryPrompt = JSON.stringify({
     fileName: body.fileName,
     totalDurationSeconds: body.duration,
+    requestedClipsCount: body.scheme.maxClipsCount,
+    requestedClipMode: body.scheme.clipCreationMode || 'clip-segment',
     editingSchemeCriteria: body.scheme,
     detectedSceneCuts: body.sceneCutTimestamps,
     detectedAudioTransients: body.audioPeakTimestamps,

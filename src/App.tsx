@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Bot,
-  Check,
   CornerDownLeft,
-  Cpu,
   Crosshair,
   Download,
   Film,
+  Flame,
+  Layers,
+  Lock,
+  Pause,
+  Play,
   Plus,
   RotateCcw,
   Save,
@@ -15,21 +18,25 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  UserCheck,
+  Video,
   Volume2,
   VolumeX,
   Wand2,
-  Play,
-  Pause,
+  Zap,
 } from 'lucide-react';
 import {
   AIProviderId,
   AIProviderSettings,
+  ClipCreationMode,
   CopilotChatMessage,
   CopilotRevisionSnapshot,
   EditingScheme,
   GeneratedClip,
   SourceVideoAsset,
   SubCut,
+  SubjectFocusConfig,
+  SubjectFocusStrategy,
 } from './types/editor';
 import {
   loadAISettings,
@@ -43,27 +50,68 @@ import {
   synthesizeSchemeFromReference,
 } from './services/referenceStyleCloner';
 import {
+  buildCondensedEditSubCuts,
+  clipTimeToSourceTime,
   formatSMPTETimecode,
   generateClipsFromScheme,
   generateClipsWithMultimodalAI,
+  recalculateClipTimeline,
+  sourceTimeToClipTime,
 } from './services/clipGenerator';
 import {
   computeDistortionFree9x16Crop,
   getTrackingStateAtTime,
+  sampleSubjectSignatureFromVideo,
+  trackSubjectSignatureInVideoFrame,
 } from './services/subjectTracker';
 import { exportClipTo9x16Video } from './services/videoExporter';
 import { AISettingsModal } from './components/AISettingsModal';
 
 const QUICK_FEEDBACK_CHIPS = [
+  'Find best viral clips',
+  'Create compilation cutdowns',
+  'Create 60s edit of video',
+  'Center subject',
   'Start 2s earlier',
   'Trim 2s off end',
-  'Move crop left',
-  'Move crop right',
-  'Center subject',
   'Zoom 1.25x',
-  'Make cuts faster',
   'Split at playhead',
 ];
+
+/**
+ * Parses a user-entered duration string into seconds (clamped between 5 and 180 seconds / 3 mins).
+ * Supports plain seconds ("45", "120s"), minutes ("2m", "2.5m"), or mm:ss ("1:30", "02:15", "3:00").
+ */
+function parseDurationTextToSeconds(raw: string, fallback: number): number {
+  const trimmed = raw.trim().toLowerCase();
+  if (!trimmed) return fallback;
+
+  if (trimmed.includes(':')) {
+    const parts = trimmed.split(':').map((p) => parseFloat(p));
+    if (parts.length === 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+      const total = Math.round(parts[0] * 60 + parts[1]);
+      return Math.max(5, Math.min(180, total));
+    }
+  }
+
+  const minMatch = trimmed.match(/^(\d+(?:\.\d+)?)\s*m(?:in|ins|inutes)?$/);
+  if (minMatch) {
+    return Math.max(5, Math.min(180, Math.round(parseFloat(minMatch[1]) * 60)));
+  }
+
+  const num = parseFloat(trimmed.replace(/[^0-9.]/g, ''));
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(5, Math.min(180, Math.round(num)));
+}
+
+function formatDurationBadge(seconds: number): string {
+  if (seconds >= 60) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return s > 0 ? `${m}m ${s}s (${seconds}s)` : `${m}m (${seconds}s)`;
+  }
+  return `${seconds}s`;
+}
 
 export const App: React.FC = () => {
   // 1. Editing Schemes & AI Settings (Gemini Default, Claude, OpenAI)
@@ -73,36 +121,104 @@ export const App: React.FC = () => {
   const [isAISettingsOpen, setIsAISettingsOpen] = useState(false);
   const [schemeSavedNotice, setSchemeSavedNotice] = useState<string | null>(null);
 
-  // 2. Uploaded Source Video & Generated 9:16 Clips (Starts clean — no fake cartoon video!)
+  // Text input draft states so user can freely type clip duration (up to 180s / 3m), clip count, and ASL
+  const [durationTextInput, setDurationTextInput] = useState<string>(() =>
+    String(loadSavedSchemes()[0]?.targetClipDuration || 24)
+  );
+  const [clipsCountTextInput, setClipsCountTextInput] = useState<string>(() =>
+    String(loadSavedSchemes()[0]?.maxClipsCount || 4)
+  );
+  const [aslTextInput, setAslTextInput] = useState<string>(() =>
+    String(loadSavedSchemes()[0]?.targetAvgShotLength || 2.2)
+  );
+
+  useEffect(() => {
+    setDurationTextInput(String(activeScheme.targetClipDuration));
+    setClipsCountTextInput(String(activeScheme.maxClipsCount));
+    setAslTextInput(String(activeScheme.targetAvgShotLength));
+  }, [
+    activeScheme.id,
+    activeScheme.targetClipDuration,
+    activeScheme.maxClipsCount,
+    activeScheme.targetAvgShotLength,
+  ]);
+
+  // 2. Uploaded Source Video, Editable Full Video Sequence, Timeline Mode & Generated 9:16 Clips
   const [activeSource, setActiveSource] = useState<SourceVideoAsset | null>(null);
+  const [fullVideoClip, setFullVideoClip] = useState<GeneratedClip | null>(null);
+  const [timelineMode, setTimelineMode] = useState<'full-source' | 'elected-clip'>('full-source');
   const [generatedClips, setGeneratedClips] = useState<GeneratedClip[]>([]);
   const [activeClipId, setActiveClipId] = useState<string | null>(null);
+  const [selectedCutIndex, setSelectedCutIndex] = useState<number>(0);
 
-  const activeClip =
+  // 3. Subject Focus & Click-to-Track State (keeps chosen subject locked in the center of 9:16!)
+  const [clickPickMode, setClickPickMode] = useState<'track' | 'static'>('track');
+  const [applyFocusToAllClips, setApplyFocusToAllClips] = useState<boolean>(true);
+  const [liveTrackedAnchor, setLiveTrackedAnchor] = useState<{ x: number; y: number } | null>(
+    null
+  );
+  const liveTrackedAnchorRef = useRef<{ x: number; y: number } | null>(null);
+
+  // 4. Razor Blade Tool & In/Out Markers State
+  const [isRazorMode, setIsRazorMode] = useState<boolean>(false);
+  const [razorHoverClipTime, setRazorHoverClipTime] = useState<number | null>(null);
+  const [inMarker, setInMarker] = useState<number | null>(null); // seconds in source video
+  const [outMarker, setOutMarker] = useState<number | null>(null); // seconds in source video
+  const [isLoopingInOut, setIsLoopingInOut] = useState<boolean>(false);
+  const [markerNotice, setMarkerNotice] = useState<string | null>(null);
+  const [draggingHandle, setDraggingHandle] = useState<'playhead' | 'in' | 'out' | null>(null);
+
+  const selectedClipObj =
     generatedClips.find((c) => c.id === activeClipId) || generatedClips[0] || null;
 
-  // 3. Native Video Element & Playback State
+  const activeClip: GeneratedClip | null =
+    timelineMode === 'full-source' ? fullVideoClip : selectedClipObj;
+
+  // Sync liveTrackedAnchor when switching clips or when subjectFocus changes
+  useEffect(() => {
+    if (activeClip?.subjectFocus) {
+      const pt = {
+        x: activeClip.subjectFocus.anchorX,
+        y: activeClip.subjectFocus.anchorY,
+      };
+      liveTrackedAnchorRef.current = pt;
+      setLiveTrackedAnchor(pt);
+    } else {
+      liveTrackedAnchorRef.current = null;
+      setLiveTrackedAnchor(null);
+    }
+  }, [
+    activeClip?.id,
+    activeClip?.subjectFocus?.strategy,
+    activeClip?.subjectFocus?.anchorX,
+    activeClip?.subjectFocus?.anchorY,
+  ]);
+
+  // 5. Native Video Element & Playback State
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const preview9x16CanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sourceOverlayWrapRef = useRef<HTMLDivElement | null>(null);
+  const timelineBarRef = useRef<HTMLDivElement | null>(null);
+  const activeCutIdxRef = useRef<number>(0);
 
   const [nativeDims, setNativeDims] = useState<{ width: number; height: number }>({
     width: 1920,
     height: 1080,
   });
-  const [playheadTime, setPlayheadTime] = useState<number>(0);
+  const [playheadTime, setPlayheadTime] = useState<number>(0); // seconds in source video
+  const [clipPlayheadTime, setClipPlayheadTime] = useState<number>(0); // seconds in current timeline (0 .. activeClip.duration)
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isDraggingCrop, setIsDraggingCrop] = useState<boolean>(false);
 
-  // 4. Progress & Busy States
+  // 6. Progress & Busy States
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [analysisStatus, setAnalysisStatus] = useState<string>('');
   const [isCloningRef, setIsCloningRef] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<number>(0);
 
-  // 5. Cut Copilot Chat State
+  // 7. Cut Copilot Chat State
   const [chatInput, setChatInput] = useState<string>('');
   const [isCopilotBusy, setIsCopilotBusy] = useState<boolean>(false);
   const [revisions, setRevisions] = useState<CopilotRevisionSnapshot[]>([]);
@@ -111,7 +227,7 @@ export const App: React.FC = () => {
       id: 'welcome',
       role: 'assistant',
       content:
-        'Upload a video to automatically generate 9:16 clips with subject tracking. Then select any clip and tell me how you want to adjust the cuts, framing, zoom, or captions.',
+        'Upload a video to: (1) Find the Best Possible Viral Clips, (2) Create Compilation Cutdowns up to 3 mins (180s), and (3) Click any subject on the video to keep them locked in the center of the 9:16 crop.',
       timestamp: new Date().toISOString(),
       providerBadge: 'Google Gemini ★',
     },
@@ -120,18 +236,82 @@ export const App: React.FC = () => {
   const sourceFileInputRef = useRef<HTMLInputElement | null>(null);
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Compute current active sub-cut & tracking crop rectangle
-  const activeCut = activeClip?.subCuts.find(
-    (c) => playheadTime >= c.sourceStart && playheadTime <= c.sourceEnd
+  // Helper to build a fresh unedited Full Video clip object
+  const createInitialFullVideoClip = useCallback(
+    (source: SourceVideoAsset, scheme: EditingScheme): GeneratedClip => ({
+      id: '__full_source__',
+      name: `Full Video — ${source.name}`,
+      sourceVideoId: source.id,
+      schemeId: scheme.id,
+      schemeName: scheme.name,
+      clipCreationMode: 'clip-segment',
+      viralScore: 100,
+      hookReason: 'Full uploaded video sequence on timeline',
+      sourceStart: 0,
+      sourceEnd: source.duration,
+      duration: source.duration,
+      trackingMode: scheme.trackingMode,
+      trackingOffsetX: 0,
+      trackingSmoothing: scheme.trackingSmoothing,
+      zoomScale: 1.0,
+      captionText: '',
+      captionStyle: scheme.captionStyle,
+      safeZoneGuide: scheme.safeZoneGuide,
+      subCuts: [
+        {
+          id: `full-cut-1-${Date.now()}`,
+          index: 1,
+          sourceStart: 0,
+          sourceEnd: source.duration,
+          timelineStart: 0,
+          timelineEnd: source.duration,
+          label: 'Full Video',
+          zoom: 1.0,
+          cropBiasX: 0,
+        },
+      ],
+      captions: [],
+      manualKeyframes: [],
+    }),
+    []
   );
+
+  // Determine active sub-cut from clipPlayheadTime
+  const mappedAtPlayhead = activeClip
+    ? clipTimeToSourceTime(activeClip, clipPlayheadTime)
+    : { sourceTime: playheadTime, activeCut: undefined, cutIndex: 0 };
+
+  const activeCut =
+    mappedAtPlayhead.activeCut ||
+    activeClip?.subCuts.find(
+      (c) => playheadTime >= c.sourceStart - 0.05 && playheadTime <= c.sourceEnd + 0.05
+    ) ||
+    activeClip?.subCuts[0];
+
   const currentZoom = activeCut ? activeCut.zoom : activeClip?.zoomScale ?? 1.0;
   const currentCutBias = activeCut ? activeCut.cropBiasX : 0;
+
+  // Build effective SubjectFocusConfig with real-time tracked coordinates when 'click-track' is active
+  const effectiveSubjectFocus: SubjectFocusConfig | undefined = activeClip?.subjectFocus
+    ? {
+        ...activeClip.subjectFocus,
+        anchorX:
+          activeClip.subjectFocus.strategy === 'click-track' && liveTrackedAnchor
+            ? liveTrackedAnchor.x
+            : activeClip.subjectFocus.anchorX,
+        anchorY:
+          activeClip.subjectFocus.strategy === 'click-track' && liveTrackedAnchor
+            ? liveTrackedAnchor.y
+            : activeClip.subjectFocus.anchorY,
+      }
+    : undefined;
 
   const currentTrack = getTrackingStateAtTime(
     activeSource?.trackingSamples || [],
     playheadTime,
     (activeClip?.trackingOffsetX ?? 0) + currentCutBias,
-    activeClip?.manualKeyframes ?? []
+    activeClip?.manualKeyframes ?? [],
+    effectiveSubjectFocus
   );
 
   const currentCrop = computeDistortionFree9x16Crop(
@@ -170,8 +350,9 @@ export const App: React.FC = () => {
 
     // Draw caption if present
     if (activeClip) {
-      const relTime = Math.max(0, playheadTime - activeClip.sourceStart);
-      const seg = activeClip.captions.find((c) => relTime >= c.start && relTime <= c.end);
+      const seg = activeClip.captions.find(
+        (c) => clipPlayheadTime >= c.start && clipPlayheadTime <= c.end
+      );
       const text = seg?.text || activeClip.captionText;
       if (text) {
         ctx.save();
@@ -184,27 +365,151 @@ export const App: React.FC = () => {
         ctx.restore();
       }
     }
-  }, [nativeDims, currentTrack.cropX, currentTrack.cropY, currentZoom, activeClip, playheadTime]);
+  }, [
+    nativeDims,
+    currentTrack.cropX,
+    currentTrack.cropY,
+    currentZoom,
+    activeClip,
+    clipPlayheadTime,
+  ]);
 
   useEffect(() => {
     render9x16Preview();
-  }, [render9x16Preview, playheadTime]);
+  }, [render9x16Preview, playheadTime, clipPlayheadTime, liveTrackedAnchor]);
 
-  // 60fps synchronization loop while video is playing
+  // Seek to a specific time on the active timeline (0 .. activeClip.duration)
+  const handleSeekClipTime = useCallback(
+    (targetClipTime: number) => {
+      if (!activeSource || !activeClip) return;
+      const clampedClipTime = Math.max(0, Math.min(activeClip.duration, targetClipTime));
+      const { sourceTime, cutIndex } = clipTimeToSourceTime(activeClip, clampedClipTime);
+      if (cutIndex >= 0) {
+        activeCutIdxRef.current = cutIndex;
+        setSelectedCutIndex(cutIndex);
+      }
+      setClipPlayheadTime(clampedClipTime);
+      setPlayheadTime(sourceTime);
+      if (videoRef.current) {
+        videoRef.current.currentTime = sourceTime;
+      }
+    },
+    [activeSource, activeClip]
+  );
+
+  // Seek to a specific source video time (and sync clipPlayheadTime)
+  const handleSeekSourceTime = useCallback(
+    (sourceTime: number, clipOverride?: GeneratedClip) => {
+      if (!activeSource) return;
+      const targetClip = clipOverride ?? activeClip;
+      const clampedSource = Math.max(0, Math.min(activeSource.duration, sourceTime));
+      setPlayheadTime(clampedSource);
+      if (targetClip) {
+        const cTime = sourceTimeToClipTime(targetClip, clampedSource);
+        setClipPlayheadTime(cTime);
+        const foundIdx = targetClip.subCuts.findIndex(
+          (c) => clampedSource >= c.sourceStart - 0.05 && clampedSource <= c.sourceEnd + 0.05
+        );
+        if (foundIdx >= 0) {
+          activeCutIdxRef.current = foundIdx;
+          setSelectedCutIndex(foundIdx);
+        }
+      }
+      if (videoRef.current) {
+        videoRef.current.currentTime = clampedSource;
+      }
+    },
+    [activeSource, activeClip]
+  );
+
+  // 60fps synchronization + live Subject Color-Patch Tracking loop while playing
   useEffect(() => {
     if (!isPlaying) return;
     let rafId = 0;
 
     const tick = () => {
       const vid = videoRef.current;
-      if (vid && activeSource) {
-        const minT = activeClip ? activeClip.sourceStart : 0;
-        const maxT = activeClip ? activeClip.sourceEnd : activeSource.duration;
-        if (vid.currentTime >= maxT || vid.ended) {
-          vid.currentTime = minT;
-          if (vid.paused) vid.play().catch(() => {});
+      if (vid && activeSource && activeClip) {
+        // Real-time visual patch tracker if user picked a subject with Click-to-Track!
+        if (
+          activeClip.subjectFocus?.strategy === 'click-track' &&
+          activeClip.subjectFocus.targetColorRgb
+        ) {
+          const prevPt = liveTrackedAnchorRef.current || {
+            x: activeClip.subjectFocus.anchorX,
+            y: activeClip.subjectFocus.anchorY,
+          };
+          const nextPt = trackSubjectSignatureInVideoFrame(
+            vid,
+            prevPt.x,
+            prevPt.y,
+            activeClip.subjectFocus.targetColorRgb
+          );
+          liveTrackedAnchorRef.current = nextPt;
+          setLiveTrackedAnchor(nextPt);
         }
-        setPlayheadTime(vid.currentTime);
+
+        if (
+          isLoopingInOut &&
+          inMarker !== null &&
+          outMarker !== null &&
+          outMarker > inMarker + 0.2
+        ) {
+          if (vid.currentTime >= outMarker || vid.ended || vid.currentTime < inMarker - 0.1) {
+            vid.currentTime = inMarker;
+            if (vid.paused) vid.play().catch(() => {});
+          }
+          setPlayheadTime(vid.currentTime);
+          setClipPlayheadTime(sourceTimeToClipTime(activeClip, vid.currentTime));
+          render9x16Preview();
+          rafId = requestAnimationFrame(tick);
+          return;
+        }
+
+        const cuts = activeClip.subCuts;
+        if (cuts && cuts.length > 0) {
+          let idx = activeCutIdxRef.current;
+          if (idx < 0 || idx >= cuts.length) idx = 0;
+          const currentCut = cuts[idx];
+
+          if (vid.currentTime >= currentCut.sourceEnd - 0.03 || vid.ended) {
+            const nextIdx = idx + 1;
+            if (nextIdx < cuts.length) {
+              activeCutIdxRef.current = nextIdx;
+              setSelectedCutIndex(nextIdx);
+              const nextCut = cuts[nextIdx];
+              if (Math.abs(vid.currentTime - nextCut.sourceStart) > 0.08) {
+                vid.currentTime = nextCut.sourceStart;
+              }
+              setPlayheadTime(nextCut.sourceStart);
+              setClipPlayheadTime(nextCut.timelineStart);
+              if (vid.paused) vid.play().catch(() => {});
+            } else {
+              activeCutIdxRef.current = 0;
+              setSelectedCutIndex(0);
+              const firstCut = cuts[0];
+              vid.currentTime = firstCut.sourceStart;
+              setPlayheadTime(firstCut.sourceStart);
+              setClipPlayheadTime(0);
+              if (vid.paused) vid.play().catch(() => {});
+            }
+          } else {
+            const offsetInCut = Math.max(0, vid.currentTime - currentCut.sourceStart);
+            const cTime = Math.min(
+              activeClip.duration,
+              currentCut.timelineStart + offsetInCut
+            );
+            setPlayheadTime(vid.currentTime);
+            setClipPlayheadTime(cTime);
+          }
+        } else {
+          if (vid.currentTime >= activeClip.sourceEnd || vid.ended) {
+            vid.currentTime = activeClip.sourceStart;
+            if (vid.paused) vid.play().catch(() => {});
+          }
+          setPlayheadTime(vid.currentTime);
+          setClipPlayheadTime(Math.max(0, vid.currentTime - activeClip.sourceStart));
+        }
         render9x16Preview();
       }
       rafId = requestAnimationFrame(tick);
@@ -212,86 +517,586 @@ export const App: React.FC = () => {
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [isPlaying, activeSource, activeClip, render9x16Preview]);
-
-  // Seek helper
-  const handleSeek = useCallback(
-    (time: number) => {
-      if (!activeSource) return;
-      const clamped = Math.max(0, Math.min(activeSource.duration, time));
-      setPlayheadTime(clamped);
-      if (videoRef.current) {
-        videoRef.current.currentTime = clamped;
-      }
-    },
-    [activeSource]
-  );
+  }, [isPlaying, isLoopingInOut, inMarker, outMarker, activeSource, activeClip, render9x16Preview]);
 
   // Play / Pause helper
-  const handleTogglePlay = useCallback(async () => {
-    const vid = videoRef.current;
-    if (!vid || !activeSource) return;
-    if (isPlaying) {
-      vid.pause();
-      setIsPlaying(false);
-    } else {
-      if (activeClip) {
-        if (vid.currentTime < activeClip.sourceStart || vid.currentTime >= activeClip.sourceEnd) {
-          vid.currentTime = activeClip.sourceStart;
+  const handleTogglePlay = useCallback(
+    async (loopInOutMode = false) => {
+      const vid = videoRef.current;
+      if (!vid || !activeSource || !activeClip) return;
+      if (isPlaying && isLoopingInOut === loopInOutMode) {
+        vid.pause();
+        setIsPlaying(false);
+        setIsLoopingInOut(false);
+      } else {
+        setIsLoopingInOut(loopInOutMode);
+        if (loopInOutMode && inMarker !== null && outMarker !== null && outMarker > inMarker) {
+          vid.currentTime = inMarker;
+          setPlayheadTime(inMarker);
+          setClipPlayheadTime(sourceTimeToClipTime(activeClip, inMarker));
+        } else {
+          const cuts = activeClip.subCuts;
+          if (cuts && cuts.length > 0) {
+            if (clipPlayheadTime >= activeClip.duration - 0.1) {
+              activeCutIdxRef.current = 0;
+              setSelectedCutIndex(0);
+              setClipPlayheadTime(0);
+              setPlayheadTime(cuts[0].sourceStart);
+              vid.currentTime = cuts[0].sourceStart;
+            } else {
+              const { sourceTime, cutIndex } = clipTimeToSourceTime(activeClip, clipPlayheadTime);
+              activeCutIdxRef.current = Math.max(0, cutIndex);
+              if (Math.abs(vid.currentTime - sourceTime) > 0.15) {
+                vid.currentTime = sourceTime;
+              }
+            }
+          }
+        }
+        try {
+          vid.muted = isMuted;
+          await vid.play();
+          setIsPlaying(true);
+        } catch (e) {
+          console.warn('Playback failed:', e);
+          setIsPlaying(false);
         }
       }
-      try {
-        vid.muted = isMuted;
-        await vid.play();
-        setIsPlaying(true);
-      } catch (e) {
-        console.warn('Playback failed:', e);
-        setIsPlaying(false);
-      }
-    }
-  }, [activeSource, isPlaying, activeClip, isMuted]);
+    },
+    [
+      activeSource,
+      isPlaying,
+      isLoopingInOut,
+      inMarker,
+      outMarker,
+      activeClip,
+      clipPlayheadTime,
+      isMuted,
+    ]
+  );
 
-  // Spacebar shortcut
+  // Universal updater that modifies either the active GeneratedClip OR the editable Full Video sequence
+  const updateActiveTimelineClip = useCallback(
+    (updater: (clip: GeneratedClip) => GeneratedClip) => {
+      if (timelineMode === 'full-source') {
+        setFullVideoClip((prev) => (prev ? updater(prev) : prev));
+      } else if (selectedClipObj) {
+        setGeneratedClips((prev) =>
+          prev.map((c) => (c.id === selectedClipObj.id ? updater(c) : c))
+        );
+      }
+    },
+    [timelineMode, selectedClipObj]
+  );
+
+  // Apply a SubjectFocusConfig to the active clip (and optionally all generated clips so the user doesn't have to re-pick!)
+  const applySubjectFocusConfig = useCallback(
+    (focusConfig: SubjectFocusConfig) => {
+      const pt = { x: focusConfig.anchorX, y: focusConfig.anchorY };
+      liveTrackedAnchorRef.current = pt;
+      setLiveTrackedAnchor(pt);
+
+      if (applyFocusToAllClips) {
+        setFullVideoClip((prev) =>
+          prev
+            ? {
+                ...prev,
+                subjectFocus: focusConfig,
+                trackingOffsetX: 0,
+                manualKeyframes: [],
+              }
+            : prev
+        );
+        setGeneratedClips((prev) =>
+          prev.map((c) => ({
+            ...c,
+            subjectFocus: focusConfig,
+            trackingOffsetX: 0,
+            manualKeyframes: [],
+          }))
+        );
+      } else {
+        updateActiveTimelineClip((c) => ({
+          ...c,
+          subjectFocus: focusConfig,
+          trackingOffsetX: 0,
+          manualKeyframes: [],
+        }));
+      }
+    },
+    [applyFocusToAllClips, updateActiveTimelineClip]
+  );
+
+  // Quick Subject Focus Preset Selector (Auto Face/Speaker, Left Subject, Center, Right Subject, Action Motion)
+  const handleSelectSubjectFocusStrategy = useCallback(
+    (strategy: SubjectFocusStrategy) => {
+      let anchorX = 0.5;
+      let anchorY = 0.48;
+      let label = 'Auto Salient Subject';
+
+      if (strategy === 'left-subject') {
+        anchorX = currentTrack.leftSubjectX ?? 0.3;
+        label = 'Left Subject Focus';
+      } else if (strategy === 'right-subject') {
+        anchorX = currentTrack.rightSubjectX ?? 0.7;
+        label = 'Right Subject Focus';
+      } else if (strategy === 'face-speaker') {
+        anchorX = currentTrack.faceX ?? currentTrack.cropX;
+        anchorY = currentTrack.faceY ?? 0.42;
+        label = 'Auto Face / Speaker';
+      } else if (strategy === 'action-motion') {
+        anchorX = currentTrack.motionX ?? currentTrack.cropX;
+        anchorY = currentTrack.motionY ?? 0.5;
+        label = 'Action / Motion Focus';
+      } else if (strategy === 'static-lock') {
+        anchorX = 0.5;
+        anchorY = 0.5;
+        label = 'Center 9:16 Lock';
+      }
+
+      applySubjectFocusConfig({
+        strategy,
+        anchorX,
+        anchorY,
+        anchorTime: playheadTime,
+        label,
+      });
+
+      setMarkerNotice(`9:16 Subject Focus set to: ${label}`);
+      setTimeout(() => setMarkerNotice(null), 2400);
+    },
+    [currentTrack, playheadTime, applySubjectFocusConfig]
+  );
+
+  // Click or Drag directly on the 16:9 Source Video to pick the exact subject to keep centered in 9:16!
+  const handlePointerOnSourceVideo = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!sourceOverlayWrapRef.current || !activeClip) return;
+    const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
+    const normX = Math.max(0.16, Math.min(0.84, (e.clientX - rect.left) / rect.width));
+    const normY = Math.max(0.24, Math.min(0.76, (e.clientY - rect.top) / rect.height));
+
+    const sampledRgb = sampleSubjectSignatureFromVideo(videoRef.current, normX, normY);
+    const strategy: SubjectFocusStrategy =
+      clickPickMode === 'static' ? 'static-lock' : 'click-track';
+
+    const label =
+      strategy === 'click-track'
+        ? `Tracked Subject (${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%)`
+        : `Locked Position (${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%)`;
+
+    applySubjectFocusConfig({
+      strategy,
+      anchorX: Number(normX.toFixed(4)),
+      anchorY: Number(normY.toFixed(4)),
+      anchorTime: Number(playheadTime.toFixed(2)),
+      targetColorRgb: sampledRgb,
+      label,
+    });
+  };
+
+  // Razor Cut at any specific clip timeline time (`targetClipTime` in 0 .. activeClip.duration)
+  const handleRazorSplitAtClipTime = useCallback(
+    (targetClipTime: number) => {
+      if (!activeClip) return;
+      const { sourceTime } = clipTimeToSourceTime(activeClip, targetClipTime);
+
+      let didSplit = false;
+      let newCutIdx = selectedCutIndex;
+
+      updateActiveTimelineClip((clip) => {
+        const nextSubCuts: SubCut[] = [];
+        for (let i = 0; i < clip.subCuts.length; i++) {
+          const cut = clip.subCuts[i];
+          if (
+            !didSplit &&
+            targetClipTime > cut.timelineStart + 0.2 &&
+            targetClipTime < cut.timelineEnd - 0.2 &&
+            sourceTime > cut.sourceStart + 0.2 &&
+            sourceTime < cut.sourceEnd - 0.2
+          ) {
+            didSplit = true;
+            newCutIdx = nextSubCuts.length + 1;
+            const splitSrc = Number(sourceTime.toFixed(2));
+            nextSubCuts.push({
+              ...cut,
+              id: `${cut.id}-a-${Date.now()}`,
+              sourceEnd: splitSrc,
+              label: `${cut.label.replace(/\s*\(Part.*\)/, '')} (Part 1)`,
+            });
+            nextSubCuts.push({
+              ...cut,
+              id: `${cut.id}-b-${Date.now()}`,
+              sourceStart: splitSrc,
+              label: `Cut @ ${formatSMPTETimecode(splitSrc).slice(3, 8)}`,
+              zoom: cut.zoom,
+            });
+          } else {
+            nextSubCuts.push(cut);
+          }
+        }
+        if (!didSplit) return clip;
+        const recalc = recalculateClipTimeline(nextSubCuts);
+        return {
+          ...clip,
+          subCuts: recalc.subCuts,
+          duration: recalc.duration,
+          sourceStart: recalc.sourceStart,
+          sourceEnd: recalc.sourceEnd,
+        };
+      });
+
+      if (didSplit) {
+        setSelectedCutIndex(newCutIdx);
+        activeCutIdxRef.current = newCutIdx;
+        handleSeekClipTime(targetClipTime);
+        setMarkerNotice(`✂ Razor cut at ${targetClipTime.toFixed(2)}s`);
+        setTimeout(() => setMarkerNotice(null), 2200);
+      }
+    },
+    [activeClip, selectedCutIndex, updateActiveTimelineClip, handleSeekClipTime]
+  );
+
+  // Split Active Clip at current playhead position
+  const handleSplitAtPlayhead = useCallback(() => {
+    handleRazorSplitAtClipTime(clipPlayheadTime);
+  }, [handleRazorSplitAtClipTime, clipPlayheadTime]);
+
+  // Delete (Ripple-Delete) the currently selected cut on the timeline
+  const handleDeleteSelectedCut = useCallback(() => {
+    if (!activeClip || activeClip.subCuts.length <= 1) return;
+    const idxToDelete = Math.min(selectedCutIndex, activeClip.subCuts.length - 1);
+    const deletedCut = activeClip.subCuts[idxToDelete];
+
+    updateActiveTimelineClip((clip) => {
+      if (clip.subCuts.length <= 1) return clip;
+      const filtered = clip.subCuts.filter((_, i) => i !== idxToDelete);
+      const recalc = recalculateClipTimeline(filtered);
+      return {
+        ...clip,
+        subCuts: recalc.subCuts,
+        duration: recalc.duration,
+        sourceStart: recalc.sourceStart,
+        sourceEnd: recalc.sourceEnd,
+      };
+    });
+
+    const nextIdx = Math.max(0, idxToDelete - 1);
+    setSelectedCutIndex(nextIdx);
+    activeCutIdxRef.current = nextIdx;
+    setMarkerNotice(
+      `Deleted Cut #${deletedCut.index} (${(deletedCut.sourceEnd - deletedCut.sourceStart).toFixed(1)}s removed)`
+    );
+    setTimeout(() => setMarkerNotice(null), 2500);
+  }, [activeClip, selectedCutIndex, updateActiveTimelineClip]);
+
+  // Save the currently selected cut on the timeline as its own standalone 9:16 Clip in the list
+  const handleSaveSelectedCutAsClip = useCallback(() => {
+    if (!activeSource || !activeClip) return;
+    const cut =
+      activeClip.subCuts[Math.min(selectedCutIndex, activeClip.subCuts.length - 1)] ||
+      activeClip.subCuts[0];
+    if (!cut) return;
+
+    const dur = Number((cut.sourceEnd - cut.sourceStart).toFixed(2));
+    const singleCut: SubCut = {
+      ...cut,
+      id: `saved-cut-${Date.now()}`,
+      index: 1,
+      timelineStart: 0,
+      timelineEnd: dur,
+    };
+
+    const newClip: GeneratedClip = {
+      id: `manual-clip-${Date.now()}`,
+      name: `Razor Clip (${formatSMPTETimecode(cut.sourceStart).slice(3, 8)}–${formatSMPTETimecode(cut.sourceEnd).slice(3, 8)})`,
+      sourceVideoId: activeSource.id,
+      schemeId: activeScheme.id,
+      schemeName: activeScheme.name,
+      clipCreationMode: 'clip-segment',
+      viralScore: 94,
+      hookReason: `Extracted from timeline Cut #${cut.index} (${dur.toFixed(1)}s)`,
+      sourceStart: cut.sourceStart,
+      sourceEnd: cut.sourceEnd,
+      duration: dur,
+      trackingMode: activeScheme.trackingMode,
+      subjectFocus: activeClip.subjectFocus,
+      trackingOffsetX: activeClip.trackingOffsetX,
+      trackingSmoothing: activeClip.trackingSmoothing,
+      zoomScale: cut.zoom,
+      captionText: activeClip.captionText,
+      captionStyle: activeClip.captionStyle,
+      safeZoneGuide: activeClip.safeZoneGuide,
+      subCuts: [singleCut],
+      captions: [],
+      manualKeyframes: [],
+    };
+
+    setGeneratedClips((prev) => [newClip, ...prev]);
+    setMarkerNotice(`Saved Cut #${cut.index} (${dur.toFixed(1)}s) to 9:16 Clips list!`);
+    setTimeout(() => setMarkerNotice(null), 2800);
+  }, [activeSource, activeClip, selectedCutIndex, activeScheme]);
+
+  // Set In Marker at Current Playhead (Shortcut: I)
+  const handleSetInMarkerAtPlayhead = useCallback(() => {
+    if (!activeSource) return;
+    const t = Number(Math.max(0, Math.min(activeSource.duration - 0.5, playheadTime)).toFixed(2));
+    setInMarker(t);
+    setOutMarker((prevOut) => {
+      if (prevOut === null || prevOut <= t + 0.5) {
+        return Number(
+          Math.min(
+            activeSource.duration,
+            t + Math.min(activeScheme.targetClipDuration || 20, activeSource.duration - t)
+          ).toFixed(2)
+        );
+      }
+      return prevOut;
+    });
+  }, [activeSource, playheadTime, activeScheme.targetClipDuration]);
+
+  // Set Out Marker at Current Playhead (Shortcut: O)
+  const handleSetOutMarkerAtPlayhead = useCallback(() => {
+    if (!activeSource) return;
+    const t = Number(Math.max(0.5, Math.min(activeSource.duration, playheadTime)).toFixed(2));
+    setOutMarker(t);
+    setInMarker((prevIn) => {
+      if (prevIn === null || prevIn >= t - 0.5) {
+        return Number(
+          Math.max(0, t - Math.min(activeScheme.targetClipDuration || 20, t)).toFixed(2)
+        );
+      }
+      return prevIn;
+    });
+  }, [activeSource, playheadTime, activeScheme.targetClipDuration]);
+
+  // Create a new 9:16 Clip from the current [inMarker, outMarker] selection
+  const handleCreateClipFromMarkers = useCallback(
+    (switchToNewClip: boolean, makeCondensedEdit = false) => {
+      if (!activeSource || inMarker === null || outMarker === null) return;
+      const start = Number(Math.max(0, Math.min(inMarker, outMarker)).toFixed(2));
+      const end = Number(
+        Math.min(
+          activeSource.duration,
+          Math.max(start + 1.0, Math.max(inMarker, outMarker))
+        ).toFixed(2)
+      );
+      const spanDur = Number((end - start).toFixed(2));
+
+      let subCuts: SubCut[];
+      let clipMode: ClipCreationMode = 'clip-segment';
+
+      if (makeCondensedEdit) {
+        clipMode = 'condensed-edit';
+        const targetDur = Math.min(spanDur, Math.max(3, activeScheme.targetClipDuration || 20));
+        subCuts = buildCondensedEditSubCuts(
+          targetDur,
+          activeSource,
+          activeScheme,
+          0,
+          1,
+          start,
+          end
+        );
+      } else {
+        subCuts = [
+          {
+            id: `manual-cut-${Date.now()}`,
+            index: 1,
+            sourceStart: start,
+            sourceEnd: end,
+            timelineStart: 0,
+            timelineEnd: spanDur,
+            label: `Marked Segment (${formatSMPTETimecode(start).slice(3, 8)}–${formatSMPTETimecode(end).slice(3, 8)})`,
+            zoom: 1.0,
+            cropBiasX: 0,
+            isBeatCut: false,
+          },
+        ];
+      }
+
+      const recalc = recalculateClipTimeline(subCuts);
+
+      const newClip: GeneratedClip = {
+        id: `manual-clip-${Date.now()}`,
+        name: makeCondensedEdit
+          ? `Compilation In→Out (${recalc.duration.toFixed(1)}s • ${recalc.subCuts.length} Cuts)`
+          : `Marked Clip (${formatSMPTETimecode(start).slice(3, 8)}–${formatSMPTETimecode(end).slice(3, 8)})`,
+        sourceVideoId: activeSource.id,
+        schemeId: activeScheme.id,
+        schemeName: activeScheme.name,
+        clipCreationMode: clipMode,
+        viralScore: 96,
+        hookReason: makeCondensedEdit
+          ? `Compilation of ${recalc.subCuts.length} highlights from marked range ${start.toFixed(1)}s–${end.toFixed(1)}s`
+          : `Manually clipped via In/Out markers (${start.toFixed(1)}s → ${end.toFixed(1)}s, ${recalc.duration.toFixed(1)}s)`,
+        sourceStart: recalc.sourceStart,
+        sourceEnd: recalc.sourceEnd,
+        duration: recalc.duration,
+        trackingMode: activeScheme.trackingMode,
+        subjectFocus: activeClip?.subjectFocus,
+        trackingOffsetX: 0,
+        trackingSmoothing: activeScheme.trackingSmoothing,
+        zoomScale: makeCondensedEdit ? activeScheme.punchInZoom : 1.0,
+        captionText: '',
+        captionStyle: activeScheme.captionStyle,
+        safeZoneGuide: activeScheme.safeZoneGuide,
+        subCuts: recalc.subCuts,
+        captions: [],
+        manualKeyframes: [],
+      };
+
+      setGeneratedClips((prev) => [newClip, ...prev]);
+
+      if (switchToNewClip) {
+        setTimelineMode('elected-clip');
+        setActiveClipId(newClip.id);
+        activeCutIdxRef.current = 0;
+        setSelectedCutIndex(0);
+        setClipPlayheadTime(0);
+        setPlayheadTime(recalc.subCuts[0]?.sourceStart ?? start);
+        setIsLoopingInOut(false);
+        if (videoRef.current) {
+          videoRef.current.currentTime = recalc.subCuts[0]?.sourceStart ?? start;
+        }
+        setMarkerNotice(
+          `Created & opened "${newClip.name}" (${recalc.duration.toFixed(1)}s) on timeline!`
+        );
+      } else {
+        setMarkerNotice(`Added "${newClip.name}" (${recalc.duration.toFixed(1)}s) to clips list!`);
+      }
+      setTimeout(() => setMarkerNotice(null), 3000);
+    },
+    [activeSource, inMarker, outMarker, activeScheme, activeClip?.subjectFocus]
+  );
+
+  // Select a Generated Clip and put it on the timeline by itself
+  const selectClip = useCallback((clip: GeneratedClip) => {
+    setTimelineMode('elected-clip');
+    setActiveClipId(clip.id);
+    setIsLoopingInOut(false);
+    activeCutIdxRef.current = 0;
+    setSelectedCutIndex(0);
+    setClipPlayheadTime(0);
+    const startSrc = clip.subCuts[0]?.sourceStart ?? clip.sourceStart;
+    setPlayheadTime(startSrc);
+    if (videoRef.current) {
+      videoRef.current.currentTime = startSrc;
+    }
+  }, []);
+
+  // Generate Best Viral Clips or Compilation Cutdowns from the Full Uploaded Video and immediately open #1 on the timeline!
+  const handleGenerateClipsFromFullVideo = useCallback(
+    async (modeOverride?: ClipCreationMode, customScheme?: EditingScheme) => {
+      if (!activeSource) return;
+      const baseScheme = customScheme || activeScheme;
+      const mode: ClipCreationMode = modeOverride || baseScheme.clipCreationMode || 'clip-segment';
+      const targetScheme: EditingScheme = {
+        ...baseScheme,
+        clipCreationMode: mode,
+      };
+      setActiveScheme(targetScheme);
+
+      const currentFocus = activeClip?.subjectFocus;
+      const freshClips = generateClipsFromScheme(activeSource, targetScheme).map((c) =>
+        currentFocus ? { ...c, subjectFocus: currentFocus } : c
+      );
+      setGeneratedClips(freshClips);
+      if (freshClips[0]) {
+        selectClip(freshClips[0]);
+      }
+
+      const modeLabel =
+        mode === 'condensed-edit' ? 'Compilation Cutdowns' : 'Best Viral Clips';
+      setMarkerNotice(
+        `Generated ${freshClips.length} ${modeLabel} (${targetScheme.targetClipDuration}s target) & loaded #1 on timeline!`
+      );
+      setTimeout(() => setMarkerNotice(null), 3500);
+
+      // Also query AI in background if API key is configured
+      const aiRes = await generateClipsWithMultimodalAI(activeSource, targetScheme, aiSettings);
+      if (aiRes.clips && aiRes.clips.length > 0) {
+        const withFocus = aiRes.clips.map((c) =>
+          currentFocus ? { ...c, subjectFocus: currentFocus } : c
+        );
+        setGeneratedClips(withFocus);
+        selectClip(withFocus[0]);
+      }
+    },
+    [activeSource, activeScheme, aiSettings, selectClip, activeClip?.subjectFocus]
+  );
+
+  // Keyboard shortcuts: Space (Play/Pause), C (Razor Blade Toggle), I (Set In), O (Set Out), Delete/Backspace (Delete Selected Cut)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (e.code === 'Space') {
         e.preventDefault();
-        handleTogglePlay();
+        handleTogglePlay(false);
+      } else if (e.code === 'KeyC') {
+        e.preventDefault();
+        setIsRazorMode((prev) => !prev);
+      } else if (e.code === 'KeyI') {
+        e.preventDefault();
+        handleSetInMarkerAtPlayhead();
+      } else if (e.code === 'KeyO') {
+        e.preventDefault();
+        handleSetOutMarkerAtPlayhead();
+      } else if (
+        (e.code === 'Delete' || e.code === 'Backspace') &&
+        activeClip &&
+        activeClip.subCuts.length > 1
+      ) {
+        e.preventDefault();
+        handleDeleteSelectedCut();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [handleTogglePlay]);
+  }, [
+    handleTogglePlay,
+    handleSetInMarkerAtPlayhead,
+    handleSetOutMarkerAtPlayhead,
+    handleDeleteSelectedCut,
+    activeClip,
+  ]);
 
-  const updateActiveClip = (updater: (clip: GeneratedClip) => GeneratedClip) => {
-    if (!activeClip) return;
-    setGeneratedClips((prev) =>
-      prev.map((c) => (c.id === activeClip.id ? updater(c) : c))
-    );
-  };
+  // Select Full Uploaded Video and put it on the timeline by itself
+  const selectFullVideoOnTimeline = useCallback(() => {
+    if (!activeSource) return;
+    if (!fullVideoClip) {
+      setFullVideoClip(createInitialFullVideoClip(activeSource, activeScheme));
+    }
+    setTimelineMode('full-source');
+    setIsLoopingInOut(false);
+    activeCutIdxRef.current = 0;
+    setSelectedCutIndex(0);
+    setClipPlayheadTime(0);
+    setPlayheadTime(0);
+    if (videoRef.current) {
+      videoRef.current.currentTime = 0;
+    }
+    if (inMarker === null || outMarker === null) {
+      setInMarker(0);
+      setOutMarker(
+        Number(
+          Math.min(activeSource.duration, activeScheme.targetClipDuration || 20).toFixed(2)
+        )
+      );
+    }
+  }, [
+    activeSource,
+    fullVideoClip,
+    createInitialFullVideoClip,
+    activeScheme,
+    inMarker,
+    outMarker,
+  ]);
 
-  // Dragging the 9:16 crop box directly over the native video
-  const handlePointerOnSourceVideo = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!sourceOverlayWrapRef.current || !activeClip) return;
-    const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
-    const normX = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
-    const normY = Math.max(0.05, Math.min(0.95, (e.clientY - rect.top) / rect.height));
-
-    updateActiveClip((clip) => ({
-      ...clip,
-      manualKeyframes: [
-        ...clip.manualKeyframes.filter((k) => Math.abs(k.time - playheadTime) > 0.35),
-        { time: Number(playheadTime.toFixed(2)), cropX: normX, cropY: normY },
-      ],
-    }));
-  };
-
-  // Upload & Analyze Real Video
+  // Upload & Analyze Real Video — Loads the Full Uploaded Video onto the timeline with NO automatic clipping!
   const handleUploadVideoFile = async (file: File) => {
     if (videoRef.current) videoRef.current.pause();
     setIsPlaying(false);
+    setIsLoopingInOut(false);
     setIsAnalyzing(true);
     setAnalysisStatus('Loading video & decoding audio...');
 
@@ -302,51 +1107,33 @@ export const App: React.FC = () => {
 
       setNativeDims({ width: analyzed.width, height: analyzed.height });
       setActiveSource(analyzed);
+      const initialFullClip = createInitialFullVideoClip(analyzed, activeScheme);
+      setFullVideoClip(initialFullClip);
 
-      // Immediately cut 9:16 clips from real high-energy audio windows & scene cuts
-      const initialClips = generateClipsFromScheme(analyzed, activeScheme);
-      setGeneratedClips(initialClips);
-      if (initialClips[0]) {
-        setActiveClipId(initialClips[0].id);
-        setPlayheadTime(initialClips[0].sourceStart);
-      }
+      // Clear any previously generated clips and place ONLY the Full Uploaded Video on the timeline
+      setGeneratedClips([]);
+      setActiveClipId(null);
+      setTimelineMode('full-source');
+      activeCutIdxRef.current = 0;
+      setSelectedCutIndex(0);
+      setClipPlayheadTime(0);
+      setPlayheadTime(0);
 
-      // Now call AI (Gemini / Claude / OpenAI) with real sampled frames + WAV audio
-      setAnalysisStatus(
-        `Running ${aiSettings.activeProvider.toUpperCase()} multimodal hook & transcript analysis...`
-      );
-      const aiRes = await generateClipsWithMultimodalAI(analyzed, activeScheme, aiSettings);
-      const aiClips = aiRes.clips;
-      if (aiClips && aiClips.length > 0) {
-        setGeneratedClips(aiClips);
-        setActiveClipId(aiClips[0].id);
-        setPlayheadTime(aiClips[0].sourceStart);
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `ai-done-${Date.now()}`,
-            role: 'assistant',
-            content: `Analyzed "${file.name}" (${analyzed.width}×${analyzed.height}, ${analyzed.duration}s) with ${aiRes.providerUsed} and created ${aiClips.length} 9:16 clips with subject tracking.`,
-            timestamp: new Date().toISOString(),
-            providerBadge: aiRes.providerUsed,
-            operationBadges: aiClips.map((c) => `${c.duration}s Clip`),
-          },
-        ]);
-      } else {
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `local-done-${Date.now()}`,
-            role: 'assistant',
-            content: `Loaded "${file.name}" (${analyzed.width}×${analyzed.height}, ${analyzed.duration}s) and generated ${initialClips.length} 9:16 clips from audio energy peaks & scene cuts.${
-              aiRes.error ? ` (${aiRes.error})` : ''
-            }`,
-            timestamp: new Date().toISOString(),
-            providerBadge: 'Audio & Scene Analyzer',
-            operationBadges: [`${initialClips.length} Clips Ready`, `${analyzed.width}×${analyzed.height} Native`],
-          },
-        ]);
-      }
+      // Set In/Out markers to the full video span (0 -> full duration) so nothing is pre-clipped
+      setInMarker(0);
+      setOutMarker(Number(analyzed.duration.toFixed(2)));
+
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: `upload-ready-${Date.now()}`,
+          role: 'assistant',
+          content: `Loaded "${file.name}" (${analyzed.width}×${analyzed.height}, ${analyzed.duration}s) onto the timeline. Nothing was clipped automatically — you can now pick your Subject Focus on the video, or click "Find Best Viral Clips" or "Generate Compilation Cutdowns" whenever you're ready.`,
+          timestamp: new Date().toISOString(),
+          providerBadge: 'Video Ready',
+          operationBadges: ['Full Video on Timeline', `${analyzed.duration}s`],
+        },
+      ]);
     } catch (err: any) {
       alert(`Failed to load video: ${err?.message || 'Unknown error'}`);
     } finally {
@@ -371,32 +1158,30 @@ export const App: React.FC = () => {
         'Clone the exact cut pacing, hook speed, and punch-in zoom energy.'
       );
 
-      const nextSchemes = [scheme, ...schemes];
+      const enrichedScheme: EditingScheme = {
+        ...scheme,
+        clipCreationMode: activeScheme.clipCreationMode || 'condensed-edit',
+        maxClipsCount: activeScheme.maxClipsCount || 4,
+        maxClipDuration: 180,
+      };
+
+      const nextSchemes = [enrichedScheme, ...schemes];
       setSchemes(nextSchemes);
       saveSchemesToStorage(nextSchemes);
-      setActiveScheme(scheme);
-
-      if (activeSource) {
-        const reCut = generateClipsFromScheme(activeSource, scheme);
-        setGeneratedClips(reCut);
-        if (reCut[0]) {
-          setActiveClipId(reCut[0].id);
-          handleSeek(reCut[0].sourceStart);
-        }
-      }
+      setActiveScheme(enrichedScheme);
 
       setChatMessages((prev) => [
         ...prev,
         {
           id: `ref-cloned-${Date.now()}`,
           role: 'assistant',
-          content: `${styleSummary} Saved new Editing Scheme: "${scheme.name}".`,
+          content: `${styleSummary} Saved new Editing Scheme: "${enrichedScheme.name}".`,
           timestamp: new Date().toISOString(),
           providerBadge: providerUsed,
           operationBadges: [
             `Cloned: ${file.name}`,
-            `${scheme.targetAvgShotLength}s ASL`,
-            `${scheme.punchInZoom}x Zoom`,
+            `${enrichedScheme.targetAvgShotLength}s ASL`,
+            `${enrichedScheme.punchInZoom}x Zoom`,
           ],
         },
       ]);
@@ -409,68 +1194,37 @@ export const App: React.FC = () => {
   };
 
   // Save or Re-Apply Editing Scheme
-  const handleSaveAndApplyScheme = (applyToVideo: boolean) => {
+  const handleSaveAndApplyScheme = (applyToVideo: boolean, schemeOverride?: EditingScheme) => {
+    const targetScheme = schemeOverride || activeScheme;
     setSchemes((prev) => {
-      const exists = prev.some((s) => s.id === activeScheme.id);
+      const exists = prev.some((s) => s.id === targetScheme.id);
       const next = exists
-        ? prev.map((s) => (s.id === activeScheme.id ? activeScheme : s))
-        : [activeScheme, ...prev];
+        ? prev.map((s) => (s.id === targetScheme.id ? targetScheme : s))
+        : [targetScheme, ...prev];
       saveSchemesToStorage(next);
       return next;
     });
 
     if (applyToVideo && activeSource) {
-      const fresh = generateClipsFromScheme(activeSource, activeScheme);
+      const currentFocus = activeClip?.subjectFocus;
+      const fresh = generateClipsFromScheme(activeSource, targetScheme).map((c) =>
+        currentFocus ? { ...c, subjectFocus: currentFocus } : c
+      );
       setGeneratedClips(fresh);
       if (fresh[0]) {
-        setActiveClipId(fresh[0].id);
-        handleSeek(fresh[0].sourceStart);
+        selectClip(fresh[0]);
       }
-      setSchemeSavedNotice('Saved & re-cut 9:16 clips!');
+      setSchemeSavedNotice(
+        `Generated ${fresh.length} ${
+          targetScheme.clipCreationMode === 'condensed-edit'
+            ? 'Compilation Cutdowns'
+            : 'Viral Clips'
+        } (${targetScheme.targetClipDuration}s)!`
+      );
     } else {
       setSchemeSavedNotice('Scheme saved!');
     }
     setTimeout(() => setSchemeSavedNotice(null), 2500);
-  };
-
-  // Split Active Clip at Playhead
-  const handleSplitAtPlayhead = () => {
-    if (!activeClip) return;
-    if (
-      playheadTime <= activeClip.sourceStart + 0.3 ||
-      playheadTime >= activeClip.sourceEnd - 0.3
-    ) {
-      return;
-    }
-
-    updateActiveClip((clip) => {
-      const nextSubCuts: SubCut[] = [];
-      let idx = 1;
-      for (const cut of clip.subCuts) {
-        if (playheadTime > cut.sourceStart + 0.25 && playheadTime < cut.sourceEnd - 0.25) {
-          const d1 = playheadTime - cut.sourceStart;
-          nextSubCuts.push({
-            ...cut,
-            id: `${cut.id}-a-${Date.now()}`,
-            index: idx++,
-            sourceEnd: Number(playheadTime.toFixed(2)),
-            timelineEnd: Number((cut.timelineStart + d1).toFixed(2)),
-          });
-          nextSubCuts.push({
-            ...cut,
-            id: `${cut.id}-b-${Date.now()}`,
-            index: idx++,
-            sourceStart: Number(playheadTime.toFixed(2)),
-            timelineStart: Number((cut.timelineStart + d1).toFixed(2)),
-            label: 'Split Cut',
-            zoom: cut.zoom === 1 ? 1.2 : 1.0,
-          });
-        } else {
-          nextSubCuts.push({ ...cut, index: idx++ });
-        }
-      }
-      return { ...clip, subCuts: nextSubCuts };
-    });
   };
 
   // Send Cut Iteration Feedback in Chat
@@ -488,10 +1242,20 @@ export const App: React.FC = () => {
         {
           id: `a-${Date.now() + 1}`,
           role: 'assistant',
-          content: 'Please upload a video first so I have a clip on the timeline to edit.',
+          content: 'Please upload a video first so I have a video or clip on the timeline to edit.',
           timestamp: new Date().toISOString(),
         },
       ]);
+      return;
+    }
+
+    const lowerPrompt = promptText.toLowerCase();
+    if (lowerPrompt.includes('find best viral')) {
+      handleGenerateClipsFromFullVideo('clip-segment');
+      return;
+    }
+    if (lowerPrompt.includes('create compilation')) {
+      handleGenerateClipsFromFullVideo('condensed-edit');
       return;
     }
 
@@ -502,7 +1266,7 @@ export const App: React.FC = () => {
       timestamp: new Date().toISOString(),
       clipId: activeClip.id,
       clipName: activeClip.name,
-      playheadTime,
+      playheadTime: clipPlayheadTime,
     };
     setChatMessages((prev) => [...prev, userMsg]);
     setIsCopilotBusy(true);
@@ -538,13 +1302,13 @@ export const App: React.FC = () => {
             captionText: activeClip.captionText,
             cuts: activeClip.subCuts.map((c) => ({
               id: c.id,
-              timeOffset: c.sourceStart,
+              timeOffset: c.timelineStart,
               label: c.label,
               zoom: c.zoom,
               cropCenterX: c.cropBiasX,
             })),
           },
-          currentPlayhead: playheadTime,
+          currentPlayhead: clipPlayheadTime,
           schemeName: activeScheme.name,
         }),
       });
@@ -553,99 +1317,151 @@ export const App: React.FC = () => {
       const operations = Array.isArray(data.operations) ? data.operations : [];
       const badges: string[] = [];
 
-      updateActiveClip((clip) => {
-        let next = { ...clip, subCuts: [...clip.subCuts] };
+      const genClipsOp = operations.find((op: any) => op.type === 'generate_edited_clips');
+      if (genClipsOp) {
+        const nextCount =
+          typeof genClipsOp.clipsCount === 'number'
+            ? Math.max(1, Math.min(12, genClipsOp.clipsCount))
+            : activeScheme.maxClipsCount;
+        const nextDur =
+          typeof genClipsOp.targetDuration === 'number'
+            ? Math.max(5, Math.min(180, genClipsOp.targetDuration))
+            : activeScheme.targetClipDuration;
+        const nextMode: ClipCreationMode = genClipsOp.clipMode || 'condensed-edit';
 
-        for (const op of operations) {
-          badges.push(op.summary || op.type);
+        const updatedScheme: EditingScheme = {
+          ...activeScheme,
+          maxClipsCount: nextCount,
+          targetClipDuration: nextDur,
+          clipCreationMode: nextMode,
+        };
+        setActiveScheme(updatedScheme);
 
-          if (op.type === 'trim_start' && typeof op.deltaSeconds === 'number') {
-            next.sourceStart = Number(
-              Math.max(0, Math.min(next.sourceEnd - 2, next.sourceStart + op.deltaSeconds)).toFixed(2)
-            );
-            next.duration = Number((next.sourceEnd - next.sourceStart).toFixed(2));
-            if (next.subCuts[0]) {
-              next.subCuts[0] = { ...next.subCuts[0], sourceStart: next.sourceStart };
-            }
-          } else if (op.type === 'trim_end' && typeof op.deltaSeconds === 'number') {
-            next.sourceEnd = Number(
-              Math.min(
-                activeSource.duration,
-                Math.max(next.sourceStart + 2, next.sourceEnd + op.deltaSeconds)
-              ).toFixed(2)
-            );
-            next.duration = Number((next.sourceEnd - next.sourceStart).toFixed(2));
-            if (next.subCuts.length > 0) {
-              const lastIdx = next.subCuts.length - 1;
-              next.subCuts[lastIdx] = { ...next.subCuts[lastIdx], sourceEnd: next.sourceEnd };
-            }
-          } else if (op.type === 'adjust_tracking_offset' && typeof op.offsetX === 'number') {
-            next.trackingOffsetX = Math.max(-0.35, Math.min(0.35, next.trackingOffsetX + op.offsetX));
-          } else if (op.type === 'center_subject') {
-            next.trackingOffsetX = 0;
-            next.manualKeyframes = [];
-          } else if (op.type === 'adjust_smoothing' && typeof op.smoothing === 'number') {
-            next.trackingSmoothing = Math.max(0.15, Math.min(0.96, op.smoothing));
-          } else if (op.type === 'set_zoom' && typeof op.zoom === 'number') {
-            const z = Math.max(1.0, Math.min(1.5, op.zoom));
-            next.zoomScale = z;
-            next.subCuts = next.subCuts.map((c) =>
-              playheadTime >= c.sourceStart && playheadTime <= c.sourceEnd
-                ? { ...c, zoom: z }
-                : c
-            );
-          } else if (op.type === 'repace_cuts' && typeof op.pacingMultiplier === 'number') {
-            const newAsl = Math.max(
-              0.8,
-              Math.min(6.0, activeScheme.targetAvgShotLength * op.pacingMultiplier)
-            );
-            const rebuilt: SubCut[] = [];
-            let cur = next.sourceStart;
-            let tlCur = 0;
-            let idx = 1;
-            while (cur < next.sourceEnd - 0.3) {
-              const endT = Math.min(next.sourceEnd, Number((cur + newAsl).toFixed(2)));
-              const dur = Number((endT - cur).toFixed(2));
-              rebuilt.push({
-                id: `repace-${idx}-${Date.now()}`,
-                index: idx,
-                sourceStart: cur,
-                sourceEnd: endT,
-                timelineStart: tlCur,
-                timelineEnd: Number((tlCur + dur).toFixed(2)),
-                label: idx % 2 === 0 ? 'Punch-In Cut' : `Cut #${idx}`,
-                zoom: idx % 2 === 0 ? next.zoomScale : 1.0,
-                cropBiasX: 0,
-              });
-              cur = endT;
-              tlCur += dur;
-              idx++;
-            }
-            next.subCuts = rebuilt;
-          } else if (op.type === 'update_caption' && op.captionText) {
-            next.captionText = op.captionText;
-          } else if (op.type === 'save_scheme_preset') {
-            const presetName = op.schemePresetName || `Custom ${activeScheme.name}`;
-            const saved: EditingScheme = {
-              ...activeScheme,
-              id: `scheme-${Date.now()}`,
-              name: presetName,
-              isBuiltIn: false,
-              createdAt: new Date().toISOString(),
-              trackingSmoothing: next.trackingSmoothing,
-              punchInZoom: next.zoomScale,
-            };
-            const nextList = [saved, ...schemes];
-            setSchemes(nextList);
-            saveSchemesToStorage(nextList);
-            setActiveScheme(saved);
-          }
+        const currentFocus = activeClip?.subjectFocus;
+        const freshClips = generateClipsFromScheme(activeSource, updatedScheme).map((c) =>
+          currentFocus ? { ...c, subjectFocus: currentFocus } : c
+        );
+        setGeneratedClips(freshClips);
+        if (freshClips[0]) {
+          selectClip(freshClips[0]);
         }
-        return next;
-      });
+        badges.push(
+          genClipsOp.summary ||
+            `Created ${freshClips.length} ${nextMode === 'condensed-edit' ? 'Compilations' : 'Viral Clips'} (${nextDur}s)`
+        );
+      } else {
+        updateActiveTimelineClip((clip) => {
+          let next = { ...clip, subCuts: [...clip.subCuts] };
 
-      if (operations.some((o: any) => o.type === 'split_at_playhead')) {
-        handleSplitAtPlayhead();
+          for (const op of operations) {
+            badges.push(op.summary || op.type);
+
+            if (op.type === 'trim_start' && typeof op.deltaSeconds === 'number') {
+              if (next.subCuts.length > 0) {
+                const first = next.subCuts[0];
+                const newStart = Number(
+                  Math.max(
+                    0,
+                    Math.min(first.sourceEnd - 0.5, first.sourceStart + op.deltaSeconds)
+                  ).toFixed(2)
+                );
+                next.subCuts[0] = { ...first, sourceStart: newStart };
+                const recalc = recalculateClipTimeline(next.subCuts);
+                next.subCuts = recalc.subCuts;
+                next.duration = recalc.duration;
+                next.sourceStart = recalc.sourceStart;
+                next.sourceEnd = recalc.sourceEnd;
+              }
+            } else if (op.type === 'trim_end' && typeof op.deltaSeconds === 'number') {
+              if (next.subCuts.length > 0) {
+                const lastIdx = next.subCuts.length - 1;
+                const last = next.subCuts[lastIdx];
+                const newEnd = Number(
+                  Math.min(
+                    activeSource.duration,
+                    Math.max(last.sourceStart + 0.5, last.sourceEnd + op.deltaSeconds)
+                  ).toFixed(2)
+                );
+                next.subCuts[lastIdx] = { ...last, sourceEnd: newEnd };
+                const recalc = recalculateClipTimeline(next.subCuts);
+                next.subCuts = recalc.subCuts;
+                next.duration = recalc.duration;
+                next.sourceStart = recalc.sourceStart;
+                next.sourceEnd = recalc.sourceEnd;
+              }
+            } else if (op.type === 'adjust_tracking_offset' && typeof op.offsetX === 'number') {
+              next.trackingOffsetX = Math.max(
+                -0.35,
+                Math.min(0.35, next.trackingOffsetX + op.offsetX)
+              );
+            } else if (op.type === 'center_subject') {
+              next.trackingOffsetX = 0;
+              next.manualKeyframes = [];
+              next.subjectFocus = {
+                strategy: 'auto-salient',
+                anchorX: 0.5,
+                anchorY: 0.48,
+                anchorTime: playheadTime,
+                label: 'Auto Salient Subject',
+              };
+            } else if (op.type === 'adjust_smoothing' && typeof op.smoothing === 'number') {
+              next.trackingSmoothing = Math.max(0.15, Math.min(0.96, op.smoothing));
+            } else if (op.type === 'set_zoom' && typeof op.zoom === 'number') {
+              const z = Math.max(1.0, Math.min(1.5, op.zoom));
+              next.zoomScale = z;
+              next.subCuts = next.subCuts.map((c) =>
+                playheadTime >= c.sourceStart - 0.05 && playheadTime <= c.sourceEnd + 0.05
+                  ? { ...c, zoom: z }
+                  : c
+              );
+            } else if (op.type === 'repace_cuts' && typeof op.pacingMultiplier === 'number') {
+              const newAsl = Math.max(
+                0.8,
+                Math.min(15.0, activeScheme.targetAvgShotLength * op.pacingMultiplier)
+              );
+              const rebuilt: SubCut[] = [];
+              for (const c of next.subCuts) {
+                let cur = c.sourceStart;
+                while (cur < c.sourceEnd - 0.3) {
+                  const endT = Math.min(c.sourceEnd, Number((cur + newAsl).toFixed(2)));
+                  rebuilt.push({
+                    ...c,
+                    id: `repace-${rebuilt.length + 1}-${Date.now()}`,
+                    sourceStart: cur,
+                    sourceEnd: endT,
+                    zoom: rebuilt.length % 2 === 1 ? next.zoomScale : 1.0,
+                  });
+                  cur = endT;
+                }
+              }
+              const recalc = recalculateClipTimeline(rebuilt);
+              next.subCuts = recalc.subCuts;
+              next.duration = recalc.duration;
+            } else if (op.type === 'update_caption' && op.captionText) {
+              next.captionText = op.captionText;
+            } else if (op.type === 'save_scheme_preset') {
+              const presetName = op.schemePresetName || `Custom ${activeScheme.name}`;
+              const saved: EditingScheme = {
+                ...activeScheme,
+                id: `scheme-${Date.now()}`,
+                name: presetName,
+                isBuiltIn: false,
+                createdAt: new Date().toISOString(),
+                trackingSmoothing: next.trackingSmoothing,
+                punchInZoom: next.zoomScale,
+              };
+              const nextList = [saved, ...schemes];
+              setSchemes(nextList);
+              saveSchemesToStorage(nextList);
+              setActiveScheme(saved);
+            }
+          }
+          return next;
+        });
+
+        if (operations.some((o: any) => o.type === 'split_at_playhead')) {
+          handleSplitAtPlayhead();
+        }
       }
 
       preEditSnapshot.summaryBadges = badges;
@@ -658,7 +1474,7 @@ export const App: React.FC = () => {
           role: 'assistant',
           content: data.reply || 'Updated clip cuts and 9:16 framing.',
           timestamp: new Date().toISOString(),
-          playheadTime,
+          playheadTime: clipPlayheadTime,
           providerBadge: data.liveApiUsed
             ? `${data.providerUsed} [Live]`
             : `${data.providerUsed} Engine`,
@@ -684,9 +1500,13 @@ export const App: React.FC = () => {
   const handleRevertSnapshot = (snapshotId: string) => {
     const snap = revisions.find((r) => r.id === snapshotId);
     if (!snap) return;
-    setGeneratedClips((prev) =>
-      prev.map((c) => (c.id === snap.clipSnapshot.id ? snap.clipSnapshot : c))
-    );
+    if (snap.clipSnapshot.id === '__full_source__') {
+      setFullVideoClip(snap.clipSnapshot);
+    } else {
+      setGeneratedClips((prev) =>
+        prev.map((c) => (c.id === snap.clipSnapshot.id ? snap.clipSnapshot : c))
+      );
+    }
   };
 
   // Export 9:16 Video
@@ -707,6 +1527,104 @@ export const App: React.FC = () => {
       setExportProgress(0);
     }
   };
+
+  // Helper to change Clip Mode ('clip-segment' vs 'condensed-edit') without auto-clipping until user clicks Generate
+  const handleSelectClipMode = (mode: ClipCreationMode) => {
+    const nextScheme: EditingScheme = { ...activeScheme, clipCreationMode: mode };
+    setActiveScheme(nextScheme);
+  };
+
+  // Helper to change Number of Clips without auto-clipping until user clicks Generate
+  const handleChangeClipsCount = (count: number) => {
+    const clamped = Math.max(1, Math.min(12, count));
+    setClipsCountTextInput(String(clamped));
+    const nextScheme: EditingScheme = { ...activeScheme, maxClipsCount: clamped };
+    setActiveScheme(nextScheme);
+  };
+
+  // Helper to change Target Clip Duration (5s .. 180s / 3 mins) without auto-clipping until user clicks Generate
+  const handleApplyTargetDuration = (seconds: number, reCutNow = false) => {
+    const clamped = Math.max(5, Math.min(180, Math.round(seconds)));
+    setDurationTextInput(String(clamped));
+    const nextScheme: EditingScheme = {
+      ...activeScheme,
+      targetClipDuration: clamped,
+      maxClipDuration: 180,
+    };
+    setActiveScheme(nextScheme);
+    if (reCutNow && activeSource && generatedClips.length > 0) {
+      const currentFocus = activeClip?.subjectFocus;
+      const fresh = generateClipsFromScheme(activeSource, nextScheme).map((c) =>
+        currentFocus ? { ...c, subjectFocus: currentFocus } : c
+      );
+      setGeneratedClips(fresh);
+      if (fresh[0]) {
+        selectClip(fresh[0]);
+      }
+    }
+  };
+
+  // Pointer drag handler on the Timeline Bar
+  const updateTimelineDragAtClientX = (
+    clientX: number,
+    handle: 'playhead' | 'in' | 'out'
+  ) => {
+    if (!timelineBarRef.current || !activeClip || !activeSource) return;
+    const rect = timelineBarRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const timelineSec = ratio * activeClip.duration;
+    const mappedSourceSec = Number(
+      clipTimeToSourceTime(activeClip, timelineSec).sourceTime.toFixed(2)
+    );
+
+    if (handle === 'in') {
+      const maxIn =
+        outMarker !== null ? Math.max(0, outMarker - 0.5) : activeSource.duration - 0.5;
+      const nextIn = Math.max(0, Math.min(maxIn, mappedSourceSec));
+      setInMarker(Number(nextIn.toFixed(2)));
+      handleSeekSourceTime(nextIn);
+    } else if (handle === 'out') {
+      const minOut =
+        inMarker !== null ? Math.min(activeSource.duration, inMarker + 0.5) : 0.5;
+      const nextOut = Math.max(minOut, Math.min(activeSource.duration, mappedSourceSec));
+      setOutMarker(Number(nextOut.toFixed(2)));
+      handleSeekSourceTime(nextOut);
+    } else {
+      handleSeekClipTime(timelineSec);
+    }
+  };
+
+  const currentClipMode: ClipCreationMode = activeScheme.clipCreationMode || 'clip-segment';
+  const inspectedCut =
+    activeClip?.subCuts[Math.min(selectedCutIndex, (activeClip?.subCuts.length || 1) - 1)] ||
+    activeCut;
+
+  const activeFocusStrategy: SubjectFocusStrategy =
+    activeClip?.subjectFocus?.strategy || 'auto-salient';
+
+  // Compute In/Out Marker positions in % on the current timeline when visible
+  const inMarkerTimelineSec =
+    activeClip && inMarker !== null ? sourceTimeToClipTime(activeClip, inMarker) : null;
+  const outMarkerTimelineSec =
+    activeClip && outMarker !== null ? sourceTimeToClipTime(activeClip, outMarker) : null;
+  const inMarkerPct =
+    activeClip && inMarkerTimelineSec !== null
+      ? Math.max(
+          0,
+          Math.min(100, (inMarkerTimelineSec / Math.max(0.1, activeClip.duration)) * 100)
+        )
+      : null;
+  const outMarkerPct =
+    activeClip && outMarkerTimelineSec !== null
+      ? Math.max(
+          0,
+          Math.min(100, (outMarkerTimelineSec / Math.max(0.1, activeClip.duration)) * 100)
+        )
+      : null;
+  const markedDuration =
+    inMarker !== null && outMarker !== null
+      ? Math.max(0, Number((outMarker - inMarker).toFixed(1)))
+      : 0;
 
   return (
     <div className="studio-shell">
@@ -734,16 +1652,29 @@ export const App: React.FC = () => {
         }}
       />
 
-      {/* Clean Professional Top Header Bar */}
+      {/* Clean Top Header Bar */}
       <header className="studio-topbar">
         <div className="studio-brand">
-          <div className="studio-pr-badge">Pr</div>
+          <div
+            style={{
+              width: 30,
+              height: 30,
+              borderRadius: 7,
+              background: 'rgba(45, 140, 235, 0.16)',
+              border: '1px solid rgba(96, 165, 250, 0.4)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Scissors size={15} color="#60a5fa" />
+          </div>
           <div>
             <div style={{ fontWeight: 700, fontSize: 14, letterSpacing: '-0.2px' }}>
               ClipMaker Studio
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-              9:16 Auto-Reframe, Custom Schemes &amp; Cut Copilot
+              Viral Clip Finder • Compilation Cutdowns • 9:16 Subject Focus Lock
             </div>
           </div>
         </div>
@@ -787,7 +1718,7 @@ export const App: React.FC = () => {
             title="Upload any reference video to copy its cut speed and zoom style into a new Editing Scheme"
           >
             <Wand2 size={14} />
-            Clone Reference Video Style
+            Clone Reference Style
           </button>
 
           {/* AI Provider Pill Switcher (Gemini default, Claude, OpenAI) */}
@@ -852,53 +1783,27 @@ export const App: React.FC = () => {
 
       {/* Main 3-Column Studio Workspace */}
       <main className="studio-workspace">
-        {/* LEFT COLUMN: Editing Schemes + Generated 9:16 Clips */}
+        {/* LEFT COLUMN: Viral Clips vs Compilation Cutdowns Generator + Clips List */}
         <aside className="studio-panel">
           <div className="studio-panel-header">
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Sparkles size={14} color="#60a5fa" />
-              1. Editing Scheme Criteria
+              1. Clip &amp; Compilation Generator
             </span>
             <div style={{ display: 'flex', gap: 5 }}>
               <button
                 className="btn"
                 style={{ padding: '3px 8px', fontSize: 11 }}
-                onClick={() => {
-                  const fresh: EditingScheme = {
-                    ...activeScheme,
-                    id: `scheme-${Date.now()}`,
-                    name: `Custom Scheme #${schemes.length + 1}`,
-                    isBuiltIn: false,
-                    createdAt: new Date().toISOString(),
-                    clonedFromReference: undefined,
-                  };
-                  const next = [fresh, ...schemes];
-                  setSchemes(next);
-                  saveSchemesToStorage(next);
-                  setActiveScheme(fresh);
-                }}
+                onClick={() => handleSaveAndApplyScheme(false)}
+                title="Save current settings as a reusable scheme"
               >
-                <Plus size={12} />
-                New
+                <Save size={11} />
+                Save Preset
               </button>
-              {!activeScheme.isBuiltIn && schemes.length > 1 && (
-                <button
-                  className="btn"
-                  style={{ padding: '3px 7px', fontSize: 11, color: '#f87171' }}
-                  onClick={() => {
-                    const next = schemes.filter((s) => s.id !== activeScheme.id);
-                    setSchemes(next);
-                    saveSchemesToStorage(next);
-                    setActiveScheme(next[0]);
-                  }}
-                >
-                  <Trash2 size={12} />
-                </button>
-              )}
             </div>
           </div>
 
-          {/* Scheme Customizer Form */}
+          {/* Generator Controls */}
           <div
             style={{
               padding: 12,
@@ -908,185 +1813,365 @@ export const App: React.FC = () => {
               gap: 10,
             }}
           >
+            {/* Primary Mode Choice: Find Best Viral Clips vs Create Compilation Cutdowns */}
             <div>
-              <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                Selected Scheme Preset
-              </label>
-              <select
-                className="select-field"
-                value={activeScheme.id}
-                onChange={(e) => {
-                  const found = schemes.find((s) => s.id === e.target.value);
-                  if (found) {
-                    setActiveScheme(found);
-                    if (activeSource) {
-                      const clips = generateClipsFromScheme(activeSource, found);
-                      setGeneratedClips(clips);
-                      if (clips[0]) {
-                        setActiveClipId(clips[0].id);
-                        handleSeek(clips[0].sourceStart);
-                      }
-                    }
-                  }
+              <label
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-secondary)',
+                  display: 'block',
+                  marginBottom: 5,
+                  fontWeight: 600,
                 }}
               >
-                {schemes.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.clonedFromReference ? `★ [Cloned] ${s.name}` : s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                Scheme Name
+                What do you want to create?
               </label>
-              <input
-                type="text"
-                className="input-field"
-                value={activeScheme.name}
-                onChange={(e) => setActiveScheme({ ...activeScheme, name: e.target.value })}
-              />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => handleSelectClipMode('clip-segment')}
+                  style={{
+                    padding: '8px 9px',
+                    borderRadius: 6,
+                    border:
+                      currentClipMode === 'clip-segment'
+                        ? '1.5px solid var(--accent-blue)'
+                        : '1px solid var(--border-subtle)',
+                    background:
+                      currentClipMode === 'clip-segment'
+                        ? 'rgba(45, 140, 235, 0.2)'
+                        : 'var(--bg-input)',
+                    color: '#fff',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'all 0.12s',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      fontWeight: 700,
+                      fontSize: 11.5,
+                      color: currentClipMode === 'clip-segment' ? '#60a5fa' : '#e5e7eb',
+                    }}
+                  >
+                    <Flame size={13} color="#f59e0b" />
+                    Best Viral Clips
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 2 }}>
+                    Continuous top-scoring viral segments
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSelectClipMode('condensed-edit')}
+                  style={{
+                    padding: '8px 9px',
+                    borderRadius: 6,
+                    border:
+                      currentClipMode === 'condensed-edit'
+                        ? '1.5px solid #8b5cf6'
+                        : '1px solid var(--border-subtle)',
+                    background:
+                      currentClipMode === 'condensed-edit'
+                        ? 'rgba(139, 92, 246, 0.22)'
+                        : 'var(--bg-input)',
+                    color: '#fff',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'all 0.12s',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      fontWeight: 700,
+                      fontSize: 11.5,
+                      color: currentClipMode === 'condensed-edit' ? '#c4b5fd' : '#e5e7eb',
+                    }}
+                  >
+                    <Layers size={13} color="#a78bfa" />
+                    Compilation Cutdown
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 2 }}>
+                    Stitches best highlights into length
+                  </div>
+                </button>
+              </div>
             </div>
 
-            {activeScheme.clonedFromReference && (
+            {/* Clip Length (up to 3 mins / 180s with BOTH Text Input + Slider) */}
+            <div
+              style={{
+                background: 'rgba(18, 20, 24, 0.7)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 6,
+                padding: '8px 10px',
+              }}
+            >
               <div
                 style={{
-                  padding: '6px 9px',
-                  borderRadius: 6,
-                  background: 'rgba(139, 92, 246, 0.14)',
-                  border: '1px solid rgba(139, 92, 246, 0.35)',
-                  fontSize: 11,
-                  color: '#ddd6fe',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
+                  marginBottom: 6,
                 }}
               >
-                Cloned from <strong>{activeScheme.clonedFromReference.referenceFileName}</strong> (
-                {activeScheme.clonedFromReference.averageShotLength}s ASL)
+                <div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: '#e5e7eb' }}>
+                    Target Length (5s – 3m / 180s)
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-secondary)' }}>
+                    Type seconds (e.g. 90) or mm:ss (e.g. 2:30) or drag slider
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <input
+                    type="text"
+                    className="input-field"
+                    style={{
+                      width: 68,
+                      padding: '4px 7px',
+                      textAlign: 'center',
+                      fontWeight: 700,
+                      color: '#60a5fa',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                    value={durationTextInput}
+                    title="Enter clip length in seconds (5–180) or mm:ss (e.g. 1:30, 3:00)"
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setDurationTextInput(val);
+                      const parsed = parseDurationTextToSeconds(
+                        val,
+                        activeScheme.targetClipDuration
+                      );
+                      setActiveScheme((prev) => ({
+                        ...prev,
+                        targetClipDuration: parsed,
+                        maxClipDuration: 180,
+                      }));
+                    }}
+                    onBlur={() => {
+                      const parsed = parseDurationTextToSeconds(
+                        durationTextInput,
+                        activeScheme.targetClipDuration
+                      );
+                      handleApplyTargetDuration(parsed, false);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const parsed = parseDurationTextToSeconds(
+                          durationTextInput,
+                          activeScheme.targetClipDuration
+                        );
+                        handleApplyTargetDuration(parsed, false);
+                      }
+                    }}
+                  />
+                  <span style={{ fontSize: 10.5, color: 'var(--text-secondary)' }}>sec</span>
+                </div>
               </div>
-            )}
 
+              <input
+                type="range"
+                min={5}
+                max={180}
+                step={1}
+                value={activeScheme.targetClipDuration}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  setDurationTextInput(String(v));
+                  setActiveScheme({
+                    ...activeScheme,
+                    targetClipDuration: v,
+                    maxClipDuration: 180,
+                  });
+                }}
+                onMouseUp={() => handleApplyTargetDuration(activeScheme.targetClipDuration, false)}
+                style={{ width: '100%' }}
+              />
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: 9.5,
+                  color: 'var(--text-muted)',
+                  marginTop: 2,
+                }}
+              >
+                <span>5s</span>
+                <span>30s</span>
+                <span>1m (60s)</span>
+                <span>2m (120s)</span>
+                <span style={{ color: '#93c5fd', fontWeight: 600 }}>
+                  {formatDurationBadge(activeScheme.targetClipDuration)}
+                </span>
+                <span>3m (180s)</span>
+              </div>
+            </div>
+
+            {/* How Many Clips + Shot Length (ASL) */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Clip Length</span>
-                  <strong style={{ color: '#60a5fa' }}>{activeScheme.targetClipDuration}s</strong>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    fontSize: 11,
+                    marginBottom: 4,
+                  }}
+                >
+                  <span style={{ color: 'var(--text-secondary)' }}>How Many Clips</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    className="input-field"
+                    style={{
+                      width: 48,
+                      padding: '2px 5px',
+                      textAlign: 'center',
+                      fontWeight: 700,
+                      color: '#34d399',
+                    }}
+                    value={clipsCountTextInput}
+                    onChange={(e) => {
+                      setClipsCountTextInput(e.target.value);
+                      const n = parseInt(e.target.value, 10);
+                      if (Number.isFinite(n) && n >= 1 && n <= 12) {
+                        handleChangeClipsCount(n);
+                      }
+                    }}
+                    onBlur={() => {
+                      const n = parseInt(clipsCountTextInput, 10);
+                      handleChangeClipsCount(Number.isFinite(n) ? n : activeScheme.maxClipsCount);
+                    }}
+                  />
                 </div>
                 <input
                   type="range"
-                  min={8}
-                  max={60}
-                  value={activeScheme.targetClipDuration}
-                  onChange={(e) =>
-                    setActiveScheme({
-                      ...activeScheme,
-                      targetClipDuration: parseInt(e.target.value, 10),
-                    })
-                  }
+                  min={1}
+                  max={12}
+                  step={1}
+                  value={activeScheme.maxClipsCount}
+                  onChange={(e) => handleChangeClipsCount(parseInt(e.target.value, 10))}
                   style={{ width: '100%' }}
                 />
               </div>
 
               <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Cut Speed (ASL)</span>
-                  <strong style={{ color: '#60a5fa' }}>
-                    {activeScheme.targetAvgShotLength.toFixed(1)}s
-                  </strong>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    fontSize: 11,
+                    marginBottom: 4,
+                  }}
+                >
+                  <span style={{ color: 'var(--text-secondary)' }}>Shot Pace (ASL)</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <input
+                      type="number"
+                      min={0.8}
+                      max={15.0}
+                      step={0.1}
+                      className="input-field"
+                      style={{
+                        width: 52,
+                        padding: '2px 5px',
+                        textAlign: 'center',
+                        fontWeight: 700,
+                        color: '#60a5fa',
+                      }}
+                      value={aslTextInput}
+                      onChange={(e) => {
+                        setAslTextInput(e.target.value);
+                        const v = parseFloat(e.target.value);
+                        if (Number.isFinite(v) && v >= 0.8 && v <= 15) {
+                          setActiveScheme({
+                            ...activeScheme,
+                            targetAvgShotLength: Number(v.toFixed(1)),
+                          });
+                        }
+                      }}
+                    />
+                    <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>s</span>
+                  </div>
                 </div>
                 <input
                   type="range"
                   min={0.8}
-                  max={6.0}
+                  max={10.0}
                   step={0.1}
-                  value={activeScheme.targetAvgShotLength}
-                  onChange={(e) =>
+                  value={Math.min(10, activeScheme.targetAvgShotLength)}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    setAslTextInput(String(v));
                     setActiveScheme({
                       ...activeScheme,
-                      targetAvgShotLength: parseFloat(e.target.value),
-                    })
-                  }
-                  style={{ width: '100%' }}
-                />
-              </div>
-
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Track Smoothness</span>
-                  <strong style={{ color: '#60a5fa' }}>
-                    {Math.round(activeScheme.trackingSmoothing * 100)}%
-                  </strong>
-                </div>
-                <input
-                  type="range"
-                  min={0.3}
-                  max={0.96}
-                  step={0.02}
-                  value={activeScheme.trackingSmoothing}
-                  onChange={(e) => {
-                    const val = parseFloat(e.target.value);
-                    setActiveScheme({ ...activeScheme, trackingSmoothing: val });
-                    updateActiveClip((c) => ({ ...c, trackingSmoothing: val }));
-                  }}
-                  style={{ width: '100%' }}
-                />
-              </div>
-
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>Punch-In Zoom</span>
-                  <strong style={{ color: '#60a5fa' }}>
-                    {activeScheme.punchInZoom.toFixed(2)}x
-                  </strong>
-                </div>
-                <input
-                  type="range"
-                  min={1.0}
-                  max={1.4}
-                  step={0.02}
-                  value={activeScheme.punchInZoom}
-                  onChange={(e) => {
-                    const val = parseFloat(e.target.value);
-                    setActiveScheme({ ...activeScheme, punchInZoom: val });
-                    updateActiveClip((c) => ({ ...c, zoomScale: val }));
+                      targetAvgShotLength: v,
+                    });
                   }}
                   style={{ width: '100%' }}
                 />
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                className="btn"
-                style={{ flex: 1 }}
-                onClick={() => handleSaveAndApplyScheme(false)}
-              >
-                <Save size={13} />
-                Save Scheme
-              </button>
-              <button
-                className="btn btn-primary"
-                style={{ flex: 1 }}
-                onClick={() => handleSaveAndApplyScheme(true)}
-                disabled={!activeSource}
-              >
-                <Sparkles size={13} />
-                Apply &amp; Re-Cut
-              </button>
-            </div>
+            {/* Primary Generate Action Button */}
+            <button
+              className={currentClipMode === 'condensed-edit' ? 'btn btn-purple' : 'btn btn-primary'}
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                fontWeight: 700,
+                fontSize: 12,
+                justifyContent: 'center',
+              }}
+              onClick={() => handleGenerateClipsFromFullVideo(currentClipMode)}
+              disabled={!activeSource}
+            >
+              <Sparkles size={14} />
+              {currentClipMode === 'condensed-edit'
+                ? `Generate ${activeScheme.maxClipsCount} Compilation Cutdowns (${activeScheme.targetClipDuration}s)`
+                : `Find ${activeScheme.maxClipsCount} Best Viral Clips (${activeScheme.targetClipDuration}s)`}
+            </button>
 
             {schemeSavedNotice && (
-              <div style={{ fontSize: 11.5, color: '#34d399', textAlign: 'center', fontWeight: 500 }}>
+              <div
+                style={{
+                  fontSize: 11.5,
+                  color: '#34d399',
+                  textAlign: 'center',
+                  fontWeight: 500,
+                }}
+              >
                 ✓ {schemeSavedNotice}
               </div>
             )}
           </div>
 
-          {/* Generated 9:16 Clips List */}
+          {/* Source Video & Generated 9:16 Clips List */}
           <div className="studio-panel-header">
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Film size={14} color="#60a5fa" />
-              2. Generated 9:16 Clips ({generatedClips.length})
+              2. Source Video &amp; Ranked Results ({generatedClips.length})
+            </span>
+            <span style={{ fontSize: 10.5, color: 'var(--text-secondary)', fontWeight: 400 }}>
+              {timelineMode === 'full-source'
+                ? 'Full Video Active'
+                : currentClipMode === 'condensed-edit'
+                  ? 'Compilations'
+                  : 'Viral Clips'}
             </span>
           </div>
 
@@ -1100,7 +2185,7 @@ export const App: React.FC = () => {
               gap: 8,
             }}
           >
-            {generatedClips.length === 0 ? (
+            {!activeSource ? (
               <div
                 style={{
                   padding: 20,
@@ -1110,106 +2195,287 @@ export const App: React.FC = () => {
                   lineHeight: 1.5,
                 }}
               >
-                Upload a video to automatically generate ranked 9:16 clips here.
+                Upload a video to automatically find the top{' '}
+                <strong>{activeScheme.maxClipsCount} Viral Clips</strong> or build{' '}
+                <strong>Compilation Cutdowns ({activeScheme.targetClipDuration}s each)</strong>.
               </div>
             ) : (
-              generatedClips.map((clip, index) => {
-                const selected = clip.id === activeClip?.id;
-                return (
+              <>
+                {/* Full Uploaded Video Card */}
+                <div
+                  onClick={selectFullVideoOnTimeline}
+                  style={{
+                    padding: 10,
+                    borderRadius: 6,
+                    background:
+                      timelineMode === 'full-source'
+                        ? 'rgba(16, 185, 129, 0.16)'
+                        : 'rgba(30, 41, 59, 0.65)',
+                    border:
+                      timelineMode === 'full-source'
+                        ? '1.5px solid #10b981'
+                        : '1px solid #334155',
+                    cursor: 'pointer',
+                    transition: 'all 0.12s',
+                  }}
+                >
                   <div
-                    key={clip.id}
-                    onClick={() => {
-                      setActiveClipId(clip.id);
-                      handleSeek(clip.sourceStart);
-                    }}
                     style={{
-                      padding: 10,
-                      borderRadius: 6,
-                      background: selected ? 'rgba(45, 140, 235, 0.16)' : 'var(--bg-card)',
-                      border: selected
-                        ? '1px solid var(--accent-blue)'
-                        : '1px solid var(--border-subtle)',
-                      cursor: 'pointer',
-                      transition: 'all 0.12s',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: 4,
+                      gap: 6,
                     }}
                   >
-                    <div
+                    <span
                       style={{
                         display: 'flex',
-                        justifyContent: 'space-between',
                         alignItems: 'center',
-                        marginBottom: 4,
+                        gap: 6,
+                        fontWeight: 700,
+                        fontSize: 12.5,
+                        color: timelineMode === 'full-source' ? '#34d399' : '#f3f4f6',
                       }}
                     >
-                      <span style={{ fontWeight: 600, fontSize: 12.5 }}>
-                        Clip #{index + 1} ({clip.duration.toFixed(1)}s)
-                      </span>
-                      <span
+                      <Video size={14} color="#34d399" />
+                      Full Uploaded Video ({(fullVideoClip?.duration ?? activeSource.duration).toFixed(1)}s)
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 9.5,
+                        fontWeight: 700,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        background:
+                          timelineMode === 'full-source'
+                            ? '#10b981'
+                            : 'rgba(16, 185, 129, 0.18)',
+                        color: timelineMode === 'full-source' ? '#052e16' : '#6ee7b7',
+                      }}
+                    >
+                      {timelineMode === 'full-source' ? 'ON TIMELINE' : 'LOAD FULL VIDEO'}
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 11,
+                      color: '#93c5fd',
+                      marginBottom: 6,
+                    }}
+                  >
+                    {activeSource.name} • {fullVideoClip?.subCuts.length || 1}{' '}
+                    {(fullVideoClip?.subCuts.length || 1) === 1 ? 'cut' : 'cuts'}
+                  </div>
+
+                  {/* Direct 1-click actions on the Full Video Card */}
+                  <div
+                    style={{ display: 'flex', gap: 6, marginTop: 4 }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{
+                        flex: 1,
+                        padding: '5px 8px',
+                        fontSize: 11,
+                        fontWeight: 600,
+                      }}
+                      onClick={() => handleGenerateClipsFromFullVideo('clip-segment')}
+                      title="Find the best continuous viral clips from this video"
+                    >
+                      <Flame size={12} />
+                      Best Viral Clips
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-purple"
+                      style={{
+                        flex: 1,
+                        padding: '5px 8px',
+                        fontSize: 11,
+                        fontWeight: 600,
+                      }}
+                      onClick={() => handleGenerateClipsFromFullVideo('condensed-edit')}
+                      title="Create multi-shot compilation cutdowns from this video"
+                    >
+                      <Layers size={12} />
+                      Compilation Cutdown
+                    </button>
+                  </div>
+                </div>
+
+                {/* Divider Label */}
+                <div
+                  style={{
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    color: 'var(--text-secondary)',
+                    letterSpacing: '0.4px',
+                    textTransform: 'uppercase',
+                    marginTop: 4,
+                    paddingLeft: 2,
+                  }}
+                >
+                  Ranked Clips &amp; Compilations ({generatedClips.length})
+                </div>
+
+                {generatedClips.length === 0 ? (
+                  <div
+                    style={{
+                      padding: '16px 12px',
+                      borderRadius: 6,
+                      border: '1px dashed var(--border-subtle)',
+                      background: 'rgba(18, 20, 24, 0.5)',
+                      textAlign: 'center',
+                      fontSize: 11.5,
+                      color: 'var(--text-secondary)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    No clips generated yet. Your full uploaded video is on the timeline — configure your settings above and click{' '}
+                    <strong style={{ color: '#93c5fd' }}>Find Best Viral Clips</strong> or{' '}
+                    <strong style={{ color: '#c4b5fd' }}>Compilation Cutdown</strong> when ready.
+                  </div>
+                ) : (
+                  /* Generated & Manually Clipped 9:16 Clips */
+                  generatedClips.map((clip) => {
+                  const selected =
+                    timelineMode === 'elected-clip' && clip.id === selectedClipObj?.id;
+                  const isEditMode = clip.clipCreationMode === 'condensed-edit';
+                  const isManual = clip.id.startsWith('manual-clip-');
+                  return (
+                    <div
+                      key={clip.id}
+                      onClick={() => selectClip(clip)}
+                      style={{
+                        padding: 10,
+                        borderRadius: 6,
+                        background: selected ? 'rgba(45, 140, 235, 0.16)' : 'var(--bg-card)',
+                        border: selected
+                          ? '1.5px solid var(--accent-blue)'
+                          : '1px solid var(--border-subtle)',
+                        cursor: 'pointer',
+                        transition: 'all 0.12s',
+                      }}
+                    >
+                      <div
                         style={{
-                          fontSize: 10.5,
-                          fontWeight: 600,
-                          padding: '1px 6px',
-                          borderRadius: 4,
-                          background: 'rgba(16, 185, 129, 0.16)',
-                          color: '#34d399',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          marginBottom: 4,
+                          gap: 6,
                         }}
                       >
-                        Score {clip.viralScore}%
-                      </span>
+                        <span style={{ fontWeight: 600, fontSize: 12 }}>
+                          {clip.name}
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                          <span
+                            style={{
+                              fontSize: 9.5,
+                              fontWeight: 700,
+                              padding: '1px 5px',
+                              borderRadius: 3,
+                              background: isManual
+                                ? 'rgba(245, 158, 11, 0.22)'
+                                : isEditMode
+                                  ? 'rgba(139, 92, 246, 0.22)'
+                                  : 'rgba(45, 140, 235, 0.2)',
+                              color: isManual
+                                ? '#fcd34d'
+                                : isEditMode
+                                  ? '#c4b5fd'
+                                  : '#93c5fd',
+                            }}
+                          >
+                            {isManual ? 'CUSTOM' : isEditMode ? 'COMPILATION' : 'VIRAL CLIP'}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: 10.5,
+                              fontWeight: 700,
+                              padding: '1px 6px',
+                              borderRadius: 4,
+                              background: 'rgba(16, 185, 129, 0.18)',
+                              color: '#34d399',
+                            }}
+                          >
+                            {clip.viralScore}%
+                          </span>
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 11,
+                          color: '#93c5fd',
+                          marginBottom: 3,
+                        }}
+                      >
+                        {isEditMode
+                          ? `${clip.subCuts.length} stitched shots • ${clip.duration.toFixed(1)}s total`
+                          : `Source ${formatSMPTETimecode(clip.sourceStart).slice(3, 8)} → ${formatSMPTETimecode(clip.sourceEnd).slice(3, 8)} • ${clip.duration.toFixed(1)}s`}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                        {clip.hookReason}
+                      </div>
                     </div>
-                    <div
-                      style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
-                        color: '#93c5fd',
-                        marginBottom: 3,
-                      }}
-                    >
-                      {formatSMPTETimecode(clip.sourceStart).slice(3)} →{' '}
-                      {formatSMPTETimecode(clip.sourceEnd).slice(3)} • {clip.subCuts.length} cuts
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                      {clip.hookReason}
-                    </div>
-                  </div>
-                );
-              })
+                  );
+                })
+                )}
+              </>
             )}
           </div>
         </aside>
 
-        {/* CENTER STAGE: Native Source Video + 9:16 Output Preview + Simple Timeline Trim Bar */}
+        {/* CENTER STAGE: Native Source Video + 9:16 Output Preview + Subject Focus Bar + Timeline */}
         <section className="studio-panel" style={{ display: 'flex', flexDirection: 'column' }}>
           <div className="studio-panel-header">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span>
                 {activeSource
-                  ? `Source: ${activeSource.name} (${nativeDims.width}×${nativeDims.height} Native)`
-                  : 'Video Preview & 9:16 Subject Tracking'}
+                  ? timelineMode === 'full-source'
+                    ? `Timeline: Full Uploaded Video — ${activeSource.name} (${(activeClip?.duration ?? activeSource.duration).toFixed(1)}s)`
+                    : activeClip
+                      ? `Timeline: ${activeClip.name}`
+                      : `Source: ${activeSource.name}`
+                  : 'Video Preview & 9:16 Subject Focus'}
               </span>
-              {activeSource && (
-                <span
+              {activeSource && timelineMode !== 'full-source' && (
+                <button
+                  className="btn"
                   style={{
+                    padding: '3px 9px',
                     fontSize: 11,
-                    color: 'var(--text-secondary)',
-                    fontWeight: 400,
+                    borderColor: 'rgba(16, 185, 129, 0.45)',
+                    color: '#6ee7b7',
+                    background: 'rgba(16, 185, 129, 0.12)',
                   }}
+                  onClick={selectFullVideoOnTimeline}
+                  title="Put the whole uploaded video onto the timeline by itself"
                 >
-                  • Drag the blue 9:16 box on the source video to adjust centering
-                </span>
+                  <Video size={12} />
+                  Load Full Video on Timeline
+                </button>
               )}
             </div>
 
-            {activeSource && (
+            {activeSource && activeClip && (
               <span className="timecode-pill">
-                {formatSMPTETimecode(playheadTime)} / {formatSMPTETimecode(activeSource.duration)}
+                {timelineMode === 'full-source' ? 'Full Video ' : 'Clip '}
+                {formatSMPTETimecode(clipPlayheadTime)} /{' '}
+                {formatSMPTETimecode(activeClip.duration)}
               </span>
             )}
           </div>
 
           {/* Center Viewport */}
           {!activeSource ? (
-            /* Clean Upload Dropzone when no video is uploaded yet */
             <div
               style={{
                 flex: 1,
@@ -1256,19 +2522,20 @@ export const App: React.FC = () => {
                   <Upload size={26} color="#60a5fa" />
                 </div>
                 <div style={{ fontSize: 17, fontWeight: 700 }}>
-                  Upload a Video to Start Creating 9:16 Clips
+                  Upload a Video to Find Viral Clips &amp; Build Compilation Cutdowns
                 </div>
                 <div
                   style={{
                     fontSize: 13,
                     color: 'var(--text-secondary)',
-                    maxWidth: 420,
+                    maxWidth: 460,
                     lineHeight: 1.5,
                   }}
                 >
                   Drag and drop any <strong>.mp4</strong>, <strong>.mov</strong>, or{' '}
-                  <strong>.webm</strong> video here, or click to browse. Your video will display in
-                  its true native aspect ratio alongside the live 9:16 tracked output.
+                  <strong>.webm</strong> video here. Automatically extract top viral segments,
+                  stitch multi-cut compilations up to 3 minutes, and click any subject to keep them
+                  locked in the center of the 9:16 frame.
                 </div>
                 <button className="btn btn-primary" style={{ marginTop: 6, padding: '9px 20px' }}>
                   <Upload size={15} />
@@ -1277,189 +2544,463 @@ export const App: React.FC = () => {
               </div>
             </div>
           ) : (
-            /* Side-by-Side Native Source Video + Live 9:16 Cropped Output */
-            <div
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 24,
-                padding: 18,
-                minHeight: 0,
-                background: '#0d0e11',
-                overflow: 'hidden',
-              }}
-            >
-              {/* LEFT VIEWER: True Native Aspect Ratio Source Video + Interactive 9:16 Crop Box */}
+            <>
+              {/* Side-by-Side Native Source Video + Live 9:16 Cropped Output */}
               <div
                 style={{
-                  flex: 1.35,
-                  height: '100%',
+                  flex: 1,
                   display: 'flex',
-                  flexDirection: 'column',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  minWidth: 0,
+                  gap: 24,
+                  padding: '14px 18px',
                   minHeight: 0,
+                  background: '#0d0e11',
+                  overflow: 'hidden',
                 }}
               >
+                {/* LEFT VIEWER: True Native Aspect Ratio Source Video + Interactive 9:16 Subject Focus Picker */}
                 <div
                   style={{
-                    fontSize: 11,
-                    color: 'var(--text-secondary)',
-                    marginBottom: 6,
-                    fontWeight: 600,
-                    letterSpacing: '0.3px',
+                    flex: 1.35,
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minWidth: 0,
+                    minHeight: 0,
                   }}
                 >
-                  ORIGINAL SOURCE VIDEO ({nativeDims.width}×{nativeDims.height} NATIVE) + 9:16 TRACK
-                </div>
-
-                {/* Wrapper with exact native aspectRatio so overlay aligns 1:1 with video pixels and NEVER stretches */}
-                <div
-                  ref={sourceOverlayWrapRef}
-                  style={{
-                    position: 'relative',
-                    aspectRatio: `${nativeDims.width} / ${nativeDims.height}`,
-                    maxWidth: '100%',
-                    maxHeight: 'calc(100% - 26px)',
-                    background: '#000',
-                    borderRadius: 6,
-                    overflow: 'hidden',
-                    boxShadow: '0 8px 28px rgba(0,0,0,0.65)',
-                    border: '1px solid #2b303c',
-                    cursor: 'crosshair',
-                  }}
-                  onMouseDown={(e) => {
-                    setIsDraggingCrop(true);
-                    handlePointerOnSourceVideo(e);
-                  }}
-                  onMouseMove={(e) => {
-                    if (isDraggingCrop) handlePointerOnSourceVideo(e);
-                  }}
-                  onMouseUp={() => setIsDraggingCrop(false)}
-                  onMouseLeave={() => setIsDraggingCrop(false)}
-                >
-                  {/* Real Native <video> Element */}
-                  <video
-                    ref={videoRef}
-                    src={activeSource.url}
-                    playsInline
-                    preload="auto"
-                    onLoadedMetadata={(e) => {
-                      const v = e.currentTarget;
-                      if (v.videoWidth && v.videoHeight) {
-                        setNativeDims({ width: v.videoWidth, height: v.videoHeight });
-                      }
-                    }}
-                    onLoadedData={() => {
-                      if (videoRef.current && activeClip) {
-                        videoRef.current.currentTime = activeClip.sourceStart;
-                      }
-                      render9x16Preview();
-                    }}
-                    onSeeked={() => render9x16Preview()}
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      display: 'block',
-                      objectFit: 'contain',
-                      pointerEvents: 'none',
-                    }}
-                  />
-
-                  {/* Interactive 9:16 Subject Tracking Crop Box Overlay */}
                   <div
                     style={{
-                      position: 'absolute',
-                      left: `${currentCrop.normX * 100}%`,
-                      top: `${currentCrop.normY * 100}%`,
-                      width: `${currentCrop.normW * 100}%`,
-                      height: `${currentCrop.normH * 100}%`,
-                      border: currentTrack.isManualKeyframe
-                        ? '2px solid #facc15'
-                        : '2px solid #2d8ceb',
-                      boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.48)',
-                      pointerEvents: 'none',
+                      fontSize: 11,
+                      color: '#93c5fd',
+                      marginBottom: 6,
+                      fontWeight: 600,
+                      letterSpacing: '0.2px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
                     }}
                   >
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 4,
-                        left: 4,
-                        background: currentTrack.isManualKeyframe ? '#ca8a04' : '#2d8ceb',
-                        color: '#fff',
-                        fontSize: 9.5,
-                        fontWeight: 700,
-                        padding: '1px 5px',
-                        borderRadius: 3,
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      9:16 CROP • {currentZoom.toFixed(2)}x
-                    </div>
+                    <Crosshair size={13} color="#34d399" />
+                    CLICK ANY SUBJECT ON VIDEO TO LOCK IN 9:16 CENTER ({nativeDims.width}×{nativeDims.height})
+                  </div>
 
-                    {/* Center Subject Crosshair */}
-                    <div
+                  <div
+                    ref={sourceOverlayWrapRef}
+                    style={{
+                      position: 'relative',
+                      aspectRatio: `${nativeDims.width} / ${nativeDims.height}`,
+                      maxWidth: '100%',
+                      maxHeight: 'calc(100% - 26px)',
+                      background: '#000',
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      boxShadow: '0 8px 28px rgba(0,0,0,0.65)',
+                      border: '1px solid #2b303c',
+                      cursor: 'crosshair',
+                    }}
+                    onMouseDown={(e) => {
+                      setIsDraggingCrop(true);
+                      handlePointerOnSourceVideo(e);
+                    }}
+                    onMouseMove={(e) => {
+                      if (isDraggingCrop) handlePointerOnSourceVideo(e);
+                    }}
+                    onMouseUp={() => setIsDraggingCrop(false)}
+                    onMouseLeave={() => setIsDraggingCrop(false)}
+                    title="Click or drag on any person or object to keep them centered in the 9:16 output"
+                  >
+                    {/* Real Native <video> Element */}
+                    <video
+                      ref={videoRef}
+                      src={activeSource.url}
+                      playsInline
+                      preload="auto"
+                      onLoadedMetadata={(e) => {
+                        const v = e.currentTarget;
+                        if (v.videoWidth && v.videoHeight) {
+                          setNativeDims({ width: v.videoWidth, height: v.videoHeight });
+                        }
+                      }}
+                      onLoadedData={() => {
+                        if (videoRef.current && activeClip) {
+                          const startT =
+                            activeClip.subCuts[0]?.sourceStart ?? activeClip.sourceStart;
+                          videoRef.current.currentTime = startT;
+                        }
+                        render9x16Preview();
+                      }}
+                      onSeeked={() => render9x16Preview()}
                       style={{
-                        position: 'absolute',
-                        left: '50%',
-                        top: '50%',
-                        width: 12,
-                        height: 12,
-                        transform: 'translate(-50%, -50%)',
-                        border: '1.5px solid rgba(255,255,255,0.8)',
-                        borderRadius: '50%',
+                        width: '100%',
+                        height: '100%',
+                        display: 'block',
+                        objectFit: 'contain',
+                        pointerEvents: 'none',
                       }}
                     />
+
+                    {/* Interactive 9:16 Subject Tracking Crop Box Overlay */}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: `${currentCrop.normX * 100}%`,
+                        top: `${currentCrop.normY * 100}%`,
+                        width: `${currentCrop.normW * 100}%`,
+                        height: `${currentCrop.normH * 100}%`,
+                        border:
+                          activeFocusStrategy === 'click-track' ||
+                          activeFocusStrategy === 'static-lock'
+                            ? '2px solid #10b981'
+                            : '2px solid #2d8ceb',
+                        boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.52)',
+                        pointerEvents: 'none',
+                      }}
+                    >
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 4,
+                          left: 4,
+                          background:
+                            activeFocusStrategy === 'click-track' ||
+                            activeFocusStrategy === 'static-lock'
+                              ? '#059669'
+                              : '#2d8ceb',
+                          color: '#fff',
+                          fontSize: 9.5,
+                          fontWeight: 700,
+                          padding: '2px 6px',
+                          borderRadius: 3,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {currentTrack.subjectLabel} • {currentZoom.toFixed(2)}x
+                      </div>
+
+                      {/* Locked Subject Target Reticle in the exact center of the 9:16 crop */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          left: '50%',
+                          top: '50%',
+                          width: 22,
+                          height: 22,
+                          transform: 'translate(-50%, -50%)',
+                          border: '2px solid #34d399',
+                          borderRadius: '50%',
+                          boxShadow: '0 0 8px rgba(16, 185, 129, 0.8)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 4,
+                            height: 4,
+                            borderRadius: '50%',
+                            background: '#34d399',
+                          }}
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {/* RIGHT VIEWER: Live 9:16 Vertical Social Output (Distortion-Free) */}
-              <div
-                style={{
-                  height: '100%',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexShrink: 0,
-                }}
-              >
+                {/* RIGHT VIEWER: Live 9:16 Vertical Social Output (Distortion-Free) */}
                 <div
                   style={{
-                    fontSize: 11,
-                    color: '#60a5fa',
-                    marginBottom: 6,
-                    fontWeight: 600,
-                    letterSpacing: '0.3px',
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
                   }}
                 >
-                  9:16 SOCIAL OUTPUT PREVIEW
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: '#34d399',
+                      marginBottom: 6,
+                      fontWeight: 600,
+                      letterSpacing: '0.3px',
+                    }}
+                  >
+                    9:16 CENTERED SUBJECT OUTPUT
+                  </div>
+
+                  <canvas
+                    ref={preview9x16CanvasRef}
+                    width={540}
+                    height={960}
+                    style={{
+                      height: 'calc(100% - 26px)',
+                      width: 'auto',
+                      aspectRatio: '9 / 16',
+                      background: '#000',
+                      borderRadius: 8,
+                      border: '2px solid #10b981',
+                      boxShadow: '0 10px 30px rgba(0,0,0,0.75)',
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* DEDICATED 9:16 SUBJECT FOCUS BAR — Pick Subject Focus so it stays in the center of 9:16 */}
+              <div
+                style={{
+                  padding: '8px 16px',
+                  background: 'rgba(15, 23, 42, 0.92)',
+                  borderTop: '1px solid #1e293b',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: '#34d399',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      marginRight: 4,
+                    }}
+                  >
+                    <Crosshair size={13} />
+                    9:16 Subject Focus:
+                  </span>
+
+                  {/* Click Mode Toggle: Track Clicked Subject vs Lock Static Position */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      setClickPickMode('track');
+                      if (activeClip?.subjectFocus) {
+                        applySubjectFocusConfig({
+                          ...activeClip.subjectFocus,
+                          strategy: 'click-track',
+                          label: 'Tracked Subject Focus',
+                        });
+                      }
+                    }}
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11,
+                      borderColor:
+                        clickPickMode === 'track' &&
+                        (activeFocusStrategy === 'click-track' ||
+                          activeFocusStrategy === 'auto-salient')
+                          ? '#10b981'
+                          : 'var(--border-subtle)',
+                      background:
+                        activeFocusStrategy === 'click-track'
+                          ? 'rgba(16, 185, 129, 0.22)'
+                          : 'var(--bg-card)',
+                      color: activeFocusStrategy === 'click-track' ? '#6ee7b7' : '#e2e8f0',
+                      fontWeight: activeFocusStrategy === 'click-track' ? 700 : 500,
+                    }}
+                    title="Click any subject on the 16:9 video and actively follow its movement to keep it centered in 9:16"
+                  >
+                    <Crosshair size={12} />
+                    🎯 Click Video to Track Subject
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      setClickPickMode('static');
+                      if (activeClip?.subjectFocus) {
+                        applySubjectFocusConfig({
+                          ...activeClip.subjectFocus,
+                          strategy: 'static-lock',
+                          label: 'Pinned Position Lock',
+                        });
+                      }
+                    }}
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11,
+                      borderColor:
+                        activeFocusStrategy === 'static-lock'
+                          ? '#f59e0b'
+                          : 'var(--border-subtle)',
+                      background:
+                        activeFocusStrategy === 'static-lock'
+                          ? 'rgba(245, 158, 11, 0.2)'
+                          : 'var(--bg-card)',
+                      color: activeFocusStrategy === 'static-lock' ? '#fcd34d' : '#e2e8f0',
+                      fontWeight: activeFocusStrategy === 'static-lock' ? 700 : 500,
+                    }}
+                    title="Click any spot on the 16:9 video to lock the 9:16 crop at that exact horizontal position"
+                  >
+                    <Lock size={12} />
+                    📌 Lock Static Position
+                  </button>
+
+                  {/* 1-Click Subject Focus Presets */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => handleSelectSubjectFocusStrategy('face-speaker')}
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11,
+                      borderColor:
+                        activeFocusStrategy === 'face-speaker'
+                          ? '#60a5fa'
+                          : 'var(--border-subtle)',
+                      background:
+                        activeFocusStrategy === 'face-speaker'
+                          ? 'rgba(45, 140, 235, 0.22)'
+                          : 'var(--bg-card)',
+                    }}
+                    title="Automatically keep the primary face/speaker centered in 9:16"
+                  >
+                    <UserCheck size={12} />
+                    Auto Face/Speaker
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => handleSelectSubjectFocusStrategy('left-subject')}
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11,
+                      borderColor:
+                        activeFocusStrategy === 'left-subject'
+                          ? '#60a5fa'
+                          : 'var(--border-subtle)',
+                      background:
+                        activeFocusStrategy === 'left-subject'
+                          ? 'rgba(45, 140, 235, 0.22)'
+                          : 'var(--bg-card)',
+                    }}
+                    title="Focus and track the subject on the left side of the 16:9 frame"
+                  >
+                    ⬅ Left Subject
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => handleSelectSubjectFocusStrategy('static-lock')}
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11,
+                    }}
+                    title="Lock the 9:16 crop in the dead-center (50%) of the 16:9 frame"
+                  >
+                    ⏺ Center
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => handleSelectSubjectFocusStrategy('right-subject')}
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11,
+                      borderColor:
+                        activeFocusStrategy === 'right-subject'
+                          ? '#60a5fa'
+                          : 'var(--border-subtle)',
+                      background:
+                        activeFocusStrategy === 'right-subject'
+                          ? 'rgba(45, 140, 235, 0.22)'
+                          : 'var(--bg-card)',
+                    }}
+                    title="Focus and track the subject on the right side of the 16:9 frame"
+                  >
+                    ➡ Right Subject
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => handleSelectSubjectFocusStrategy('action-motion')}
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11,
+                      borderColor:
+                        activeFocusStrategy === 'action-motion'
+                          ? '#60a5fa'
+                          : 'var(--border-subtle)',
+                      background:
+                        activeFocusStrategy === 'action-motion'
+                          ? 'rgba(45, 140, 235, 0.22)'
+                          : 'var(--bg-card)',
+                    }}
+                    title="Follow the highest-motion action cluster in the frame"
+                  >
+                    <Zap size={12} />
+                    Action Motion
+                  </button>
                 </div>
 
-                <canvas
-                  ref={preview9x16CanvasRef}
-                  width={540}
-                  height={960}
-                  style={{
-                    height: 'calc(100% - 26px)',
-                    width: 'auto',
-                    aspectRatio: '9 / 16',
-                    background: '#000',
-                    borderRadius: 8,
-                    border: '2px solid #2d8ceb',
-                    boxShadow: '0 10px 30px rgba(0,0,0,0.75)',
-                  }}
-                />
+                {/* Right: Fine Horizontal Trim Slider + Apply to All Clips Toggle */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 11,
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    <span>Fine X Offset:</span>
+                    <input
+                      type="range"
+                      min={-0.3}
+                      max={0.3}
+                      step={0.01}
+                      value={activeClip?.trackingOffsetX ?? 0}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value);
+                        updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: v }));
+                      }}
+                      style={{ width: 76 }}
+                      title="Fine-tune the horizontal center of the 9:16 frame"
+                    />
+                  </div>
+
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      fontSize: 11,
+                      color: '#cbd5e1',
+                      cursor: 'pointer',
+                    }}
+                    title="When checked, picking a subject focus applies to all generated clips from this video"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={applyFocusToAllClips}
+                      onChange={(e) => setApplyFocusToAllClips(e.target.checked)}
+                    />
+                    Apply Focus to All Clips
+                  </label>
+                </div>
               </div>
-            </div>
+            </>
           )}
 
-          {/* Simple, Rock-Solid Transport & Timeline Trim Bar */}
+          {/* TIMELINE, RAZOR BLADE TOOL & IN/OUT MARKER CLIPPING BAR */}
           {activeSource && activeClip && (
             <div
               style={{
@@ -1468,15 +3009,31 @@ export const App: React.FC = () => {
                 borderTop: '1px solid var(--border-subtle)',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 10,
+                gap: 9,
               }}
             >
-              {/* Controls Row */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <button className="btn btn-primary" onClick={handleTogglePlay}>
-                    {isPlaying ? <Pause size={14} /> : <Play size={14} />}
-                    {isPlaying ? 'Pause' : 'Play Clip'}
+              {/* Row 1: Transport + Razor Blade Tool + In/Out Marker Controls */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                }}
+              >
+                {/* Left Transport + Razor Blade Tool Buttons */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => handleTogglePlay(false)}
+                  >
+                    {isPlaying && !isLoopingInOut ? <Pause size={14} /> : <Play size={14} />}
+                    {isPlaying && !isLoopingInOut
+                      ? 'Pause'
+                      : timelineMode === 'full-source'
+                        ? 'Play Full Video'
+                        : 'Play Clip'}
                   </button>
 
                   <button
@@ -1491,184 +3048,820 @@ export const App: React.FC = () => {
                     {isMuted ? <VolumeX size={14} color="#f87171" /> : <Volume2 size={14} />}
                   </button>
 
+                  {/* RAZOR BLADE TOOL TOGGLE (Shortcut: C) */}
                   <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setIsRazorMode((prev) => !prev)}
+                    style={{
+                      borderColor: isRazorMode ? '#ef4444' : 'var(--border-subtle)',
+                      background: isRazorMode ? 'rgba(239, 68, 68, 0.22)' : 'var(--bg-card)',
+                      color: isRazorMode ? '#fca5a5' : 'var(--text-main)',
+                      fontWeight: isRazorMode ? 700 : 500,
+                    }}
+                    title="Toggle Razor Blade Tool (Shortcut: C) — Click anywhere on the timeline to slice"
+                  >
+                    <Scissors size={14} color={isRazorMode ? '#f87171' : '#60a5fa'} />
+                    {isRazorMode ? 'Razor Blade ON (Click Timeline)' : 'Razor Blade Tool (C)'}
+                  </button>
+
+                  <button
+                    type="button"
                     className="btn"
                     onClick={handleSplitAtPlayhead}
-                    title="Split clip at current playhead position"
+                    title="Immediately slice the timeline at the current playhead position"
                   >
-                    <Scissors size={14} />
-                    Split Cut Here
+                    <Scissors size={13} />
+                    Cut at Playhead
                   </button>
+
+                  {activeClip.subCuts.length > 1 && inspectedCut && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{
+                          borderColor: 'rgba(239, 68, 68, 0.45)',
+                          color: '#fca5a5',
+                          padding: '6px 9px',
+                          fontSize: 11.5,
+                        }}
+                        onClick={handleDeleteSelectedCut}
+                        title={`Delete Cut #${inspectedCut.index} from timeline (Shortcut: Delete / Backspace)`}
+                      >
+                        <Trash2 size={13} />
+                        Delete Cut #{inspectedCut.index}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{
+                          borderColor: 'rgba(96, 165, 250, 0.45)',
+                          color: '#93c5fd',
+                          padding: '6px 9px',
+                          fontSize: 11.5,
+                        }}
+                        onClick={handleSaveSelectedCutAsClip}
+                        title={`Save Cut #${inspectedCut.index} as its own standalone 9:16 clip in the Clips list`}
+                      >
+                        <Plus size={13} />
+                        Save Cut #{inspectedCut.index} as Clip
+                      </button>
+                    </>
+                  )}
+
+                  {timelineMode === 'full-source' && activeClip.subCuts.length > 1 && (
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: '6px 9px', fontSize: 11 }}
+                      onClick={() =>
+                        setFullVideoClip(createInitialFullVideoClip(activeSource, activeScheme))
+                      }
+                      title="Reset all razor cuts on the Full Uploaded Video"
+                    >
+                      <RotateCcw size={12} />
+                      Reset Full Video
+                    </button>
+                  )}
+                </div>
+
+                {/* Right: IN [I] & OUT [O] Marker Controls + Create Clip / Compilation from In→Out */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    background: 'rgba(17, 19, 24, 0.9)',
+                    border: '1px solid #334155',
+                    borderRadius: 6,
+                    padding: '4px 8px',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <button
+                    className="btn"
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11.5,
+                      borderColor: '#10b981',
+                      background: 'rgba(16, 185, 129, 0.16)',
+                      color: '#6ee7b7',
+                      fontWeight: 600,
+                    }}
+                    onClick={handleSetInMarkerAtPlayhead}
+                    title="Set IN marker at current playhead position (Shortcut: I)"
+                  >
+                    [ Set In (I)
+                  </button>
+
+                  <span
+                    style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 11,
+                      color: '#e2e8f0',
+                      padding: '0 4px',
+                    }}
+                  >
+                    {inMarker !== null ? `${inMarker.toFixed(1)}s` : '--'} →{' '}
+                    {outMarker !== null ? `${outMarker.toFixed(1)}s` : '--'}
+                    {inMarker !== null && outMarker !== null && (
+                      <strong style={{ color: '#facc15', marginLeft: 5 }}>
+                        ({markedDuration.toFixed(1)}s)
+                      </strong>
+                    )}
+                  </span>
 
                   <button
                     className="btn"
-                    onClick={() =>
-                      updateActiveClip((c) => ({
-                        ...c,
-                        trackingOffsetX: 0,
-                        manualKeyframes: [],
-                      }))
-                    }
-                    title="Reset manual crop overrides back to automatic subject centering"
+                    style={{
+                      padding: '4px 9px',
+                      fontSize: 11.5,
+                      borderColor: '#f59e0b',
+                      background: 'rgba(245, 158, 11, 0.16)',
+                      color: '#fcd34d',
+                      fontWeight: 600,
+                    }}
+                    onClick={handleSetOutMarkerAtPlayhead}
+                    title="Set OUT marker at current playhead position (Shortcut: O)"
                   >
-                    <Crosshair size={14} />
-                    Auto-Center Subject
+                    Set Out (O) ]
                   </button>
+
+                  {inMarker !== null && outMarker !== null && outMarker > inMarker && (
+                    <>
+                      <button
+                        className="btn"
+                        style={{
+                          padding: '4px 8px',
+                          fontSize: 11,
+                          background: isLoopingInOut
+                            ? 'rgba(250, 204, 21, 0.24)'
+                            : 'var(--bg-card)',
+                          borderColor: isLoopingInOut ? '#facc15' : 'var(--border-subtle)',
+                          color: isLoopingInOut ? '#fef08a' : '#cbd5e1',
+                        }}
+                        onClick={() => handleTogglePlay(true)}
+                        title="Loop playback strictly between In and Out markers"
+                      >
+                        <Play size={11} />
+                        {isPlaying && isLoopingInOut ? 'Stop In→Out' : 'Preview In→Out'}
+                      </button>
+
+                      <button
+                        className="btn btn-primary"
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: 11.5,
+                        }}
+                        onClick={() => handleCreateClipFromMarkers(true, false)}
+                        title="Clip out the exact marked [In → Out] segment and open it on the timeline"
+                      >
+                        <Scissors size={12} />
+                        Clip In→Out
+                      </button>
+
+                      <button
+                        className="btn btn-purple"
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: 11.5,
+                        }}
+                        onClick={() => handleCreateClipFromMarkers(true, true)}
+                        title={`Create a compilation cutdown (${activeScheme.targetClipDuration}s target) from the marked [In → Out] range`}
+                      >
+                        <Layers size={12} />
+                        Compile In→Out ({activeScheme.targetClipDuration}s)
+                      </button>
+                    </>
+                  )}
                 </div>
 
-                {/* Caption Quick Input */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, maxWidth: 320 }}>
-                  <span style={{ fontSize: 11.5, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                    Caption:
+                {/* Notice Toast */}
+                {markerNotice && (
+                  <span style={{ fontSize: 11.5, color: '#34d399', fontWeight: 600 }}>
+                    ✓ {markerNotice}
                   </span>
-                  <input
-                    type="text"
-                    className="input-field"
-                    placeholder="Type overlay caption (optional)..."
-                    value={activeClip.captionText}
-                    onChange={(e) =>
-                      updateActiveClip((c) => ({ ...c, captionText: e.target.value }))
-                    }
-                  />
-                </div>
+                )}
               </div>
 
-              {/* Visual Scrubber & Clip In/Out Range Bar */}
+              {/* Timeline Header Ruler */}
               <div
                 style={{
-                  position: 'relative',
-                  height: 38,
-                  background: '#111318',
-                  border: '1px solid var(--border-subtle)',
-                  borderRadius: 6,
-                  cursor: 'pointer',
-                  overflow: 'hidden',
                   display: 'flex',
-                  alignItems: 'flex-end',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  fontSize: 10.5,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-secondary)',
                   padding: '0 2px',
-                  gap: 1,
-                }}
-                onClick={(e) => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                  handleSeek(ratio * activeSource.duration);
                 }}
               >
-                {/* Audio Waveform Bars */}
-                {activeSource.waveformPeaks.map((pk, idx) => (
-                  <div
-                    key={idx}
-                    style={{
-                      flex: 1,
-                      height: `${Math.max(12, Math.round(pk * 85))}%`,
-                      background: 'rgba(148, 163, 184, 0.25)',
-                      pointerEvents: 'none',
-                    }}
-                  />
-                ))}
-
-                {/* Active Clip Highlight Window + Sub-Cut Dividers */}
-                <div
+                <span>00:00.0 (Start)</span>
+                <span
                   style={{
-                    position: 'absolute',
-                    left: `${(activeClip.sourceStart / activeSource.duration) * 100}%`,
-                    width: `${((activeClip.sourceEnd - activeClip.sourceStart) / activeSource.duration) * 100}%`,
-                    top: 0,
-                    bottom: 0,
-                    background: 'rgba(45, 140, 235, 0.28)',
-                    borderLeft: '3px solid #facc15',
-                    borderRight: '3px solid #facc15',
-                    pointerEvents: 'none',
+                    color: isRazorMode
+                      ? '#f87171'
+                      : timelineMode === 'full-source'
+                        ? '#34d399'
+                        : '#93c5fd',
+                    fontFamily: 'var(--font-ui)',
+                    fontWeight: 600,
                   }}
-                />
+                >
+                  {isRazorMode
+                    ? '✂ RAZOR BLADE ACTIVE — Click anywhere on the timeline below to slice at that timestamp (Press C to exit)'
+                    : timelineMode === 'full-source'
+                      ? `Full Uploaded Video Timeline (${activeClip.duration.toFixed(1)}s • ${activeClip.subCuts.length} ${activeClip.subCuts.length === 1 ? 'Cut' : 'Cuts'})`
+                      : activeClip.clipCreationMode === 'condensed-edit'
+                        ? `Compilation Cutdown Timeline • ${activeClip.subCuts.length} Stitched Highlight Shots (${activeClip.duration.toFixed(1)}s Total)`
+                        : `Viral Clip Timeline • ${activeClip.subCuts.length} ${activeClip.subCuts.length === 1 ? 'Continuous Segment' : 'Cuts'} (${activeClip.duration.toFixed(1)}s Total)`}
+                </span>
+                <span>{activeClip.duration.toFixed(1)}s (End)</span>
+              </div>
 
-                {/* Sub-Cut Markers */}
-                {activeClip.subCuts.map((cut) => (
+              {/* TIMELINE SCRUBBER BAR */}
+              <div
+                ref={timelineBarRef}
+                style={{
+                  position: 'relative',
+                  height: 54,
+                  background: '#111318',
+                  border: isRazorMode
+                    ? '1.5px solid #ef4444'
+                    : timelineMode === 'full-source'
+                      ? '1px solid rgba(16, 185, 129, 0.5)'
+                      : '1px solid #334155',
+                  borderRadius: 6,
+                  cursor: isRazorMode ? 'crosshair' : 'pointer',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  userSelect: 'none',
+                }}
+                onMouseDown={(e) => {
+                  if (!timelineBarRef.current || !activeClip) return;
+                  const rect = timelineBarRef.current.getBoundingClientRect();
+                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  const clickedClipTime = ratio * activeClip.duration;
+
+                  if (isRazorMode) {
+                    handleRazorSplitAtClipTime(clickedClipTime);
+                    return;
+                  }
+
+                  setDraggingHandle('playhead');
+                  updateTimelineDragAtClientX(e.clientX, 'playhead');
+                }}
+                onMouseMove={(e) => {
+                  if (timelineBarRef.current && activeClip) {
+                    const rect = timelineBarRef.current.getBoundingClientRect();
+                    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                    setRazorHoverClipTime(ratio * activeClip.duration);
+                  }
+                  if (!draggingHandle || isRazorMode) return;
+                  updateTimelineDragAtClientX(e.clientX, draggingHandle);
+                }}
+                onMouseUp={() => setDraggingHandle(null)}
+                onMouseLeave={() => {
+                  setDraggingHandle(null);
+                  setRazorHoverClipTime(null);
+                }}
+              >
+                {/* Render the timeline segments */}
+                {activeClip.subCuts.map((cut, idx) => {
+                  const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
+                  const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
+                  const isCurrentCut =
+                    clipPlayheadTime >= cut.timelineStart - 0.02 &&
+                    clipPlayheadTime <= cut.timelineEnd + 0.02;
+                  const isSelectedCut = idx === selectedCutIndex;
+
+                  const totalBuckets = activeSource.waveformPeaks.length;
+                  const bStart = Math.max(
+                    0,
+                    Math.floor((cut.sourceStart / Math.max(1, activeSource.duration)) * totalBuckets)
+                  );
+                  const bEnd = Math.max(
+                    bStart + 2,
+                    Math.ceil((cut.sourceEnd / Math.max(1, activeSource.duration)) * totalBuckets)
+                  );
+                  const slicePeaks = activeSource.waveformPeaks.slice(bStart, bEnd);
+
+                  return (
+                    <div
+                      key={cut.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (isRazorMode && timelineBarRef.current) {
+                          const rect = timelineBarRef.current.getBoundingClientRect();
+                          const ratio = Math.max(
+                            0,
+                            Math.min(1, (e.clientX - rect.left) / rect.width)
+                          );
+                          handleRazorSplitAtClipTime(ratio * activeClip.duration);
+                          return;
+                        }
+                        setSelectedCutIndex(idx);
+                        activeCutIdxRef.current = idx;
+                        updateTimelineDragAtClientX(e.clientX, 'playhead');
+                      }}
+                      style={{
+                        width: `${widthPct}%`,
+                        height: '100%',
+                        position: 'relative',
+                        background: isSelectedCut
+                          ? 'rgba(45, 140, 235, 0.32)'
+                          : isCurrentCut
+                            ? 'rgba(45, 140, 235, 0.2)'
+                            : idx % 2 === 0
+                              ? 'rgba(30, 41, 59, 0.78)'
+                              : 'rgba(38, 52, 74, 0.78)',
+                        borderRight:
+                          idx < activeClip.subCuts.length - 1
+                            ? '2px solid #facc15'
+                            : 'none',
+                        boxShadow: isSelectedCut
+                          ? 'inset 0 0 0 1px rgba(96, 165, 250, 0.7)'
+                          : 'none',
+                        display: 'flex',
+                        alignItems: 'flex-end',
+                        padding: '0 2px',
+                        gap: 1,
+                        overflow: 'hidden',
+                      }}
+                      title={`${cut.label} | Source ${cut.sourceStart.toFixed(1)}s–${cut.sourceEnd.toFixed(1)}s`}
+                    >
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 3,
+                          left: 6,
+                          right: 4,
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          fontSize: 9.5,
+                          fontWeight: 600,
+                          color: isSelectedCut || isCurrentCut ? '#fff' : '#cbd5e1',
+                          pointerEvents: 'none',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          zIndex: 2,
+                        }}
+                      >
+                        <span>
+                          {timelineMode === 'full-source' && activeClip.subCuts.length === 1
+                            ? `FULL UPLOADED VIDEO (${activeSource.name})`
+                            : cut.label}
+                        </span>
+                        {cut.zoom > 1.02 && (
+                          <span
+                            style={{
+                              background: 'rgba(45, 140, 235, 0.45)',
+                              color: '#e0f2fe',
+                              padding: '0 4px',
+                              borderRadius: 3,
+                              fontSize: 8.5,
+                            }}
+                          >
+                            {cut.zoom}x
+                          </span>
+                        )}
+                      </div>
+
+                      {slicePeaks.map((pk, pIdx) => (
+                        <div
+                          key={pIdx}
+                          style={{
+                            flex: 1,
+                            height: `${Math.max(12, Math.round(pk * 68))}%`,
+                            background:
+                              isSelectedCut || isCurrentCut
+                                ? 'rgba(96, 165, 250, 0.55)'
+                                : 'rgba(148, 163, 184, 0.32)',
+                            pointerEvents: 'none',
+                          }}
+                        />
+                      ))}
+                    </div>
+                  );
+                })}
+
+                {/* IN / OUT MARKER SHADED SELECTION REGION & DRAGGABLE HANDLES */}
+                {inMarkerPct !== null && outMarkerPct !== null && outMarkerPct >= inMarkerPct && (
+                  <>
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: `${inMarkerPct}%`,
+                        width: `${Math.max(0.5, outMarkerPct - inMarkerPct)}%`,
+                        top: 0,
+                        bottom: 0,
+                        background: 'rgba(16, 185, 129, 0.18)',
+                        borderTop: '2px solid #10b981',
+                        borderBottom: '2px solid #f59e0b',
+                        pointerEvents: 'none',
+                        zIndex: 5,
+                      }}
+                    />
+
+                    {/* Draggable IN Marker Handle */}
+                    <div
+                      onMouseDown={(e) => {
+                        if (isRazorMode) return;
+                        e.stopPropagation();
+                        setDraggingHandle('in');
+                      }}
+                      style={{
+                        position: 'absolute',
+                        left: `${inMarkerPct}%`,
+                        top: 0,
+                        bottom: 0,
+                        width: 12,
+                        transform: 'translateX(-50%)',
+                        cursor: isRazorMode ? 'crosshair' : 'ew-resize',
+                        zIndex: 12,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        pointerEvents: isRazorMode ? 'none' : 'auto',
+                      }}
+                      title={`Drag IN Marker (${inMarker?.toFixed(2)}s)`}
+                    >
+                      <div
+                        style={{
+                          background: '#10b981',
+                          color: '#052e16',
+                          fontSize: 8.5,
+                          fontWeight: 800,
+                          padding: '1px 4px',
+                          borderRadius: 2,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        IN
+                      </div>
+                      <div style={{ flex: 1, width: 2.5, background: '#10b981' }} />
+                    </div>
+
+                    {/* Draggable OUT Marker Handle */}
+                    <div
+                      onMouseDown={(e) => {
+                        if (isRazorMode) return;
+                        e.stopPropagation();
+                        setDraggingHandle('out');
+                      }}
+                      style={{
+                        position: 'absolute',
+                        left: `${outMarkerPct}%`,
+                        top: 0,
+                        bottom: 0,
+                        width: 12,
+                        transform: 'translateX(-50%)',
+                        cursor: isRazorMode ? 'crosshair' : 'ew-resize',
+                        zIndex: 12,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        pointerEvents: isRazorMode ? 'none' : 'auto',
+                      }}
+                      title={`Drag OUT Marker (${outMarker?.toFixed(2)}s)`}
+                    >
+                      <div
+                        style={{
+                          background: '#f59e0b',
+                          color: '#451a03',
+                          fontSize: 8.5,
+                          fontWeight: 800,
+                          padding: '1px 4px',
+                          borderRadius: 2,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        OUT
+                      </div>
+                      <div style={{ flex: 1, width: 2.5, background: '#f59e0b' }} />
+                    </div>
+                  </>
+                )}
+
+                {/* Live Razor Blade Cut Preview Line when hovering in Razor Mode */}
+                {isRazorMode && razorHoverClipTime !== null && (
                   <div
-                    key={cut.id}
                     style={{
                       position: 'absolute',
-                      left: `${(cut.sourceStart / activeSource.duration) * 100}%`,
+                      left: `${Math.max(
+                        0,
+                        Math.min(
+                          100,
+                          (razorHoverClipTime / Math.max(0.1, activeClip.duration)) * 100
+                        )
+                      )}%`,
                       top: 0,
                       bottom: 0,
-                      width: 1.5,
-                      background: 'rgba(255, 255, 255, 0.5)',
+                      width: 2,
+                      background: '#ef4444',
+                      boxShadow: '0 0 8px #ef4444',
                       pointerEvents: 'none',
+                      zIndex: 20,
                     }}
-                  />
-                ))}
+                  >
+                    <div
+                      style={{
+                        position: 'absolute',
+                        bottom: 2,
+                        left: 4,
+                        background: '#ef4444',
+                        color: '#fff',
+                        fontSize: 9,
+                        fontWeight: 700,
+                        padding: '1px 5px',
+                        borderRadius: 3,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      ✂ Cut @ {razorHoverClipTime.toFixed(1)}s
+                    </div>
+                  </div>
+                )}
 
-                {/* Playhead Needle */}
+                {/* Playhead Needle across the Active Timeline (0% to 100%) */}
                 <div
                   style={{
                     position: 'absolute',
-                    left: `${(playheadTime / activeSource.duration) * 100}%`,
+                    left: `${Math.max(
+                      0,
+                      Math.min(100, (clipPlayheadTime / Math.max(0.1, activeClip.duration)) * 100)
+                    )}%`,
                     top: 0,
                     bottom: 0,
                     width: 2.5,
                     background: '#60a5fa',
-                    boxShadow: '0 0 8px #2d8ceb',
+                    boxShadow: '0 0 8px rgba(96, 165, 250, 0.95)',
                     pointerEvents: 'none',
+                    zIndex: 15,
                   }}
                 />
               </div>
 
-              {/* Direct Clip Start & End Trim Sliders */}
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '1fr 1fr',
-                  gap: 16,
-                  fontSize: 11.5,
-                  color: 'var(--text-secondary)',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ whiteSpace: 'nowrap' }}>
-                    Clip Start: <strong style={{ color: '#facc15' }}>{activeClip.sourceStart.toFixed(1)}s</strong>
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={Math.max(0.5, activeClip.sourceEnd - 2)}
-                    step={0.1}
-                    value={activeClip.sourceStart}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      updateActiveClip((c) => ({
-                        ...c,
-                        sourceStart: val,
-                        duration: Number((c.sourceEnd - val).toFixed(2)),
-                      }));
-                      handleSeek(val);
-                    }}
-                    style={{ flex: 1 }}
-                  />
-                </div>
+              {/* Fine-Tune Controls Row (with both Text/Number Inputs AND Sliders!) */}
+              {timelineMode === 'full-source' ? (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: 16,
+                    fontSize: 11.5,
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ whiteSpace: 'nowrap' }}>In Marker [I]:</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={Math.max(0.5, (outMarker ?? activeSource.duration) - 0.5)}
+                      step={0.1}
+                      className="input-field"
+                      style={{
+                        width: 64,
+                        padding: '2px 6px',
+                        color: '#34d399',
+                        fontWeight: 700,
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                      value={Number((inMarker ?? 0).toFixed(1))}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (Number.isFinite(val)) {
+                          const clamped = Math.max(
+                            0,
+                            Math.min((outMarker ?? activeSource.duration) - 0.5, val)
+                          );
+                          setInMarker(clamped);
+                          handleSeekSourceTime(clamped);
+                        }
+                      }}
+                    />
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(0.5, (outMarker ?? activeSource.duration) - 0.5)}
+                      step={0.1}
+                      value={inMarker ?? 0}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setInMarker(val);
+                        handleSeekSourceTime(val);
+                      }}
+                      style={{ flex: 1 }}
+                    />
+                  </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ whiteSpace: 'nowrap' }}>
-                    Clip End: <strong style={{ color: '#facc15' }}>{activeClip.sourceEnd.toFixed(1)}s</strong>
-                  </span>
-                  <input
-                    type="range"
-                    min={Math.min(activeSource.duration, activeClip.sourceStart + 2)}
-                    max={activeSource.duration}
-                    step={0.1}
-                    value={activeClip.sourceEnd}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      updateActiveClip((c) => ({
-                        ...c,
-                        sourceEnd: val,
-                        duration: Number((val - c.sourceStart).toFixed(2)),
-                      }));
-                      handleSeek(val);
-                    }}
-                    style={{ flex: 1 }}
-                  />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ whiteSpace: 'nowrap' }}>Out Marker [O]:</span>
+                    <input
+                      type="number"
+                      min={Math.min(activeSource.duration, (inMarker ?? 0) + 0.5)}
+                      max={activeSource.duration}
+                      step={0.1}
+                      className="input-field"
+                      style={{
+                        width: 64,
+                        padding: '2px 6px',
+                        color: '#fcd34d',
+                        fontWeight: 700,
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                      value={Number((outMarker ?? activeSource.duration).toFixed(1))}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (Number.isFinite(val)) {
+                          const clamped = Math.max(
+                            (inMarker ?? 0) + 0.5,
+                            Math.min(activeSource.duration, val)
+                          );
+                          setOutMarker(clamped);
+                          handleSeekSourceTime(clamped);
+                        }
+                      }}
+                    />
+                    <input
+                      type="range"
+                      min={Math.min(activeSource.duration, (inMarker ?? 0) + 0.5)}
+                      max={activeSource.duration}
+                      step={0.1}
+                      value={outMarker ?? activeSource.duration}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setOutMarker(val);
+                        handleSeekSourceTime(val);
+                      }}
+                      style={{ flex: 1 }}
+                    />
+                  </div>
                 </div>
-              </div>
+              ) : inspectedCut ? (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr 1fr',
+                    gap: 12,
+                    fontSize: 11.5,
+                    color: 'var(--text-secondary)',
+                    alignItems: 'center',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                      Cut #{inspectedCut.index} In:
+                    </span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={Math.max(0.5, inspectedCut.sourceEnd - 0.5)}
+                      step={0.1}
+                      className="input-field"
+                      style={{
+                        width: 60,
+                        padding: '2px 5px',
+                        color: '#facc15',
+                        fontWeight: 700,
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                      value={Number(inspectedCut.sourceStart.toFixed(1))}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (!Number.isFinite(val)) return;
+                        const clamped = Math.max(0, Math.min(inspectedCut.sourceEnd - 0.5, val));
+                        updateActiveTimelineClip((c) => {
+                          const updatedCuts = c.subCuts.map((sc) =>
+                            sc.id === inspectedCut.id ? { ...sc, sourceStart: clamped } : sc
+                          );
+                          const recalc = recalculateClipTimeline(updatedCuts);
+                          return {
+                            ...c,
+                            subCuts: recalc.subCuts,
+                            duration: recalc.duration,
+                            sourceStart: recalc.sourceStart,
+                            sourceEnd: recalc.sourceEnd,
+                          };
+                        });
+                        handleSeekSourceTime(clamped);
+                      }}
+                    />
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(0.5, inspectedCut.sourceEnd - 0.5)}
+                      step={0.1}
+                      value={inspectedCut.sourceStart}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        updateActiveTimelineClip((c) => {
+                          const updatedCuts = c.subCuts.map((sc) =>
+                            sc.id === inspectedCut.id ? { ...sc, sourceStart: val } : sc
+                          );
+                          const recalc = recalculateClipTimeline(updatedCuts);
+                          return {
+                            ...c,
+                            subCuts: recalc.subCuts,
+                            duration: recalc.duration,
+                            sourceStart: recalc.sourceStart,
+                            sourceEnd: recalc.sourceEnd,
+                          };
+                        });
+                        handleSeekSourceTime(val);
+                      }}
+                      style={{ flex: 1 }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                      Cut #{inspectedCut.index} Out:
+                    </span>
+                    <input
+                      type="number"
+                      min={Math.min(activeSource.duration, inspectedCut.sourceStart + 0.5)}
+                      max={activeSource.duration}
+                      step={0.1}
+                      className="input-field"
+                      style={{
+                        width: 60,
+                        padding: '2px 5px',
+                        color: '#facc15',
+                        fontWeight: 700,
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                      value={Number(inspectedCut.sourceEnd.toFixed(1))}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (!Number.isFinite(val)) return;
+                        const clamped = Math.max(
+                          inspectedCut.sourceStart + 0.5,
+                          Math.min(activeSource.duration, val)
+                        );
+                        updateActiveTimelineClip((c) => {
+                          const updatedCuts = c.subCuts.map((sc) =>
+                            sc.id === inspectedCut.id ? { ...sc, sourceEnd: clamped } : sc
+                          );
+                          const recalc = recalculateClipTimeline(updatedCuts);
+                          return {
+                            ...c,
+                            subCuts: recalc.subCuts,
+                            duration: recalc.duration,
+                            sourceStart: recalc.sourceStart,
+                            sourceEnd: recalc.sourceEnd,
+                          };
+                        });
+                        handleSeekSourceTime(clamped);
+                      }}
+                    />
+                    <input
+                      type="range"
+                      min={Math.min(activeSource.duration, inspectedCut.sourceStart + 0.5)}
+                      max={activeSource.duration}
+                      step={0.1}
+                      value={inspectedCut.sourceEnd}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        updateActiveTimelineClip((c) => {
+                          const updatedCuts = c.subCuts.map((sc) =>
+                            sc.id === inspectedCut.id ? { ...sc, sourceEnd: val } : sc
+                          );
+                          const recalc = recalculateClipTimeline(updatedCuts);
+                          return {
+                            ...c,
+                            subCuts: recalc.subCuts,
+                            duration: recalc.duration,
+                            sourceStart: recalc.sourceStart,
+                            sourceEnd: recalc.sourceEnd,
+                          };
+                        });
+                        handleSeekSourceTime(val);
+                      }}
+                      style={{ flex: 1 }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ whiteSpace: 'nowrap' }}>Caption:</span>
+                    <input
+                      type="text"
+                      className="input-field"
+                      style={{ padding: '4px 8px' }}
+                      placeholder="Overlay caption..."
+                      value={activeClip.captionText}
+                      onChange={(e) =>
+                        updateActiveTimelineClip((c) => ({ ...c, captionText: e.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+              ) : null}
             </div>
           )}
         </section>
@@ -1821,7 +4014,7 @@ export const App: React.FC = () => {
             <input
               type="text"
               className="input-field"
-              placeholder="Give feedback on this clip or cut..."
+              placeholder="e.g. 'Create compilation cutdowns' or 'Center subject'..."
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
             />

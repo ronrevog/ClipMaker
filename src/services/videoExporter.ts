@@ -1,10 +1,16 @@
-import { GeneratedClip, SourceVideoAsset } from '../types/editor';
-import { computeDistortionFree9x16Crop, getTrackingStateAtTime } from './subjectTracker';
+import { GeneratedClip, SourceVideoAsset, SubCut } from '../types/editor';
+import {
+  computeDistortionFree9x16Crop,
+  getTrackingStateAtTime,
+  trackSubjectSignatureInVideoFrame,
+} from './subjectTracker';
 
 /**
  * Renders the full `GeneratedClip` into a real 9:16 vertical video file (`.webm`)
  * WITH synchronized audio (captured from the source video element) + distortion-free 9:16
  * subject-tracked cropping, dynamic punch-in zooms, and captions, then downloads the file.
+ * Supports both continuous segment clips AND multi-cut condensed video edits (`subCuts`),
+ * and honors `clip.subjectFocus` (including live color-patch tracking for clicked subjects).
  */
 export async function exportClipTo9x16Video(
   source: SourceVideoAsset,
@@ -73,19 +79,53 @@ export async function exportClipTo9x16Video(
   const vw = videoEl.videoWidth || source.width || 1920;
   const vh = videoEl.videoHeight || source.height || 1080;
 
-  const draw9x16FrameAtTime = (sourceTime: number) => {
-    const clipRelTime = Math.max(0, sourceTime - clip.sourceStart);
-    const activeCut =
-      clip.subCuts.find((c) => sourceTime >= c.sourceStart && sourceTime <= c.sourceEnd) ||
-      clip.subCuts[0];
+  const cutsToRender: SubCut[] =
+    clip.subCuts && clip.subCuts.length > 0
+      ? clip.subCuts
+      : [
+          {
+            id: 'default-cut',
+            index: 1,
+            sourceStart: clip.sourceStart,
+            sourceEnd: clip.sourceEnd,
+            timelineStart: 0,
+            timelineEnd: clip.duration,
+            label: 'Clip',
+            zoom: clip.zoomScale,
+            cropBiasX: 0,
+          },
+        ];
+
+  let liveTrackedX = clip.subjectFocus?.anchorX ?? 0.5;
+  let liveTrackedY = clip.subjectFocus?.anchorY ?? 0.5;
+
+  const draw9x16Frame = (sourceTime: number, clipRelTime: number, activeCut: SubCut) => {
     const cutZoom = activeCut ? activeCut.zoom : clip.zoomScale;
     const cutBias = activeCut ? activeCut.cropBiasX : 0;
+
+    let activeFocus = clip.subjectFocus;
+    if (activeFocus?.strategy === 'click-track' && activeFocus.targetColorRgb) {
+      const tracked = trackSubjectSignatureInVideoFrame(
+        videoEl,
+        liveTrackedX,
+        liveTrackedY,
+        activeFocus.targetColorRgb
+      );
+      liveTrackedX = tracked.x;
+      liveTrackedY = tracked.y;
+      activeFocus = {
+        ...activeFocus,
+        anchorX: liveTrackedX,
+        anchorY: liveTrackedY,
+      };
+    }
 
     const track = getTrackingStateAtTime(
       source.trackingSamples,
       sourceTime,
       clip.trackingOffsetX + cutBias,
-      clip.manualKeyframes
+      clip.manualKeyframes,
+      activeFocus
     );
 
     const crop = computeDistortionFree9x16Crop(
@@ -127,39 +167,63 @@ export async function exportClipTo9x16Video(
     }
   };
 
-  videoEl.currentTime = clip.sourceStart;
-  await new Promise<void>((res) => {
-    const onSeek = () => {
-      videoEl.removeEventListener('seeked', onSeek);
-      res();
-    };
-    videoEl.addEventListener('seeked', onSeek);
-    setTimeout(onSeek, 300);
-  });
+  const seekVideoTo = async (targetTime: number) => {
+    if (Math.abs(videoEl.currentTime - targetTime) < 0.06) return;
+    videoEl.currentTime = targetTime;
+    await new Promise<void>((res) => {
+      const onSeek = () => {
+        videoEl.removeEventListener('seeked', onSeek);
+        res();
+      };
+      videoEl.addEventListener('seeked', onSeek);
+      setTimeout(onSeek, 250);
+    });
+  };
 
+  await seekVideoTo(cutsToRender[0].sourceStart);
   recorder.start(100);
-  await videoEl.play();
 
-  await new Promise<void>((resolve) => {
-    const loop = () => {
-      const t = videoEl.currentTime;
-      const pct = Math.min(
-        99,
-        Math.max(1, Math.round(((t - clip.sourceStart) / Math.max(0.5, clip.duration)) * 100))
-      );
-      onProgress?.(pct);
-      draw9x16FrameAtTime(t);
-
-      if (t >= clip.sourceEnd || videoEl.ended) {
-        videoEl.pause();
-        resolve();
-        return;
+  for (let i = 0; i < cutsToRender.length; i++) {
+    const cut = cutsToRender[i];
+    if (Math.abs(videoEl.currentTime - cut.sourceStart) > 0.1) {
+      if (recorder.state === 'recording') {
+        try {
+          recorder.pause();
+        } catch {}
       }
-      requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
-  });
+      videoEl.pause();
+      await seekVideoTo(cut.sourceStart);
+      if (recorder.state === 'paused') {
+        try {
+          recorder.resume();
+        } catch {}
+      }
+    }
 
+    await videoEl.play();
+
+    await new Promise<void>((resolve) => {
+      const loop = () => {
+        const t = videoEl.currentTime;
+        const clipRelTime = cut.timelineStart + Math.max(0, t - cut.sourceStart);
+        const pct = Math.min(
+          99,
+          Math.max(1, Math.round((clipRelTime / Math.max(0.5, clip.duration)) * 100))
+        );
+        onProgress?.(pct);
+        draw9x16Frame(t, clipRelTime, cut);
+
+        if (t >= cut.sourceEnd || videoEl.ended) {
+          resolve();
+          return;
+        }
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    });
+  }
+
+  videoEl.pause();
   recorder.stop();
   await new Promise<void>((res) => {
     recorder.onstop = () => res();

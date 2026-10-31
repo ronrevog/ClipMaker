@@ -16,7 +16,27 @@ export interface AIProviderSettings {
 }
 
 export type PacingProfile = 'hyper-fast' | 'fast-social' | 'balanced' | 'cinematic';
+export type ClipCreationMode = 'clip-segment' | 'condensed-edit';
 export type TrackingMode = 'face-speaker' | 'primary-subject' | 'action-motion' | 'center-lock';
+
+export type SubjectFocusStrategy =
+  | 'auto-salient'
+  | 'click-track'
+  | 'static-lock'
+  | 'face-speaker'
+  | 'left-subject'
+  | 'right-subject'
+  | 'action-motion';
+
+export interface SubjectFocusConfig {
+  strategy: SubjectFocusStrategy;
+  anchorX: number; // 0..1 normalized horizontal target in source video
+  anchorY: number; // 0..1 normalized vertical target in source video
+  anchorTime: number; // source timestamp when picked
+  targetColorRgb?: [number, number, number]; // sampled RGB signature of clicked subject
+  label: string;
+}
+
 export type CaptionStyleId = 'hormozi-bold' | 'premiere-minimal' | 'neon-karaoke' | 'cinema-serif';
 export type SafeZoneGuideId = 'tiktok' | 'reels' | 'shorts' | 'none';
 export type NLEToolId =
@@ -51,12 +71,13 @@ export interface EditingScheme {
   description: string;
   isBuiltIn?: boolean;
   createdAt: string;
-  targetClipDuration: number; // seconds, e.g. 25
+  clipCreationMode?: ClipCreationMode; // 'clip-segment' (Best Viral Clips) vs 'condensed-edit' (Compilation Cutdowns)
+  targetClipDuration: number; // seconds, 5..180 (up to 3 mins)
   minClipDuration: number;
   maxClipDuration: number;
   maxClipsCount: number;
   pacingProfile: PacingProfile;
-  targetAvgShotLength: number; // seconds per cut, e.g. 2.2
+  targetAvgShotLength: number; // seconds per cut in compilation mode, e.g. 2.5
   audioPeakWeight: number; // 0..1
   visualMotionWeight: number; // 0..1
   silenceThresholdMs: number; // e.g. 300ms
@@ -72,13 +93,28 @@ export interface EditingScheme {
 
 export interface TrackingSample {
   time: number; // seconds in source video
-  rawX: number; // normalized 0..1 center in 16:9 frame
-  rawY: number; // normalized 0..1 center in 16:9 frame
+  rawX: number; // normalized 0..1 primary salient cluster center X
+  rawY: number; // normalized 0..1 primary salient cluster center Y
   cropX: number; // smoothed normalized 0..1 center for 9:16 window
   cropY: number;
+  leftSubjectX?: number; // detected subject cluster in left half (0.16..0.50)
+  rightSubjectX?: number; // detected subject cluster in right half (0.50..0.84)
+  faceX?: number; // detected face/speaker cluster X
+  faceY?: number;
+  motionX?: number; // highest-motion local cluster X
+  motionY?: number;
+  motionScore?: number; // 0..100
   confidence: number; // 0..1
   subjectLabel: string;
   isManualKeyframe?: boolean;
+}
+
+export interface PerSecondTelemetry {
+  time: number;
+  audioEnergy: number; // 0..1
+  motionEnergy: number; // 0..1
+  viralScore: number; // 0..100 combined retention/hook score for this second
+  isSilent: boolean;
 }
 
 export interface SubCut {
@@ -86,7 +122,7 @@ export interface SubCut {
   index: number;
   sourceStart: number; // seconds in source video
   sourceEnd: number;
-  timelineStart: number; // seconds in clip sequence
+  timelineStart: number; // seconds in clip sequence (0 .. clip.duration)
   timelineEnd: number;
   label: string;
   zoom: number; // 1.0 .. 1.5
@@ -108,12 +144,14 @@ export interface GeneratedClip {
   sourceVideoId: string;
   schemeId: string;
   schemeName: string;
+  clipCreationMode?: ClipCreationMode;
   viralScore: number; // 0..99
   hookReason: string;
   sourceStart: number;
   sourceEnd: number;
   duration: number;
   trackingMode: TrackingMode;
+  subjectFocus?: SubjectFocusConfig;
   trackingOffsetX: number; // global horizontal offset -0.35..+0.35
   trackingSmoothing: number; // 0.1..0.96
   zoomScale: number; // base zoom 1.0..1.5
@@ -145,6 +183,7 @@ export interface SourceVideoAsset {
   sceneCutTimestamps: number[];
   audioPeakTimestamps: number[];
   highEnergyWindows?: HighEnergyWindow[];
+  perSecondTelemetry?: PerSecondTelemetry[];
   sampledFrames?: Array<{ time: number; dataUrl: string }>;
   audioSampleBase64?: string;
   trackingSamples: TrackingSample[];

@@ -11,9 +11,10 @@ export const DEFAULT_EDITING_SCHEMES: EditingScheme[] = [
       'High-retention 9:16 vertical scheme with rapid 1.8s hook cuts, dynamic 1.22x beat punch-ins, and responsive face/subject centering.',
     isBuiltIn: true,
     createdAt: '2026-10-29T12:00:00Z',
+    clipCreationMode: 'clip-segment',
     targetClipDuration: 24,
-    minClipDuration: 15,
-    maxClipDuration: 35,
+    minClipDuration: 5,
+    maxClipDuration: 180,
     maxClipsCount: 4,
     pacingProfile: 'fast-social',
     targetAvgShotLength: 2.1,
@@ -32,12 +33,13 @@ export const DEFAULT_EDITING_SCHEMES: EditingScheme[] = [
     id: 'scheme-podcast-speaker',
     name: 'Studio Podcast & Speaker Lock',
     description:
-      'Tracks active speaker face with damped broadcast camera smoothing, strips conversational pauses >320ms, and adds clean Premiere minimal captions.',
+      'Tracks active speaker face with damped broadcast camera smoothing, strips conversational pauses >320ms, and adds clean minimal captions.',
     isBuiltIn: true,
     createdAt: '2026-10-29T12:05:00Z',
+    clipCreationMode: 'clip-segment',
     targetClipDuration: 32,
-    minClipDuration: 20,
-    maxClipDuration: 55,
+    minClipDuration: 5,
+    maxClipDuration: 180,
     maxClipsCount: 4,
     pacingProfile: 'balanced',
     targetAvgShotLength: 3.4,
@@ -54,14 +56,15 @@ export const DEFAULT_EDITING_SCHEMES: EditingScheme[] = [
   },
   {
     id: 'scheme-action-velocity',
-    name: 'Action & Automotive Velocity 9:16',
+    name: 'Action & Automotive Highlight Edit 9:16',
     description:
-      'Prioritizes high visual motion vectors and engine/beat transients with fast action tracking and tight deadzone to keep moving subjects dead-center.',
+      'Condenses the best high-motion and audio peak moments from across the video into a fast-paced highlight edit of your target length.',
     isBuiltIn: true,
     createdAt: '2026-10-29T12:10:00Z',
+    clipCreationMode: 'condensed-edit',
     targetClipDuration: 18,
-    minClipDuration: 10,
-    maxClipDuration: 28,
+    minClipDuration: 5,
+    maxClipDuration: 180,
     maxClipsCount: 5,
     pacingProfile: 'hyper-fast',
     targetAvgShotLength: 1.4,
@@ -83,9 +86,10 @@ export const DEFAULT_EDITING_SCHEMES: EditingScheme[] = [
       'Smooth, floating 9:16 camera pans (94% spring damping) with breathing room for scenic shots and bold serif title overlays.',
     isBuiltIn: true,
     createdAt: '2026-10-29T12:15:00Z',
+    clipCreationMode: 'condensed-edit',
     targetClipDuration: 28,
-    minClipDuration: 18,
-    maxClipDuration: 45,
+    minClipDuration: 5,
+    maxClipDuration: 180,
     maxClipsCount: 3,
     pacingProfile: 'cinematic',
     targetAvgShotLength: 4.5,
@@ -108,7 +112,12 @@ export function loadSavedSchemes(): EditingScheme[] {
     if (!raw) return DEFAULT_EDITING_SCHEMES;
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed;
+      return parsed.map((s: EditingScheme) => ({
+        ...s,
+        clipCreationMode: s.clipCreationMode || 'clip-segment',
+        maxClipsCount: s.maxClipsCount || 4,
+        maxClipDuration: 180,
+      }));
     }
   } catch (e) {
     console.warn('Failed to load schemes from localStorage:', e);

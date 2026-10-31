@@ -1,4 +1,9 @@
-import { HighEnergyWindow, SourceVideoAsset, TrackingSample } from '../types/editor';
+import {
+  HighEnergyWindow,
+  PerSecondTelemetry,
+  SourceVideoAsset,
+  TrackingSample,
+} from '../types/editor';
 import { detectFrameSubjectCentroid, solveSmoothedCameraPath } from './subjectTracker';
 
 /**
@@ -25,9 +30,9 @@ function encodeMonoWavBase64(channelData: Float32Array, srcSampleRate: number, m
   view.setUint32(4, 36 + numSamples * 2, true);
   writeString(8, 'WAVE');
   writeString(12, 'fmt ');
-  view.setUint32(16, 16, true); // PCM chunk size
-  view.setUint16(20, 1, true); // PCM format
-  view.setUint16(22, 1, true); // Mono
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
   view.setUint32(24, actualRate, true);
   view.setUint32(28, actualRate * 2, true);
   view.setUint16(32, 2, true);
@@ -61,7 +66,7 @@ function encodeMonoWavBase64(channelData: Float32Array, srcSampleRate: number, m
 async function extractAudioTelemetry(
   file: File,
   duration: number,
-  bucketCount = 200
+  bucketCount = 240
 ): Promise<{
   peaks: number[];
   audioPeakTimestamps: number[];
@@ -98,23 +103,22 @@ async function extractAudioTelemetry(
     const audioPeakTimestamps: number[] = [];
     for (let i = 1; i < normalized.length - 1; i++) {
       if (
-        normalized[i] > 0.55 &&
+        normalized[i] > 0.52 &&
         normalized[i] >= normalized[i - 1] &&
         normalized[i] >= normalized[i + 1]
       ) {
         const t = Number(((i / bucketCount) * duration).toFixed(2));
         if (
           audioPeakTimestamps.length === 0 ||
-          t - audioPeakTimestamps[audioPeakTimestamps.length - 1] > 0.85
+          t - audioPeakTimestamps[audioPeakTimestamps.length - 1] > 0.75
         ) {
           audioPeakTimestamps.push(t);
         }
       }
     }
 
-    // Compute top high-energy windows across the video
     const highEnergyWindows: HighEnergyWindow[] = [];
-    const windowBuckets = Math.max(6, Math.floor(bucketCount / 6));
+    const windowBuckets = Math.max(6, Math.floor(bucketCount / 8));
     const stepBuckets = Math.max(3, Math.floor(windowBuckets / 2));
     for (let startB = 0; startB + windowBuckets <= bucketCount; startB += stepBuckets) {
       const slice = normalized.slice(startB, startB + windowBuckets);
@@ -137,20 +141,73 @@ async function extractAudioTelemetry(
     return {
       peaks: normalized,
       audioPeakTimestamps,
-      highEnergyWindows: highEnergyWindows.slice(0, 6),
+      highEnergyWindows: highEnergyWindows.slice(0, 8),
       audioSampleBase64,
     };
   } catch (err) {
     console.warn('Audio decode fallback (video may have no audio stream):', err);
-    const peaks = new Array(bucketCount).fill(0.15);
+    const peaks = new Array(bucketCount).fill(0.25);
     return { peaks, audioPeakTimestamps: [], highEnergyWindows: [] };
   }
 }
 
 /**
+ * Computes per-second viral telemetry (`audioEnergy`, `motionEnergy`, `viralScore`, `isSilent`)
+ * across the entire video duration so Viral Clips and Compilation Cutdowns score real highlights.
+ */
+function buildPerSecondTelemetry(
+  duration: number,
+  waveformPeaks: number[],
+  trackingSamples: TrackingSample[],
+  sceneCutTimestamps: number[]
+): PerSecondTelemetry[] {
+  const totalSecs = Math.max(1, Math.ceil(duration));
+  const telemetry: PerSecondTelemetry[] = [];
+
+  for (let sec = 0; sec < totalSecs; sec++) {
+    const tMid = Math.min(duration, sec + 0.5);
+    const bucketIdx = Math.min(
+      waveformPeaks.length - 1,
+      Math.max(0, Math.floor((tMid / Math.max(1, duration)) * waveformPeaks.length))
+    );
+    const audioEnergy = waveformPeaks[bucketIdx] ?? 0.25;
+
+    // Nearest tracking sample for motion energy
+    let nearestSample = trackingSamples[0];
+    let bestDist = Infinity;
+    for (const s of trackingSamples) {
+      const d = Math.abs(s.time - tMid);
+      if (d < bestDist) {
+        bestDist = d;
+        nearestSample = s;
+      }
+    }
+    const motionEnergy = Math.min(1, (nearestSample?.motionScore ?? 20) / 80);
+    const nearCut = sceneCutTimestamps.some((c) => Math.abs(c - tMid) < 0.8) ? 0.15 : 0;
+    const isSilent = audioEnergy < 0.14;
+
+    const rawViral =
+      audioEnergy * 56 +
+      motionEnergy * 34 +
+      nearCut * 100 -
+      (isSilent ? 22 : 0);
+
+    telemetry.push({
+      time: sec,
+      audioEnergy: Number(audioEnergy.toFixed(3)),
+      motionEnergy: Number(motionEnergy.toFixed(3)),
+      viralScore: Math.max(10, Math.min(99, Math.round(rawViral))),
+      isSilent,
+    });
+  }
+
+  return telemetry;
+}
+
+/**
  * Analyzes an uploaded video file by decoding real audio + sampling real video frames
- * across its duration to detect scene cuts, subject centroids (using Chromium FaceDetector if
- * available + motion/chroma saliency), and keyframe JPEGs for AI analysis.
+ * across its duration to detect scene cuts, localized subject clusters (using 12x6 spatial grid +
+ * Chromium FaceDetector if available), per-second viral telemetry, and keyframe JPEGs for AI analysis.
  */
 export async function analyzeUploadedVideo(
   file: File,
@@ -183,7 +240,6 @@ export async function analyzeUploadedVideo(
   sampleCanvas.height = sampleH;
   const ctx = sampleCanvas.getContext('2d', { willReadFrequently: true });
 
-  // Optional native Chromium Shape Detection FaceDetector API if supported
   let nativeFaceDetector: any = null;
   if (typeof (window as any).FaceDetector === 'function') {
     try {
@@ -193,7 +249,7 @@ export async function analyzeUploadedVideo(
     }
   }
 
-  const targetSampleCount = Math.min(75, Math.max(24, Math.ceil(duration * 2.2)));
+  const targetSampleCount = Math.min(90, Math.max(28, Math.ceil(duration * 2.2)));
   const sampleStep = duration / targetSampleCount;
   const keyframeInterval = Math.max(1, Math.floor(targetSampleCount / 8));
 
@@ -244,18 +300,23 @@ export async function analyzeUploadedVideo(
 
       let finalX = detection.x;
       let finalY = detection.y;
+      let faceX = detection.faceX;
+      let faceY = detection.faceY;
       let finalConf = detection.confidence;
       let finalLabel = detection.label;
 
-      // If browser supports native FaceDetector, fuse exact face bounding box center!
       if (nativeFaceDetector) {
         try {
           const faces = await nativeFaceDetector.detect(sampleCanvas);
           if (faces && faces.length > 0) {
             const box = faces[0].boundingBox;
-            finalX = Math.max(0.16, Math.min(0.84, (box.x + box.width / 2) / sampleW));
-            finalY = Math.max(0.2, Math.min(0.8, (box.y + box.height / 2) / sampleH));
-            finalConf = 0.97;
+            const fx = Math.max(0.16, Math.min(0.84, (box.x + box.width / 2) / sampleW));
+            const fy = Math.max(0.2, Math.min(0.8, (box.y + box.height / 2) / sampleH));
+            finalX = fx;
+            finalY = fy;
+            faceX = fx;
+            faceY = fy;
+            finalConf = 0.98;
             finalLabel = 'Detected Face';
           }
         } catch {
@@ -263,7 +324,7 @@ export async function analyzeUploadedVideo(
         }
       }
 
-      if (prevBuffer && detection.sceneDelta > 0.22) {
+      if (prevBuffer && detection.sceneDelta > 0.21) {
         if (
           sceneCutTimestamps.length === 0 ||
           t - sceneCutTimestamps[sceneCutTimestamps.length - 1] > 0.8
@@ -278,6 +339,13 @@ export async function analyzeUploadedVideo(
         rawY: Number(finalY.toFixed(4)),
         cropX: Number(finalX.toFixed(4)),
         cropY: Number(finalY.toFixed(4)),
+        leftSubjectX: detection.leftSubjectX,
+        rightSubjectX: detection.rightSubjectX,
+        faceX: Number(faceX.toFixed(4)),
+        faceY: Number(faceY.toFixed(4)),
+        motionX: detection.motionX,
+        motionY: detection.motionY,
+        motionScore: detection.motionScore,
         confidence: Number(finalConf.toFixed(2)),
         subjectLabel: finalLabel,
       });
@@ -289,9 +357,16 @@ export async function analyzeUploadedVideo(
   onProgress?.('Solving damped 9:16 camera tracking path...', 96);
   const smoothedSamples = solveSmoothedCameraPath(rawSamples, {
     smoothing: 0.82,
-    deadzone: 0.06,
+    deadzone: 0.05,
     sceneCuts: sceneCutTimestamps,
   });
+
+  const perSecondTelemetry = buildPerSecondTelemetry(
+    duration,
+    peaks,
+    smoothedSamples,
+    sceneCutTimestamps
+  );
 
   onProgress?.('Complete', 100);
 
@@ -308,6 +383,7 @@ export async function analyzeUploadedVideo(
     sceneCutTimestamps,
     audioPeakTimestamps,
     highEnergyWindows,
+    perSecondTelemetry,
     sampledFrames,
     audioSampleBase64,
     trackingSamples: smoothedSamples,
@@ -315,8 +391,8 @@ export async function analyzeUploadedVideo(
 }
 
 /**
- * Creates a real playable WebM video + synthesized audio stream in memory or falls back cleanly
- * so the timeline can also be tested before uploading a local file.
+ * Creates a real playable demo sequence in memory so the timeline and subject focus tools
+ * can also be tested immediately before uploading a local file.
  */
 export function createBuiltInPremiereDemoAsset(): SourceVideoAsset {
   const duration = 28.97;
@@ -328,26 +404,31 @@ export function createBuiltInPremiereDemoAsset(): SourceVideoAsset {
     let rawX = 0.5;
     let rawY = 0.5;
     let label = 'Roadster Subject';
+    let motionScore = 45;
 
     if (t < 7.8) {
       rawX = 0.44 + 0.16 * Math.sin(t * 0.75);
       rawY = 0.62 - 0.04 * Math.cos(t * 0.5);
       label = 'Convertible Roadster';
+      motionScore = 62;
     } else if (t < 15.6) {
       const localT = t - 7.8;
       rawX = 0.48 + 0.09 * Math.sin(localT * 0.9);
       rawY = 0.38 + Math.min(0.32, localT * 0.045);
       label = 'Waterfall Divers';
+      motionScore = 78;
     } else if (t < 22.4) {
       const localT = t - 15.6;
       rawX = 0.54 + 0.07 * Math.cos(localT * 1.1);
       rawY = 0.44 + 0.03 * Math.sin(localT * 1.4);
       label = 'Speaker / Face';
+      motionScore = 34;
     } else {
       const localT = t - 22.4;
       rawX = 0.36 + 0.28 * (localT / 6.6);
       rawY = 0.52 - 0.05 * Math.sin(localT * 1.8);
       label = 'Action Subject';
+      motionScore = 84;
     }
 
     rawSamples.push({
@@ -356,6 +437,13 @@ export function createBuiltInPremiereDemoAsset(): SourceVideoAsset {
       rawY: Number(rawY.toFixed(4)),
       cropX: Number(rawX.toFixed(4)),
       cropY: Number(rawY.toFixed(4)),
+      leftSubjectX: Number(Math.max(0.22, Math.min(0.45, rawX - 0.16)).toFixed(4)),
+      rightSubjectX: Number(Math.max(0.55, Math.min(0.78, rawX + 0.16)).toFixed(4)),
+      faceX: Number(rawX.toFixed(4)),
+      faceY: Number(Math.max(0.28, rawY - 0.06).toFixed(4)),
+      motionX: Number(rawX.toFixed(4)),
+      motionY: Number(rawY.toFixed(4)),
+      motionScore,
       confidence: 0.94,
       subjectLabel: label,
     });
@@ -363,7 +451,7 @@ export function createBuiltInPremiereDemoAsset(): SourceVideoAsset {
 
   const smoothed = solveSmoothedCameraPath(rawSamples, {
     smoothing: 0.82,
-    deadzone: 0.06,
+    deadzone: 0.05,
     sceneCuts: sceneCutTimestamps,
   });
 
@@ -377,6 +465,13 @@ export function createBuiltInPremiereDemoAsset(): SourceVideoAsset {
     waveformPeaks.push(Number(Math.min(1, val).toFixed(3)));
   }
 
+  const perSecondTelemetry = buildPerSecondTelemetry(
+    duration,
+    waveformPeaks,
+    smoothed,
+    sceneCutTimestamps
+  );
+
   return {
     id: 'demo-30-sec-film',
     name: '30 sec Film.mp4 (Synthetic Demo — Upload Any Real Video)',
@@ -389,6 +484,7 @@ export function createBuiltInPremiereDemoAsset(): SourceVideoAsset {
     waveformPeaks,
     sceneCutTimestamps,
     audioPeakTimestamps,
+    perSecondTelemetry,
     trackingSamples: smoothed,
   };
 }

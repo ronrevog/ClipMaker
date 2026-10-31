@@ -6,7 +6,6 @@ import {
   Lock,
   Magnet,
   Mic,
-  Scissors,
   Wrench,
 } from 'lucide-react';
 import {
@@ -15,7 +14,11 @@ import {
   SourceVideoAsset,
   SubCut,
 } from '../types/editor';
-import { formatSMPTETimecode } from '../services/clipGenerator';
+import {
+  clipTimeToSourceTime,
+  formatSMPTETimecode,
+  sourceTimeToClipTime,
+} from '../services/clipGenerator';
 
 interface TimelinePanelProps {
   focused: boolean;
@@ -44,23 +47,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
   activeTool,
   onSplitAtTime,
   onSelectSubCut,
-  onTrimClipBoundary,
 }) => {
   const laneAreaRef = useRef<HTMLDivElement | null>(null);
-  const totalDuration = Math.max(5, sourceAsset.duration);
+  const clipDuration = Math.max(1, activeClip ? activeClip.duration : sourceAsset.duration);
+  const clipPlayhead = activeClip
+    ? sourceTimeToClipTime(activeClip, playheadTime)
+    : playheadTime;
 
   const handleRulerOrLaneClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const clickedTime = Number((ratio * totalDuration).toFixed(2));
+    const targetClipTime = ratio * clipDuration;
+    const mappedSourceTime = activeClip
+      ? clipTimeToSourceTime(activeClip, targetClipTime).sourceTime
+      : targetClipTime;
+
     if (activeTool === 'razor') {
-      onSplitAtTime(clickedTime);
+      onSplitAtTime(mappedSourceTime);
     } else {
-      onSeekSource(clickedTime);
+      onSeekSource(mappedSourceTime);
     }
   };
 
-  const playheadPct = Math.max(0, Math.min(100, (playheadTime / totalDuration) * 100));
+  const playheadPct = Math.max(0, Math.min(100, (clipPlayhead / clipDuration) * 100));
 
   return (
     <section
@@ -68,7 +77,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
       style={{ flex: 1 }}
       onMouseDown={onFocus}
     >
-      {/* Sequence Tabs Header */}
       <div className="pr-panel-tabs" style={{ justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
           {allClips.map((clip, i) => {
@@ -86,13 +94,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         </div>
 
         <span style={{ fontSize: 10, color: '#8e8e8e', paddingRight: 6 }}>
-          {activeTool === 'razor'
-            ? '✂ Razor Mode: Click any clip on V1 to split at timestamp'
-            : 'Click ruler or V1 sub-cuts to scrub & inspect'}
+          Elected Clip Sequence Timeline (0:00 → {formatSMPTETimecode(clipDuration).slice(3)})
         </span>
       </div>
 
-      {/* Premiere Timeline Upper Sub-Toolbar (Timecode + Snap/Link Icons + Time Ruler) */}
       <div
         style={{
           display: 'flex',
@@ -102,7 +107,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
           flexShrink: 0,
         }}
       >
-        {/* Left Header Box with Large Blue SMPTE Timecode & Snap/Link Icons */}
         <div
           style={{
             width: 145,
@@ -115,7 +119,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
           }}
         >
           <div className="pr-timecode" style={{ fontSize: 13.5 }}>
-            {formatSMPTETimecode(playheadTime)}
+            {formatSMPTETimecode(clipPlayhead)}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span title="Snap in Timeline (S)">
@@ -133,7 +137,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
           </div>
         </div>
 
-        {/* Right Timecode Ruler */}
         <div
           ref={laneAreaRef}
           onClick={handleRulerOrLaneClick}
@@ -145,22 +148,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             overflow: 'hidden',
           }}
         >
-          {/* Yellow Work-Area Bar (matching screenshot!) */}
-          {activeClip && (
-            <div
-              style={{
-                position: 'absolute',
-                left: `${(activeClip.sourceStart / totalDuration) * 100}%`,
-                width: `${((activeClip.sourceEnd - activeClip.sourceStart) / totalDuration) * 100}%`,
-                top: 2,
-                height: 3,
-                background: '#e5c029',
-                borderRadius: 2,
-              }}
-            />
-          )}
-
-          {/* Ruler Timecode Labels & Tick Marks */}
           {[0, 0.2, 0.4, 0.6, 0.8, 1].map((frac, idx) => (
             <div
               key={idx}
@@ -175,11 +162,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 pointerEvents: 'none',
               }}
             >
-              {formatSMPTETimecode(frac * totalDuration)}
+              {formatSMPTETimecode(frac * clipDuration)}
             </div>
           ))}
 
-          {/* Minor tick marks */}
           <div
             style={{
               position: 'absolute',
@@ -193,7 +179,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }}
           />
 
-          {/* Blue Playhead Cap */}
           <div
             style={{
               position: 'absolute',
@@ -211,7 +196,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         </div>
       </div>
 
-      {/* Multi-Track Stack (V3, V2, V1 + Divider + A1, A2, Master) */}
       <div
         style={{
           flex: 1,
@@ -221,68 +205,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
           flexDirection: 'column',
         }}
       >
-        {/* V3 Track: Subject Tracking Keyframes & Safe-Zone Layer */}
-        <div className="pr-track-row">
-          <div className="pr-track-header">
-            <Lock size={10} color="#777" />
-            <span className="pr-track-pill">V3</span>
-            <Eye size={11} color="#999" style={{ marginLeft: 'auto' }} />
-          </div>
-          <div className="pr-track-lane" onClick={handleRulerOrLaneClick}>
-            {activeClip?.manualKeyframes.map((kf, i) => (
-              <div
-                key={i}
-                style={{
-                  position: 'absolute',
-                  left: `${(kf.time / totalDuration) * 100}%`,
-                  top: 9,
-                  width: 9,
-                  height: 9,
-                  background: '#facc15',
-                  transform: 'translateX(-50%) rotate(45deg)',
-                  border: '1px solid #000',
-                }}
-                title={`Manual 9:16 Tracking Keyframe @ ${kf.time.toFixed(2)}s`}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* V2 Track: Pink/Magenta Graphic & Caption Blocks (matches V2 pink clip in screenshot!) */}
-        <div className="pr-track-row">
-          <div className="pr-track-header">
-            <Lock size={10} color="#777" />
-            <span className="pr-track-pill active">V2</span>
-            <Eye size={11} color="#999" style={{ marginLeft: 'auto' }} />
-          </div>
-          <div className="pr-track-lane" onClick={handleRulerOrLaneClick}>
-            {activeClip && (
-              <div
-                style={{
-                  position: 'absolute',
-                  left: `${((activeClip.sourceStart + activeClip.duration * 0.15) / totalDuration) * 100}%`,
-                  width: `${Math.max(5, (activeClip.duration * 0.45 / totalDuration) * 100)}%`,
-                  top: 3,
-                  bottom: 3,
-                  background: 'var(--pr-clip-graphic)',
-                  border: '1px solid #efb8dc',
-                  borderRadius: 2,
-                  padding: '2px 5px',
-                  fontSize: 9.5,
-                  color: '#fff',
-                  fontWeight: 600,
-                  overflow: 'hidden',
-                  whiteSpace: 'nowrap',
-                }}
-                title={`Graphic Overlay: ${activeClip.captionText}`}
-              >
-                {activeClip.captionText} [Graphic]
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* V1 Track: Primary 9:16 Reframed Video Sub-Cuts (Slate Blue Premiere Clips) */}
         <div className="pr-track-row" style={{ height: 36 }}>
           <div className="pr-track-header">
             <Lock size={10} color="#777" />
@@ -294,59 +216,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onClick={handleRulerOrLaneClick}
             style={{ cursor: activeTool === 'razor' ? 'crosshair' : 'pointer' }}
           >
-            {/* Inactive Generated Clips shown dimly */}
-            {allClips
-              .filter((c) => c.id !== activeClip?.id)
-              .map((clip) => (
-                <div
-                  key={clip.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onSelectClip(clip);
-                  }}
-                  style={{
-                    position: 'absolute',
-                    left: `${(clip.sourceStart / totalDuration) * 100}%`,
-                    width: `${((clip.sourceEnd - clip.sourceStart) / totalDuration) * 100}%`,
-                    top: 6,
-                    bottom: 6,
-                    background: 'rgba(92, 127, 163, 0.22)',
-                    border: '1px dashed rgba(125, 165, 206, 0.45)',
-                    borderRadius: 2,
-                    padding: '1px 4px',
-                    fontSize: 9,
-                    color: '#9bb4ce',
-                    overflow: 'hidden',
-                    whiteSpace: 'nowrap',
-                  }}
-                  title={`Click to switch to ${clip.name}`}
-                >
-                  {clip.name}
-                </div>
-              ))}
-
-            {/* Active 9:16 Clip with Sub-Cut Slices & Trim Handles */}
             {activeClip?.subCuts.map((cut) => {
-              const leftPct = (cut.sourceStart / totalDuration) * 100;
-              const widthPct = Math.max(0.8, ((cut.sourceEnd - cut.sourceStart) / totalDuration) * 100);
+              const leftPct = (cut.timelineStart / clipDuration) * 100;
+              const widthPct = Math.max(
+                0.8,
+                ((cut.timelineEnd - cut.timelineStart) / clipDuration) * 100
+              );
               const isCurrent =
-                playheadTime >= cut.sourceStart && playheadTime <= cut.sourceEnd;
+                clipPlayhead >= cut.timelineStart && clipPlayhead <= cut.timelineEnd;
 
               return (
                 <div
                   key={cut.id}
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (activeTool === 'razor') {
-                      const rect = laneAreaRef.current?.getBoundingClientRect();
-                      if (rect) {
-                        const r = (e.clientX - rect.left) / rect.width;
-                        onSplitAtTime(Number((r * totalDuration).toFixed(2)));
-                      }
-                    } else {
-                      onSelectSubCut(cut);
-                      onSeekSource(cut.sourceStart + 0.05);
-                    }
+                    onSelectSubCut(cut);
+                    onSeekSource(cut.sourceStart + 0.02);
                   }}
                   style={{
                     position: 'absolute',
@@ -369,74 +254,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     alignItems: 'center',
                     justifyContent: 'space-between',
                   }}
-                  title={`${cut.label}: ${cut.sourceStart}s - ${cut.sourceEnd}s (${cut.zoom}x zoom)`}
+                  title={`${cut.label}: Source ${cut.sourceStart}s - ${cut.sourceEnd}s`}
                 >
                   <span>
-                    {sourceAsset.name} [9:16 V1 • #{cut.index}]
+                    #{cut.index} {cut.label}
                   </span>
-                  {cut.zoom > 1.02 && (
-                    <span
-                      style={{
-                        background: 'rgba(0,0,0,0.35)',
-                        color: '#fff',
-                        fontSize: 8.5,
-                        padding: '0 3px',
-                        borderRadius: 2,
-                      }}
-                    >
-                      {cut.zoom}x
-                    </span>
-                  )}
                 </div>
               );
             })}
-
-            {/* In / Out Trim Nudge Buttons on Active Clip */}
-            {activeClip && (
-              <>
-                <div
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onTrimClipBoundary('start', -1.0);
-                  }}
-                  style={{
-                    position: 'absolute',
-                    left: `${(activeClip.sourceStart / totalDuration) * 100}%`,
-                    top: 0,
-                    bottom: 0,
-                    width: 5,
-                    background: '#e5c029',
-                    cursor: 'ew-resize',
-                    zIndex: 5,
-                  }}
-                  title="Click to extend Clip In-Point earlier (-1s)"
-                />
-                <div
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onTrimClipBoundary('end', 1.0);
-                  }}
-                  style={{
-                    position: 'absolute',
-                    left: `${(activeClip.sourceEnd / totalDuration) * 100}%`,
-                    top: 0,
-                    bottom: 0,
-                    width: 5,
-                    background: '#e5c029',
-                    cursor: 'ew-resize',
-                    zIndex: 5,
-                  }}
-                  title="Click to extend Clip Out-Point later (+1s)"
-                />
-              </>
-            )}
           </div>
         </div>
 
-        {/* Video / Audio Track Divider Line */}
         <div style={{ height: 3, background: '#111111' }} />
 
-        {/* A1 Track: Audio Waveform Clip Block */}
         <div className="pr-track-row" style={{ height: 36 }}>
           <div className="pr-track-header">
             <Lock size={10} color="#777" />
@@ -448,69 +278,58 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             </span>
           </div>
           <div className="pr-track-lane" onClick={handleRulerOrLaneClick}>
-            {activeClip && (
-              <div
-                style={{
-                  position: 'absolute',
-                  left: `${(activeClip.sourceStart / totalDuration) * 100}%`,
-                  width: `${((activeClip.sourceEnd - activeClip.sourceStart) / totalDuration) * 100}%`,
-                  top: 2,
-                  bottom: 2,
-                  background: 'var(--pr-clip-audio)',
-                  border: '1px solid #72c1ab',
-                  borderRadius: 2,
-                  overflow: 'hidden',
-                  display: 'flex',
-                  alignItems: 'flex-end',
-                  gap: 1,
-                  padding: '2px 3px',
-                }}
-              >
-                {sourceAsset.waveformPeaks.slice(0, 75).map((pk, idx) => (
-                  <div
-                    key={idx}
-                    style={{
-                      flex: 1,
-                      height: `${Math.max(18, Math.round(pk * 90))}%`,
-                      background: 'rgba(215, 255, 242, 0.65)',
-                    }}
-                  />
-                ))}
-              </div>
-            )}
+            {activeClip?.subCuts.map((cut) => {
+              const leftPct = (cut.timelineStart / clipDuration) * 100;
+              const widthPct = Math.max(
+                0.8,
+                ((cut.timelineEnd - cut.timelineStart) / clipDuration) * 100
+              );
+              const totalPeaks = sourceAsset.waveformPeaks.length;
+              const startIdx = Math.max(
+                0,
+                Math.floor((cut.sourceStart / Math.max(1, sourceAsset.duration)) * totalPeaks)
+              );
+              const endIdx = Math.max(
+                startIdx + 1,
+                Math.ceil((cut.sourceEnd / Math.max(1, sourceAsset.duration)) * totalPeaks)
+              );
+              const cutPeaks = sourceAsset.waveformPeaks.slice(startIdx, endIdx);
+
+              return (
+                <div
+                  key={`a-${cut.id}`}
+                  style={{
+                    position: 'absolute',
+                    left: `${leftPct}%`,
+                    width: `${widthPct}%`,
+                    top: 2,
+                    bottom: 2,
+                    background: 'var(--pr-clip-audio)',
+                    border: '1px solid #72c1ab',
+                    borderRadius: 2,
+                    overflow: 'hidden',
+                    display: 'flex',
+                    alignItems: 'flex-end',
+                    gap: 1,
+                    padding: '2px 3px',
+                  }}
+                >
+                  {cutPeaks.map((pk, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        flex: 1,
+                        height: `${Math.max(18, Math.round(pk * 90))}%`,
+                        background: 'rgba(215, 255, 242, 0.65)',
+                      }}
+                    />
+                  ))}
+                </div>
+              );
+            })}
           </div>
         </div>
 
-        {/* A2 Track: Beat & Audio Transient Markers */}
-        <div className="pr-track-row">
-          <div className="pr-track-header">
-            <Lock size={10} color="#777" />
-            <span className="pr-track-pill">A2</span>
-            <span style={{ marginLeft: 'auto', display: 'flex', gap: 5, fontSize: 9.5 }}>
-              <b>M</b>
-              <b>S</b>
-              <Mic size={10} />
-            </span>
-          </div>
-          <div className="pr-track-lane" onClick={handleRulerOrLaneClick}>
-            {sourceAsset.audioPeakTimestamps.map((beatT, i) => (
-              <div
-                key={i}
-                style={{
-                  position: 'absolute',
-                  left: `${(beatT / totalDuration) * 100}%`,
-                  top: 6,
-                  bottom: 6,
-                  width: 2,
-                  background: 'rgba(72, 142, 123, 0.7)',
-                }}
-                title={`Audio Transient Peak @ ${beatT}s`}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Vertical Blue Playhead Line spanning all tracks */}
         <div
           style={{
             position: 'absolute',

@@ -1,14 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Copy,
   Download,
+  Film,
   Plus,
   Save,
+  Scissors,
   Sparkles,
   Trash2,
   Wand2,
 } from 'lucide-react';
-import { EditingScheme } from '../types/editor';
+import { ClipCreationMode, EditingScheme } from '../types/editor';
 
 interface SchemeEditorPanelProps {
   schemes: EditingScheme[];
@@ -66,6 +67,8 @@ export const SchemeEditorPanel: React.FC<SchemeEditorPanelProps> = ({
     a.click();
   };
 
+  const currentMode: ClipCreationMode = draft.clipCreationMode || 'clip-segment';
+
   return (
     <div
       style={{
@@ -77,7 +80,6 @@ export const SchemeEditorPanel: React.FC<SchemeEditorPanelProps> = ({
         gap: 10,
       }}
     >
-      {/* Top Selector & New/Duplicate/Export Actions */}
       <div
         style={{
           display: 'flex',
@@ -133,7 +135,67 @@ export const SchemeEditorPanel: React.FC<SchemeEditorPanelProps> = ({
         </div>
       </div>
 
-      {/* Cloned Reference Badge if Scheme came from Reference Cloner */}
+      {/* Clip Mode Selector: Clip Out a Segment vs Create an Edit into Target Length */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: 8,
+          background: '#191919',
+          padding: 8,
+          borderRadius: 4,
+          border: '1px solid #2b2b2b',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setDraft({ ...draft, clipCreationMode: 'clip-segment' })}
+          style={{
+            padding: '8px 10px',
+            borderRadius: 4,
+            border:
+              currentMode === 'clip-segment' ? '1px solid #2d8ceb' : '1px solid #303030',
+            background:
+              currentMode === 'clip-segment' ? 'rgba(45, 140, 235, 0.2)' : '#141414',
+            color: '#fff',
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600 }}>
+            <Scissors size={13} color="#60a5fa" />
+            Clip Out a Segment
+          </div>
+          <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>
+            Extract a continuous segment of the determined length
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setDraft({ ...draft, clipCreationMode: 'condensed-edit' })}
+          style={{
+            padding: '8px 10px',
+            borderRadius: 4,
+            border:
+              currentMode === 'condensed-edit' ? '1px solid #2d8ceb' : '1px solid #303030',
+            background:
+              currentMode === 'condensed-edit' ? 'rgba(45, 140, 235, 0.2)' : '#141414',
+            color: '#fff',
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600 }}>
+            <Film size={13} color="#a78bfa" />
+            Edit Video into Length
+          </div>
+          <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>
+            Stitch best moments across the video into determined length
+          </div>
+        </button>
+      </div>
+
       {draft.clonedFromReference && (
         <div
           style={{
@@ -158,7 +220,6 @@ export const SchemeEditorPanel: React.FC<SchemeEditorPanelProps> = ({
         </div>
       )}
 
-      {/* Editable Criteria Grid */}
       <div
         style={{
           display: 'grid',
@@ -203,7 +264,7 @@ export const SchemeEditorPanel: React.FC<SchemeEditorPanelProps> = ({
         <div>
           <label style={{ display: 'block', fontSize: 10.5, color: '#999', marginBottom: 3 }}>
             Target Clip Duration:{' '}
-            <span className="pr-timecode">{draft.targetClipDuration}s</span> (Max{' '}
+            <span className="pr-timecode">{draft.targetClipDuration}s</span> (Generate{' '}
             {draft.maxClipsCount} clips)
           </label>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -224,10 +285,11 @@ export const SchemeEditorPanel: React.FC<SchemeEditorPanelProps> = ({
                 setDraft({ ...draft, maxClipsCount: parseInt(e.target.value, 10) })
               }
             >
-              <option value={3}>3 Clips</option>
-              <option value={4}>4 Clips</option>
-              <option value={5}>5 Clips</option>
-              <option value={6}>6 Clips</option>
+              {[1, 2, 3, 4, 5, 6, 8, 10, 12].map((n) => (
+                <option key={n} value={n}>
+                  {n} {n === 1 ? 'Clip' : 'Clips'}
+                </option>
+              ))}
             </select>
           </div>
         </div>
@@ -298,67 +360,8 @@ export const SchemeEditorPanel: React.FC<SchemeEditorPanelProps> = ({
             />
           </div>
         </div>
-
-        <div>
-          <label style={{ display: 'block', fontSize: 10.5, color: '#999', marginBottom: 3 }}>
-            Audio Peak Weight ({Math.round(draft.audioPeakWeight * 100)}%) vs Motion Weight (
-            {Math.round(draft.visualMotionWeight * 100)}%)
-          </label>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <input
-              type="range"
-              min={0.1}
-              max={1.0}
-              step={0.05}
-              value={draft.audioPeakWeight}
-              onChange={(e) => setDraft({ ...draft, audioPeakWeight: parseFloat(e.target.value) })}
-              style={{ flex: 1 }}
-            />
-            <input
-              type="range"
-              min={0.1}
-              max={1.0}
-              step={0.05}
-              value={draft.visualMotionWeight}
-              onChange={(e) =>
-                setDraft({ ...draft, visualMotionWeight: parseFloat(e.target.value) })
-              }
-              style={{ flex: 1 }}
-            />
-          </div>
-        </div>
-
-        <div>
-          <label style={{ display: 'block', fontSize: 10.5, color: '#999', marginBottom: 3 }}>
-            Caption Theme &amp; Social Safe Zone
-          </label>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <select
-              className="pr-select"
-              style={{ flex: 1 }}
-              value={draft.captionStyle}
-              onChange={(e) => setDraft({ ...draft, captionStyle: e.target.value as any })}
-            >
-              <option value="hormozi-bold">Hormozi Impact Bold</option>
-              <option value="premiere-minimal">Premiere Pro Minimal</option>
-              <option value="neon-karaoke">Neon Karaoke Highlight</option>
-              <option value="cinema-serif">Cinema Serif ("SUMMER")</option>
-            </select>
-            <select
-              className="pr-select"
-              value={draft.safeZoneGuide}
-              onChange={(e) => setDraft({ ...draft, safeZoneGuide: e.target.value as any })}
-            >
-              <option value="tiktok">TikTok</option>
-              <option value="reels">Reels</option>
-              <option value="shorts">Shorts</option>
-              <option value="none">No Guide</option>
-            </select>
-          </div>
-        </div>
       </div>
 
-      {/* Bottom Save & Apply Actions */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input

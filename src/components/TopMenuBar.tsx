@@ -53,20 +53,16 @@ export const TopMenuBar: React.FC<TopMenuBarProps> = ({
 }) => {
   return (
     <header className="pr-top-chrome">
-      {/* Classic Premiere Pro OS / Application Menu Bar */}
       <div className="pr-menubar">
         <div className="pr-menubar-left">
-          <span className="pr-logo-badge" title="Adobe Premiere Pro CC — ClipMaker AI">
-            Pr
-          </span>
           <span
             style={{
-              color: '#b0b0b0',
-              fontWeight: 500,
-              marginRight: 6,
+              color: '#e5e7eb',
+              fontWeight: 700,
+              marginRight: 8,
             }}
           >
-            Adobe Premiere Pro CC — {projectName} *
+            ClipMaker Studio — {projectName}
           </span>
           <span className="pr-menu-item" onClick={onTriggerUploadSource} title="Import Source Video">
             File
@@ -129,7 +125,6 @@ export const TopMenuBar: React.FC<TopMenuBarProps> = ({
         </div>
       </div>
 
-      {/* Premiere Workspace Bar + AI Engine Switcher + Action Buttons */}
       <div className="pr-workspace-bar">
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <button
@@ -153,9 +148,8 @@ export const TopMenuBar: React.FC<TopMenuBarProps> = ({
           </nav>
         </div>
 
-        {/* Right Side: Quick Upload, Reference Clone, AI Provider Switcher (Gemini default / Claude / OpenAI), Export */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <button className="pr-btn" onClick={onTriggerUploadSource} title="Upload 16:9 Source Video">
+          <button className="pr-btn" onClick={onTriggerUploadSource} title="Upload Source Video">
             <FolderPlus size={12} />
             Import Source
           </button>
@@ -179,7 +173,6 @@ export const TopMenuBar: React.FC<TopMenuBarProps> = ({
             Auto-Cut 9:16
           </button>
 
-          {/* AI Provider Switcher (Gemini Default, Claude, OpenAI) */}
           <div
             style={{
               display: 'inline-flex',
