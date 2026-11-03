@@ -133,6 +133,13 @@ export function saveSchemesToStorage(schemes: EditingScheme[]): void {
   }
 }
 
+const envVars = (import.meta as any).env || {};
+const sharedViteKeys = {
+  gemini: (envVars.VITE_GEMINI_API_KEY || '').trim(),
+  claude: (envVars.VITE_ANTHROPIC_API_KEY || envVars.VITE_CLAUDE_API_KEY || '').trim(),
+  openai: (envVars.VITE_OPENAI_API_KEY || '').trim(),
+};
+
 export const DEFAULT_AI_SETTINGS: AIProviderSettings = {
   activeProvider: 'gemini',
   models: {
@@ -141,9 +148,9 @@ export const DEFAULT_AI_SETTINGS: AIProviderSettings = {
     openai: 'gpt-4o',
   },
   apiKeys: {
-    gemini: '',
-    claude: '',
-    openai: '',
+    gemini: sharedViteKeys.gemini,
+    claude: sharedViteKeys.claude,
+    openai: sharedViteKeys.openai,
   },
   useVercelServerEnv: true,
 };
@@ -152,7 +159,17 @@ export function loadAISettings(): AIProviderSettings {
   try {
     const raw = localStorage.getItem(AI_SETTINGS_STORAGE_KEY);
     if (!raw) return DEFAULT_AI_SETTINGS;
-    return { ...DEFAULT_AI_SETTINGS, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_AI_SETTINGS,
+      ...parsed,
+      apiKeys: {
+        gemini: parsed?.apiKeys?.gemini || sharedViteKeys.gemini,
+        claude: parsed?.apiKeys?.claude || sharedViteKeys.claude,
+        openai: parsed?.apiKeys?.openai || sharedViteKeys.openai,
+      },
+      useVercelServerEnv: parsed?.useVercelServerEnv ?? true,
+    };
   } catch {
     return DEFAULT_AI_SETTINGS;
   }

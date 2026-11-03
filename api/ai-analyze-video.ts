@@ -58,6 +58,8 @@ Return ONLY valid JSON matching this exact structure:
   ]
 }`;
 
+import { resolveProviderApiKey } from './ai-status';
+
 export async function handleAnalyzeVideoRequest(body: AnalyzeVideoRequestPayload) {
   const provider = body.provider || 'gemini';
   const envKey =
@@ -67,7 +69,7 @@ export async function handleAnalyzeVideoRequest(body: AnalyzeVideoRequestPayload
         ? process.env.ANTHROPIC_API_KEY
         : process.env.OPENAI_API_KEY;
 
-  const apiKey = body.apiKeyOverride?.trim() || envKey?.trim();
+  const apiKey = resolveProviderApiKey(provider, body.apiKeyOverride) || envKey?.trim();
   const defaultModel =
     provider === 'gemini'
       ? 'gemini-2.5-flash'

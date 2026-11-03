@@ -84,6 +84,8 @@ Respond ONLY with valid JSON matching this schema:
   ]
 }`;
 
+import { resolveProviderApiKey } from './ai-status';
+
 export async function handleCopilotRequest(body: CopilotRequestPayload): Promise<CopilotResponsePayload> {
   const provider = body.provider || 'gemini';
   const envKey =
@@ -93,7 +95,7 @@ export async function handleCopilotRequest(body: CopilotRequestPayload): Promise
         ? process.env.ANTHROPIC_API_KEY
         : process.env.OPENAI_API_KEY;
 
-  const apiKey = body.apiKeyOverride?.trim() || envKey?.trim();
+  const apiKey = resolveProviderApiKey(provider, body.apiKeyOverride) || envKey?.trim();
   const defaultModel =
     provider === 'gemini'
       ? 'gemini-2.5-flash'

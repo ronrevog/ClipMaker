@@ -5,6 +5,11 @@ import { AIProviderId, AIProviderSettings } from '../types/editor';
 interface AISettingsModalProps {
   isOpen: boolean;
   settings: AIProviderSettings;
+  serverAIStatus?: {
+    geminiConfigured: boolean;
+    claudeConfigured: boolean;
+    openaiConfigured: boolean;
+  };
   onClose: () => void;
   onSave: (updated: AIProviderSettings) => void;
 }
@@ -12,6 +17,7 @@ interface AISettingsModalProps {
 export const AISettingsModal: React.FC<AISettingsModalProps> = ({
   isOpen,
   settings,
+  serverAIStatus,
   onClose,
   onSave,
 }) => {
@@ -200,6 +206,27 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                 <div style={{ fontSize: 10, color: '#7a7a7a', fontFamily: 'var(--font-mono)' }}>
                   env: {prov.envVar}
                 </div>
+                {serverAIStatus && (
+                  <div
+                    style={{
+                      fontSize: 9.5,
+                      marginTop: 2,
+                      fontWeight: 600,
+                      color:
+                        (prov.id === 'gemini' && serverAIStatus.geminiConfigured) ||
+                        (prov.id === 'claude' && serverAIStatus.claudeConfigured) ||
+                        (prov.id === 'openai' && serverAIStatus.openaiConfigured)
+                          ? '#34d399'
+                          : '#94a3b8',
+                    }}
+                  >
+                    {(prov.id === 'gemini' && serverAIStatus.geminiConfigured) ||
+                    (prov.id === 'claude' && serverAIStatus.claudeConfigured) ||
+                    (prov.id === 'openai' && serverAIStatus.openaiConfigured)
+                      ? '✓ Shared Env Key Active'
+                      : '○ Set in Vercel / .env'}
+                  </div>
+                )}
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <select

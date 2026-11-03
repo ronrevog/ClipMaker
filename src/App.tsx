@@ -6,8 +6,10 @@ import {
   Download,
   Film,
   Flame,
+  FolderOpen,
   Layers,
   Lock,
+  LogOut,
   Pause,
   Play,
   Plus,
@@ -73,6 +75,17 @@ import {
 } from './services/subjectTracker';
 import { exportClipTo9x16Video } from './services/videoExporter';
 import { AISettingsModal } from './components/AISettingsModal';
+import { ComplexAuthGate } from './components/ComplexAuthGate';
+import { ProjectsModal } from './components/ProjectsModal';
+import {
+  ComplexAuthUser,
+  getLastActiveProjectId,
+  loadSavedAuthUser,
+  recallStudioProject,
+  saveStudioProject,
+  signOutComplexUser,
+  tryUploadVideoToVercelBlob,
+} from './services/projectStorage';
 
 const QUICK_FEEDBACK_CHIPS = [
   'Find best viral clips',
@@ -121,6 +134,40 @@ function formatDurationBadge(seconds: number): string {
 }
 
 export const App: React.FC = () => {
+  // 0. @complex.com Authentication & Shared Server Environment AI Status
+  const [authUser, setAuthUser] = useState<ComplexAuthUser | null>(() => loadSavedAuthUser());
+  const [serverAIStatus, setServerAIStatus] = useState<{
+    geminiConfigured: boolean;
+    claudeConfigured: boolean;
+    openaiConfigured: boolean;
+    blobStorageConfigured?: boolean;
+    accessCodeRequired?: boolean;
+  }>({
+    geminiConfigured: false,
+    claudeConfigured: false,
+    openaiConfigured: false,
+    blobStorageConfigured: false,
+    accessCodeRequired: false,
+  });
+
+  // Project Persistence & Recall States
+  const [currentProjectId, setCurrentProjectId] = useState<string>(
+    () => getLastActiveProjectId() || `proj-${Date.now()}`
+  );
+  const [currentProjectName, setCurrentProjectName] = useState<string>('Untitled Project');
+  const [isProjectsModalOpen, setIsProjectsModalOpen] = useState<boolean>(false);
+  const [isSavingProject, setIsSavingProject] = useState<boolean>(false);
+  const uploadedVideoBlobRef = useRef<Blob | null>(null);
+
+  useEffect(() => {
+    fetch('/api/ai-status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data) setServerAIStatus(data);
+      })
+      .catch(() => {});
+  }, []);
+
   // 1. Editing Schemes & AI Settings (Gemini Default, Claude, OpenAI)
   const [schemes, setSchemes] = useState<EditingScheme[]>(() => loadSavedSchemes());
   const [activeScheme, setActiveScheme] = useState<EditingScheme>(() => loadSavedSchemes()[0]);
@@ -1363,6 +1410,22 @@ export const App: React.FC = () => {
         setAnalysisStatus(`${stage} (${pct}%)`);
       });
 
+      uploadedVideoBlobRef.current = file;
+      const newProjId = `proj-${Date.now()}`;
+      const cleanTitle = file.name.replace(/\.[^/.]+$/, '');
+      setCurrentProjectId(newProjId);
+      setCurrentProjectName(cleanTitle);
+      userFocusAnchorsRef.current = [];
+
+      // Try uploading video to Vercel Blob in background if configured
+      tryUploadVideoToVercelBlob(file.name, file).then((cloudUrl) => {
+        if (cloudUrl) {
+          setActiveSource((prev) =>
+            prev ? ({ ...prev, cloudVideoUrl: cloudUrl } as any) : prev
+          );
+        }
+      });
+
       setNativeDims({ width: analyzed.width, height: analyzed.height });
       setActiveSource(analyzed);
       const initialFullClip = createInitialFullVideoClip(analyzed, activeScheme);
@@ -1399,6 +1462,155 @@ export const App: React.FC = () => {
       setAnalysisStatus('');
     }
   };
+
+  // Save current project (called manually or via auto-save)
+  const handleSaveCurrentProject = useCallback(
+    async (customName?: string, asNewProject = false) => {
+      if (!activeSource || !authUser) return;
+      const targetId = asNewProject ? `proj-${Date.now()}` : currentProjectId;
+      const targetName = (customName ?? currentProjectName).trim() || activeSource.name;
+      if (asNewProject) {
+        setCurrentProjectId(targetId);
+      }
+      setCurrentProjectName(targetName);
+      setIsSavingProject(true);
+      try {
+        await saveStudioProject({
+          projectId: targetId,
+          projectName: targetName,
+          user: authUser,
+          source: activeSource,
+          videoBlob: uploadedVideoBlobRef.current,
+          fullVideoClip,
+          generatedClips,
+          activeClipId,
+          timelineMode,
+          activeScheme,
+          inMarker,
+          outMarker,
+          chatMessages,
+        });
+        if (customName !== undefined) {
+          setMarkerNotice(`Saved project "${targetName}"!`);
+          setTimeout(() => setMarkerNotice(null), 2600);
+        }
+      } finally {
+        setIsSavingProject(false);
+      }
+    },
+    [
+      activeSource,
+      authUser,
+      currentProjectId,
+      currentProjectName,
+      fullVideoClip,
+      generatedClips,
+      activeClipId,
+      timelineMode,
+      activeScheme,
+      inMarker,
+      outMarker,
+      chatMessages,
+    ]
+  );
+
+  // Debounced Auto-Save whenever timeline cuts, clips, or Focus Lock Points change
+  useEffect(() => {
+    if (!activeSource || !authUser) return;
+    const timer = setTimeout(() => {
+      handleSaveCurrentProject();
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [
+    activeSource,
+    authUser,
+    fullVideoClip,
+    generatedClips,
+    activeClipId,
+    timelineMode,
+    activeScheme,
+    inMarker,
+    outMarker,
+    handleSaveCurrentProject,
+  ]);
+
+  // Recall a saved project by ID
+  const handleRecallProject = useCallback(async (projectId: string) => {
+    if (videoRef.current) videoRef.current.pause();
+    setIsPlaying(false);
+    setIsLoopingInOut(false);
+
+    const recalled = await recallStudioProject(projectId);
+    if (!recalled || !recalled.record.projectState) {
+      alert('Could not recall project state.');
+      return;
+    }
+
+    const { record, restoredVideoUrl, videoBlob } = recalled;
+    const st = record.projectState;
+    if (!st) return;
+    uploadedVideoBlobRef.current = videoBlob;
+
+    const restoredSource: SourceVideoAsset = {
+      ...st.sourceAsset,
+      url: restoredVideoUrl || '',
+    };
+
+    setCurrentProjectId(record.id);
+    setCurrentProjectName(record.name);
+    setNativeDims({
+      width: restoredSource.width || 1920,
+      height: restoredSource.height || 1080,
+    });
+    setActiveSource(restoredSource);
+    setFullVideoClip(st.fullVideoClip);
+    setGeneratedClips(st.generatedClips || []);
+    setActiveClipId(st.activeClipId);
+    setTimelineMode(st.timelineMode || 'full-source');
+    if (st.activeScheme) {
+      setActiveScheme(st.activeScheme);
+    }
+    setInMarker(st.inMarker ?? 0);
+    setOutMarker(st.outMarker ?? restoredSource.duration);
+    if (Array.isArray(st.chatMessages) && st.chatMessages.length > 0) {
+      setChatMessages(st.chatMessages);
+    }
+
+    const activeRestoredClip =
+      st.timelineMode === 'full-source'
+        ? st.fullVideoClip
+        : (st.generatedClips || []).find((c) => c.id === st.activeClipId) ||
+          (st.generatedClips || [])[0] ||
+          st.fullVideoClip;
+
+    const restoredLocks = (activeRestoredClip?.subjectFocus?.trackedPath || []).filter(
+      (p) => p.isUserAnchor
+    );
+    userFocusAnchorsRef.current = restoredLocks;
+
+    activeCutIdxRef.current = 0;
+    setSelectedCutIndex(0);
+    setClipPlayheadTime(0);
+    setPlayheadTime(0);
+
+    setMarkerNotice(
+      restoredVideoUrl
+        ? `Recalled project "${record.name}" (${st.generatedClips?.length || 0} clips, ${restoredLocks.length} Focus Locks)`
+        : `Recalled project "${record.name}" — re-upload "${restoredSource.name}" to reconnect video file`
+    );
+    setTimeout(() => setMarkerNotice(null), 3500);
+  }, []);
+
+  // Automatically recall the most recent project on initial load when authenticated
+  const didAutoRecallRef = useRef(false);
+  useEffect(() => {
+    if (!authUser || activeSource || didAutoRecallRef.current) return;
+    didAutoRecallRef.current = true;
+    const lastId = getLastActiveProjectId();
+    if (lastId) {
+      handleRecallProject(lastId).catch(() => {});
+    }
+  }, [authUser, activeSource, handleRecallProject]);
 
   // Upload Reference Video to Clone Style into a Saved Scheme
   const handleUploadReferenceVideo = async (file: File) => {
@@ -1884,6 +2096,17 @@ export const App: React.FC = () => {
       ? Math.max(0, Number((outMarker - inMarker).toFixed(1)))
       : 0;
 
+  // Enforce @complex.com email authentication before accessing the studio
+  if (!authUser) {
+    return (
+      <ComplexAuthGate
+        accessCodeRequired={serverAIStatus.accessCodeRequired}
+        serverAIStatus={serverAIStatus}
+        onAuthenticated={(user) => setAuthUser(user)}
+      />
+    );
+  }
+
   return (
     <div className="studio-shell">
       {/* Hidden File Inputs */}
@@ -1958,15 +2181,43 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {/* Right Controls: Upload Video, Clone Reference Style, AI Provider Switcher, Export */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {/* Right Controls: Projects, Upload Video, Clone Reference Style, AI Provider Switcher, Export, @complex.com User */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          {/* Saved Projects Library & Quick Save Button */}
+          <button
+            className="btn"
+            onClick={() => setIsProjectsModalOpen(true)}
+            style={{
+              borderColor: 'rgba(52, 211, 153, 0.45)',
+              background: 'rgba(16, 185, 129, 0.14)',
+              color: '#a7f3d0',
+              fontWeight: 600,
+            }}
+            title="Open Saved Projects Library to save or recall any project"
+          >
+            <FolderOpen size={14} color="#34d399" />
+            Projects
+          </button>
+
+          {activeSource && (
+            <button
+              className="btn"
+              onClick={() => handleSaveCurrentProject(currentProjectName, false)}
+              disabled={isSavingProject}
+              title={`Save project "${currentProjectName}" (Auto-saves as you edit)`}
+            >
+              <Save size={13} color="#60a5fa" />
+              {isSavingProject ? 'Saving...' : 'Save'}
+            </button>
+          )}
+
           <button
             className="btn"
             onClick={() => sourceFileInputRef.current?.click()}
             disabled={isAnalyzing}
           >
             <Upload size={14} color="#60a5fa" />
-            {activeSource ? 'Upload Different Video' : 'Upload Video'}
+            {activeSource ? 'Upload Video' : 'Upload Video'}
           </button>
 
           <button
@@ -1976,7 +2227,7 @@ export const App: React.FC = () => {
             title="Upload any reference video to copy its cut speed and zoom style into a new Editing Scheme"
           >
             <Wand2 size={14} />
-            Clone Reference Style
+            Clone Style
           </button>
 
           {/* AI Provider Pill Switcher (Gemini default, Claude, OpenAI) */}
@@ -1993,6 +2244,11 @@ export const App: React.FC = () => {
           >
             {(['gemini', 'claude', 'openai'] as AIProviderId[]).map((prov) => {
               const active = aiSettings.activeProvider === prov;
+              const envReady =
+                (prov === 'gemini' && serverAIStatus.geminiConfigured) ||
+                (prov === 'claude' && serverAIStatus.claudeConfigured) ||
+                (prov === 'openai' && serverAIStatus.openaiConfigured) ||
+                Boolean(aiSettings.apiKeys?.[prov]);
               const label =
                 prov === 'gemini' ? 'Gemini ★' : prov === 'claude' ? 'Claude' : 'OpenAI';
               return (
@@ -2006,14 +2262,30 @@ export const App: React.FC = () => {
                   style={{
                     border: 'none',
                     borderRadius: 4,
-                    padding: '4px 9px',
+                    padding: '4px 8px',
                     fontSize: 11.5,
                     fontWeight: active ? 600 : 400,
                     cursor: 'pointer',
                     background: active ? 'var(--accent-blue)' : 'transparent',
                     color: active ? '#fff' : 'var(--text-secondary)',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
                   }}
+                  title={
+                    envReady
+                      ? `${label} — Shared Environment API Key Active`
+                      : `${label} — Add API key in .env / Vercel or Settings`
+                  }
                 >
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: '50%',
+                      background: envReady ? '#34d399' : '#64748b',
+                    }}
+                  />
                   {label}
                 </button>
               );
@@ -2037,6 +2309,46 @@ export const App: React.FC = () => {
             <Download size={14} />
             {isExporting ? `Exporting MP4 (${exportProgress}%)...` : 'Export 9:16 MP4'}
           </button>
+
+          {/* Signed-in @complex.com User Badge & Sign Out */}
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '4px 8px',
+              borderRadius: 6,
+              background: 'rgba(15, 23, 42, 0.85)',
+              border: '1px solid #334155',
+              fontSize: 11,
+              color: '#cbd5e1',
+            }}
+            title={`Signed in as ${authUser.email}`}
+          >
+            <span style={{ color: '#34d399', fontWeight: 700 }}>●</span>
+            <span style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {authUser.email}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                signOutComplexUser();
+                setAuthUser(null);
+              }}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#94a3b8',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                padding: 2,
+              }}
+              title="Sign out of @complex.com account"
+            >
+              <LogOut size={12} />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -4591,10 +4903,23 @@ export const App: React.FC = () => {
         </aside>
       </main>
 
+      {/* Saved Projects Library Modal */}
+      <ProjectsModal
+        isOpen={isProjectsModalOpen}
+        currentProjectId={currentProjectId}
+        currentProjectName={currentProjectName}
+        hasActiveVideo={Boolean(activeSource)}
+        isSaving={isSavingProject}
+        onClose={() => setIsProjectsModalOpen(false)}
+        onSaveCurrentProject={handleSaveCurrentProject}
+        onRecallProject={handleRecallProject}
+      />
+
       {/* AI Settings Modal */}
       <AISettingsModal
         isOpen={isAISettingsOpen}
         settings={aiSettings}
+        serverAIStatus={serverAIStatus}
         onClose={() => setIsAISettingsOpen(false)}
         onSave={(updated) => {
           setAiSettings(updated);

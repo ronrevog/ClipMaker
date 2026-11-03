@@ -77,18 +77,13 @@ Respond ONLY with valid JSON matching this schema:
   }
 }`;
 
+import { resolveProviderApiKey } from './ai-status';
+
 export async function handleStyleCloneRequest(
   body: StyleCloneRequestPayload
 ): Promise<SynthesizedSchemePayload> {
   const provider = body.provider || 'gemini';
-  const envKey =
-    provider === 'gemini'
-      ? process.env.GEMINI_API_KEY
-      : provider === 'claude'
-        ? process.env.ANTHROPIC_API_KEY
-        : process.env.OPENAI_API_KEY;
-
-  const apiKey = body.apiKeyOverride?.trim() || envKey?.trim();
+  const apiKey = resolveProviderApiKey(provider, body.apiKeyOverride);
   const defaultModel =
     provider === 'gemini'
       ? 'gemini-2.5-flash'
