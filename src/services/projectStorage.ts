@@ -106,6 +106,30 @@ export async function verifyGoogleIdTokenWithServer(
   }
 }
 
+export function saveVerifiedComplexUser(params: {
+  email: string;
+  name?: string | null;
+  picture?: string | null;
+  token: string;
+}): ComplexAuthUser {
+  const email = params.email.trim().toLowerCase();
+  const user: ComplexAuthUser = {
+    email,
+    name:
+      (params.name || '').trim() ||
+      email
+        .split('@')[0]
+        .replace(/[._-]+/g, ' ')
+        .replace(/\b\w/g, (c) => c.toUpperCase()),
+    picture: params.picture || undefined,
+    domain: 'complex.com',
+    signedInAt: new Date().toISOString(),
+    token: params.token,
+  };
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
+  return user;
+}
+
 export async function verifyFirebaseIdTokenWithServer(
   firebaseIdToken: string
 ): Promise<{ ok: boolean; user?: ComplexAuthUser; error?: string }> {
@@ -118,12 +142,21 @@ export async function verifyFirebaseIdTokenWithServer(
         firebaseIdToken,
       }),
     });
-    const data = await resp.json();
-    if (!resp.ok || !data.ok || !data.user) {
+    const text = await resp.text();
+    let data: any = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return {
+        ok: false,
+        error: `Server returned status ${resp.status}`,
+      };
+    }
+    if (!resp.ok || !data?.ok || !data?.user) {
       return {
         ok: false,
         error:
-          data.error ||
+          data?.error ||
           'Google authentication failed. You must sign in with a @complex.com Google Workspace account.',
       };
     }

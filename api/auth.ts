@@ -3,7 +3,15 @@
 // and strictly enforces that the authenticated Google account belongs to @complex.com (hd === 'complex.com').
 
 import crypto from 'crypto';
-import { getGoogleOAuthClientId } from './ai-status';
+
+function getGoogleOAuthClientId(): string {
+  return (
+    (process.env.GOOGLE_CLIENT_ID || '').trim() ||
+    (process.env.VITE_GOOGLE_CLIENT_ID || '').trim() ||
+    (process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '').trim() ||
+    '1070451506699-56j7rbaehmeidl3olg5o3vftepmnak41.apps.googleusercontent.com'
+  );
+}
 
 export interface ComplexAuthUser {
   email: string;

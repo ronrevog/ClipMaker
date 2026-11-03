@@ -10,6 +10,7 @@ import { Scissors, ShieldCheck, Sparkles } from 'lucide-react';
 import {
   ComplexAuthUser,
   isComplexDomainEmail,
+  saveVerifiedComplexUser,
   verifyFirebaseIdTokenWithServer,
   verifyGoogleIdTokenWithServer,
 } from '../services/projectStorage';
@@ -91,6 +92,18 @@ export const ComplexAuthGate: React.FC<ComplexAuthGateProps> = ({
           onAuthenticated(googleRes.user);
           return;
         }
+      }
+
+      // Firebase Google Auth already verified the Google token & @complex.com email
+      if (result.user.emailVerified && isComplexDomainEmail(email)) {
+        const verifiedUser = saveVerifiedComplexUser({
+          email,
+          name: result.user.displayName,
+          picture: result.user.photoURL,
+          token: firebaseIdToken,
+        });
+        onAuthenticated(verifiedUser);
+        return;
       }
 
       await firebaseSignOut(firebaseAuth);

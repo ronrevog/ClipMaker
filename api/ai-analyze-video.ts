@@ -58,7 +58,31 @@ Return ONLY valid JSON matching this exact structure:
   ]
 }`;
 
-import { resolveProviderApiKey } from './ai-status';
+function resolveProviderApiKey(
+  provider: 'gemini' | 'claude' | 'openai',
+  apiKeyOverride?: string
+): string {
+  const override = (apiKeyOverride || '').trim();
+  if (override) return override;
+  if (provider === 'gemini') {
+    return (
+      (process.env.GEMINI_API_KEY || '').trim() ||
+      (process.env.VITE_GEMINI_API_KEY || '').trim() ||
+      (process.env.GOOGLE_API_KEY || '').trim()
+    );
+  }
+  if (provider === 'claude') {
+    return (
+      (process.env.ANTHROPIC_API_KEY || '').trim() ||
+      (process.env.CLAUDE_API_KEY || '').trim() ||
+      (process.env.VITE_ANTHROPIC_API_KEY || '').trim()
+    );
+  }
+  return (
+    (process.env.OPENAI_API_KEY || '').trim() ||
+    (process.env.VITE_OPENAI_API_KEY || '').trim()
+  );
+}
 
 export async function handleAnalyzeVideoRequest(body: AnalyzeVideoRequestPayload) {
   const provider = body.provider || 'gemini';
