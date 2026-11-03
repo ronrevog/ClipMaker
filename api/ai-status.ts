@@ -1,12 +1,13 @@
 // Vercel Serverless Function: /api/ai-status
-// Resolves shared server-side environment API keys (Gemini, Claude, OpenAI)
-// so every @complex.com user automatically gets AI access without entering personal keys.
+// Resolves shared server-side environment API keys (Gemini, Claude, OpenAI) and Google OAuth Client ID
+// so every @complex.com user automatically gets AI access after signing in with Google.
 
 const PLACEHOLDERS = new Set([
   '',
   'your_gemini_api_key_here',
   'your_anthropic_claude_api_key_here',
   'your_openai_api_key_here',
+  'your_google_oauth_client_id_here',
 ]);
 
 function cleanEnvKey(val: string | undefined): string {
@@ -46,16 +47,22 @@ export function resolveProviderApiKey(
   return getSharedEnvKeyForProvider(provider);
 }
 
+export function getGoogleOAuthClientId(): string {
+  return (
+    cleanEnvKey(process.env.GOOGLE_CLIENT_ID) ||
+    cleanEnvKey(process.env.VITE_GOOGLE_CLIENT_ID) ||
+    cleanEnvKey(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID)
+  );
+}
+
 export function getServerAIStatus() {
   return {
     geminiConfigured: Boolean(getSharedEnvKeyForProvider('gemini')),
     claudeConfigured: Boolean(getSharedEnvKeyForProvider('claude')),
     openaiConfigured: Boolean(getSharedEnvKeyForProvider('openai')),
+    googleClientId: getGoogleOAuthClientId(),
     blobStorageConfigured: Boolean(
       process.env.BLOB_READ_WRITE_TOKEN && process.env.BLOB_READ_WRITE_TOKEN.trim().length > 10
-    ),
-    accessCodeRequired: Boolean(
-      process.env.COMPLEX_ACCESS_CODE && process.env.COMPLEX_ACCESS_CODE.trim().length > 0
     ),
     allowedDomain: 'complex.com',
   };

@@ -77,10 +77,10 @@ function vercelApiLocalDevPlugin(): Plugin {
           req.on('data', (chunk) => {
             rawBody += chunk;
           });
-          req.on('end', () => {
+          req.on('end', async () => {
             try {
               const parsed = JSON.parse(rawBody || '{}');
-              const result = handleAuthRequest(parsed);
+              const result = await handleAuthRequest(parsed);
               res.statusCode = result.ok ? 200 : 403;
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify(result));

@@ -8,6 +8,7 @@ import {
 export interface ComplexAuthUser {
   email: string;
   name: string;
+  picture?: string;
   domain: string;
   signedInAt: string;
   token: string;
@@ -72,35 +73,58 @@ export function loadSavedAuthUser(): ComplexAuthUser | null {
   }
 }
 
-export async function signInWithComplexEmail(
-  email: string,
-  name: string,
-  accessCode?: string
+export async function verifyGoogleIdTokenWithServer(
+  credential: string,
+  clientId?: string
 ): Promise<{ ok: boolean; user?: ComplexAuthUser; error?: string }> {
-  const cleanedEmail = (email || '').trim().toLowerCase();
-  if (!isComplexDomainEmail(cleanedEmail)) {
-    return {
-      ok: false,
-      error: 'Access Restricted: You must sign in with a valid @complex.com email address.',
-    };
-  }
-
   try {
     const resp = await fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        action: 'login',
-        email: cleanedEmail,
-        name: name.trim(),
-        accessCode: accessCode?.trim(),
+        action: 'google-id-token',
+        credential,
+        clientId,
       }),
     });
     const data = await resp.json();
     if (!resp.ok || !data.ok || !data.user) {
       return {
         ok: false,
-        error: data.error || 'Authentication failed. Only @complex.com emails are allowed.',
+        error:
+          data.error ||
+          'Google authentication failed. You must sign in with a @complex.com Google Workspace account.',
+      };
+    }
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data.user));
+    return { ok: true, user: data.user };
+  } catch (e: any) {
+    return {
+      ok: false,
+      error: e?.message || 'Could not reach authentication server.',
+    };
+  }
+}
+
+export async function verifyGoogleAccessTokenWithServer(
+  accessToken: string
+): Promise<{ ok: boolean; user?: ComplexAuthUser; error?: string }> {
+  try {
+    const resp = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'google-access-token',
+        accessToken,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok || !data.user) {
+      return {
+        ok: false,
+        error:
+          data.error ||
+          'Google authentication failed. You must sign in with a @complex.com Google Workspace account.',
       };
     }
     localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data.user));
@@ -115,6 +139,12 @@ export async function signInWithComplexEmail(
 
 export function signOutComplexUser(): void {
   localStorage.removeItem(AUTH_STORAGE_KEY);
+  try {
+    const g = (window as any).google;
+    if (g?.accounts?.id) {
+      g.accounts.id.disableAutoSelect();
+    }
+  } catch {}
 }
 
 // ============================================================================

@@ -1,11 +1,14 @@
 // Vercel Serverless Function: /api/auth
-// Enforces @complex.com email domain authentication for ClipMaker Studio.
+// Verifies Google Workspace OAuth tokens (id_token or access_token) directly with Google's servers
+// and strictly enforces that the authenticated Google account belongs to @complex.com (hd === 'complex.com').
 
 import crypto from 'crypto';
+import { getGoogleOAuthClientId } from './ai-status';
 
 export interface ComplexAuthUser {
   email: string;
   name: string;
+  picture?: string;
   domain: string;
   signedInAt: string;
   token: string;
@@ -28,11 +31,14 @@ export function isValidComplexEmail(rawEmail: string): boolean {
   if (parts.length !== 2) return false;
   const [localPart, domain] = parts;
   if (!localPart || localPart.length < 1) return false;
-  if (!/^[a-z0-9._+-]+$/.test(localPart)) return false;
   return domain === ALLOWED_DOMAIN;
 }
 
-export function createComplexSessionToken(email: string, name: string): ComplexAuthUser {
+export function createComplexSessionToken(
+  email: string,
+  name: string,
+  picture?: string
+): ComplexAuthUser {
   const normalizedEmail = email.trim().toLowerCase();
   const displayName =
     name.trim() ||
@@ -44,6 +50,7 @@ export function createComplexSessionToken(email: string, name: string): ComplexA
   const payload = JSON.stringify({
     email: normalizedEmail,
     name: displayName,
+    picture,
     domain: ALLOWED_DOMAIN,
     signedInAt,
   });
@@ -55,6 +62,7 @@ export function createComplexSessionToken(email: string, name: string): ComplexA
   return {
     email: normalizedEmail,
     name: displayName,
+    picture,
     domain: ALLOWED_DOMAIN,
     signedInAt,
     token: `${payloadB64}.${sig}`,
@@ -75,6 +83,7 @@ export function verifyComplexSessionToken(token?: string): ComplexAuthUser | nul
     return {
       email: decoded.email,
       name: decoded.name || decoded.email.split('@')[0],
+      picture: decoded.picture,
       domain: ALLOWED_DOMAIN,
       signedInAt: decoded.signedInAt,
       token,
@@ -84,42 +93,116 @@ export function verifyComplexSessionToken(token?: string): ComplexAuthUser | nul
   }
 }
 
-export function handleAuthRequest(body: {
-  action?: 'login' | 'verify';
-  email?: string;
-  name?: string;
-  accessCode?: string;
+export async function handleAuthRequest(body: {
+  action?: 'google-id-token' | 'google-access-token' | 'verify';
+  credential?: string;
+  accessToken?: string;
+  clientId?: string;
   token?: string;
-}): { ok: boolean; user?: ComplexAuthUser; error?: string } {
+}): Promise<{ ok: boolean; user?: ComplexAuthUser; error?: string }> {
   if (body.action === 'verify') {
     const verified = verifyComplexSessionToken(body.token);
     if (!verified) {
-      return { ok: false, error: 'Session expired or invalid. Please sign in with your @complex.com email.' };
+      return {
+        ok: false,
+        error: 'Session expired or invalid. Please sign in with your @complex.com Google account.',
+      };
     }
     return { ok: true, user: verified };
   }
 
-  const email = (body.email || '').trim().toLowerCase();
-  if (!email) {
-    return { ok: false, error: 'Please enter your @complex.com email address.' };
-  }
-  if (!isValidComplexEmail(email)) {
-    return {
-      ok: false,
-      error: 'Access Denied: Only @complex.com email addresses are authorized to use ClipMaker Studio.',
-    };
+  // 1. Verify Google ID Token (JWT from Google Sign-In button / One Tap)
+  if (body.credential) {
+    const resp = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(body.credential)}`
+    );
+    if (!resp.ok) {
+      return {
+        ok: false,
+        error: 'Google token verification failed. Please sign in with Google again.',
+      };
+    }
+    const tokenInfo: any = await resp.json();
+
+    const expectedClientId = getGoogleOAuthClientId() || body.clientId;
+    if (expectedClientId && tokenInfo.aud && tokenInfo.aud !== expectedClientId) {
+      return {
+        ok: false,
+        error: 'Google OAuth Client ID mismatch.',
+      };
+    }
+
+    const email = (tokenInfo.email || '').trim().toLowerCase();
+    const emailVerified =
+      tokenInfo.email_verified === true || tokenInfo.email_verified === 'true';
+    const hostedDomain = (tokenInfo.hd || '').trim().toLowerCase();
+
+    if (!emailVerified || !email) {
+      return {
+        ok: false,
+        error: 'Your Google account email is not verified.',
+      };
+    }
+
+    if (!isValidComplexEmail(email) || (hostedDomain && hostedDomain !== ALLOWED_DOMAIN)) {
+      return {
+        ok: false,
+        error: `Access Denied (${email}): You must sign in with a @complex.com Google Workspace account.`,
+      };
+    }
+
+    const user = createComplexSessionToken(
+      email,
+      tokenInfo.name || email.split('@')[0],
+      tokenInfo.picture
+    );
+    return { ok: true, user };
   }
 
-  const requiredCode = (process.env.COMPLEX_ACCESS_CODE || '').trim();
-  if (requiredCode && (body.accessCode || '').trim() !== requiredCode) {
-    return {
-      ok: false,
-      error: 'Invalid Complex Studio team access code.',
-    };
+  // 2. Verify Google OAuth2 Access Token (from google.accounts.oauth2.initTokenClient popup)
+  if (body.accessToken) {
+    const resp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: {
+        Authorization: `Bearer ${body.accessToken}`,
+      },
+    });
+    if (!resp.ok) {
+      return {
+        ok: false,
+        error: 'Could not verify Google account profile. Please try signing in again.',
+      };
+    }
+    const profile: any = await resp.json();
+    const email = (profile.email || '').trim().toLowerCase();
+    const emailVerified = profile.email_verified === true;
+    const hostedDomain = (profile.hd || '').trim().toLowerCase();
+
+    if (!emailVerified || !email) {
+      return {
+        ok: false,
+        error: 'Your Google account email is not verified.',
+      };
+    }
+
+    if (!isValidComplexEmail(email) || (hostedDomain && hostedDomain !== ALLOWED_DOMAIN)) {
+      return {
+        ok: false,
+        error: `Access Denied (${email}): You must sign in with a @complex.com Google Workspace account.`,
+      };
+    }
+
+    const user = createComplexSessionToken(
+      email,
+      profile.name || email.split('@')[0],
+      profile.picture
+    );
+    return { ok: true, user };
   }
 
-  const user = createComplexSessionToken(email, body.name || '');
-  return { ok: true, user };
+  return {
+    ok: false,
+    error: 'Google authentication required. Please sign in with your @complex.com Google account.',
+  };
 }
 
 export default async function handler(req: any, res: any) {
@@ -132,7 +215,7 @@ export default async function handler(req: any, res: any) {
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {};
-    const result = handleAuthRequest(body);
+    const result = await handleAuthRequest(body);
     res.statusCode = result.ok ? 200 : 403;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify(result));

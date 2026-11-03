@@ -140,14 +140,14 @@ export const App: React.FC = () => {
     geminiConfigured: boolean;
     claudeConfigured: boolean;
     openaiConfigured: boolean;
+    googleClientId?: string;
     blobStorageConfigured?: boolean;
-    accessCodeRequired?: boolean;
   }>({
     geminiConfigured: false,
     claudeConfigured: false,
     openaiConfigured: false,
+    googleClientId: '',
     blobStorageConfigured: false,
-    accessCodeRequired: false,
   });
 
   // Project Persistence & Recall States
@@ -2096,11 +2096,10 @@ export const App: React.FC = () => {
       ? Math.max(0, Number((outMarker - inMarker).toFixed(1)))
       : 0;
 
-  // Enforce @complex.com email authentication before accessing the studio
+  // Enforce @complex.com Google OAuth authentication before accessing the studio
   if (!authUser) {
     return (
       <ComplexAuthGate
-        accessCodeRequired={serverAIStatus.accessCodeRequired}
         serverAIStatus={serverAIStatus}
         onAuthenticated={(user) => setAuthUser(user)}
       />
