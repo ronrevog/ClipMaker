@@ -28,12 +28,37 @@ export type SubjectFocusStrategy =
   | 'right-subject'
   | 'action-motion';
 
+export interface ObjectTemplateSignature {
+  patchSize: number; // e.g. 13 (13x13 spatial grid around clicked object)
+  lumaPatch: number[]; // zero-mean unit-norm luminance template for ZNCC
+  edgePatch: number[]; // unit-norm Sobel edge gradient template
+  rgbPatch?: number[]; // flattened [r,g,b, r,g,b, ...] per-pixel color template (13x13x3)
+  meanRgb: [number, number, number];
+  contrastStd: number; // internal contrast standard deviation
+  edgeEnergy?: number; // mean edge gradient energy of the clicked object
+  detectedCategory?: string; // e.g. 'car', 'person', 'truck' from MediaPipe ObjectDetector
+  boxW: number; // normalized width of tracked object (0.06..0.45)
+  boxH: number; // normalized height of tracked object (0.06..0.45)
+}
+
+export interface TrackedObjectPoint {
+  time: number;
+  x: number;
+  y: number;
+  boxW?: number;
+  boxH?: number;
+  confidence?: number;
+  isUserAnchor?: boolean;
+}
+
 export interface SubjectFocusConfig {
   strategy: SubjectFocusStrategy;
   anchorX: number; // 0..1 normalized horizontal target in source video
   anchorY: number; // 0..1 normalized vertical target in source video
   anchorTime: number; // source timestamp when picked
   targetColorRgb?: [number, number, number]; // sampled RGB signature of clicked subject
+  templateSignature?: ObjectTemplateSignature; // 2D shape/edge/chroma template + neural category
+  trackedPath?: TrackedObjectPoint[]; // solved multi-frame trajectory across the video
   label: string;
 }
 
@@ -71,20 +96,20 @@ export interface EditingScheme {
   description: string;
   isBuiltIn?: boolean;
   createdAt: string;
-  clipCreationMode?: ClipCreationMode; // 'clip-segment' (Best Viral Clips) vs 'condensed-edit' (Compilation Cutdowns)
-  targetClipDuration: number; // seconds, 5..180 (up to 3 mins)
+  clipCreationMode?: ClipCreationMode;
+  targetClipDuration: number;
   minClipDuration: number;
   maxClipDuration: number;
   maxClipsCount: number;
   pacingProfile: PacingProfile;
-  targetAvgShotLength: number; // seconds per cut in compilation mode, e.g. 2.5
-  audioPeakWeight: number; // 0..1
-  visualMotionWeight: number; // 0..1
-  silenceThresholdMs: number; // e.g. 300ms
+  targetAvgShotLength: number;
+  audioPeakWeight: number;
+  visualMotionWeight: number;
+  silenceThresholdMs: number;
   trackingMode: TrackingMode;
-  trackingSmoothing: number; // 0.1 (snappy) .. 0.96 (cinematic damped)
-  trackingDeadzone: number; // 0.02 .. 0.25 fraction of width
-  punchInZoom: number; // 1.0 .. 1.4
+  trackingSmoothing: number;
+  trackingDeadzone: number;
+  punchInZoom: number;
   beatSyncCuts: boolean;
   captionStyle: CaptionStyleId;
   safeZoneGuide: SafeZoneGuideId;
@@ -92,47 +117,49 @@ export interface EditingScheme {
 }
 
 export interface TrackingSample {
-  time: number; // seconds in source video
-  rawX: number; // normalized 0..1 primary salient cluster center X
-  rawY: number; // normalized 0..1 primary salient cluster center Y
-  cropX: number; // smoothed normalized 0..1 center for 9:16 window
+  time: number;
+  rawX: number;
+  rawY: number;
+  cropX: number;
   cropY: number;
-  leftSubjectX?: number; // detected subject cluster in left half (0.16..0.50)
-  rightSubjectX?: number; // detected subject cluster in right half (0.50..0.84)
-  faceX?: number; // detected face/speaker cluster X
+  leftSubjectX?: number;
+  rightSubjectX?: number;
+  faceX?: number;
   faceY?: number;
-  motionX?: number; // highest-motion local cluster X
+  motionX?: number;
   motionY?: number;
-  motionScore?: number; // 0..100
-  confidence: number; // 0..1
+  motionScore?: number;
+  objectBoxW?: number;
+  objectBoxH?: number;
+  confidence: number;
   subjectLabel: string;
   isManualKeyframe?: boolean;
 }
 
 export interface PerSecondTelemetry {
   time: number;
-  audioEnergy: number; // 0..1
-  motionEnergy: number; // 0..1
-  viralScore: number; // 0..100 combined retention/hook score for this second
+  audioEnergy: number;
+  motionEnergy: number;
+  viralScore: number;
   isSilent: boolean;
 }
 
 export interface SubCut {
   id: string;
   index: number;
-  sourceStart: number; // seconds in source video
+  sourceStart: number;
   sourceEnd: number;
-  timelineStart: number; // seconds in clip sequence (0 .. clip.duration)
+  timelineStart: number;
   timelineEnd: number;
   label: string;
-  zoom: number; // 1.0 .. 1.5
-  cropBiasX: number; // -0.35 .. +0.35 offset from tracked subject
+  zoom: number;
+  cropBiasX: number;
   isBeatCut?: boolean;
 }
 
 export interface CaptionSegment {
   id: string;
-  start: number; // clip timeline seconds
+  start: number;
   end: number;
   text: string;
   highlightWord?: string;
@@ -145,16 +172,16 @@ export interface GeneratedClip {
   schemeId: string;
   schemeName: string;
   clipCreationMode?: ClipCreationMode;
-  viralScore: number; // 0..99
+  viralScore: number;
   hookReason: string;
   sourceStart: number;
   sourceEnd: number;
   duration: number;
   trackingMode: TrackingMode;
   subjectFocus?: SubjectFocusConfig;
-  trackingOffsetX: number; // global horizontal offset -0.35..+0.35
-  trackingSmoothing: number; // 0.1..0.96
-  zoomScale: number; // base zoom 1.0..1.5
+  trackingOffsetX: number;
+  trackingSmoothing: number;
+  zoomScale: number;
   captionText: string;
   captionStyle: CaptionStyleId;
   safeZoneGuide: SafeZoneGuideId;
@@ -179,7 +206,7 @@ export interface SourceVideoAsset {
   height: number;
   fps: number;
   isSyntheticDemo?: boolean;
-  waveformPeaks: number[]; // normalized 0..1 (e.g. 200 buckets)
+  waveformPeaks: number[];
   sceneCutTimestamps: number[];
   audioPeakTimestamps: number[];
   highEnergyWindows?: HighEnergyWindow[];

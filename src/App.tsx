@@ -37,6 +37,7 @@ import {
   SubCut,
   SubjectFocusConfig,
   SubjectFocusStrategy,
+  TrackedObjectPoint,
 } from './types/editor';
 import {
   loadAISettings,
@@ -59,9 +60,15 @@ import {
   sourceTimeToClipTime,
 } from './services/clipGenerator';
 import {
+  buildSmoothUserAnchorCurvePoints,
+  captureClickedObjectSignature,
   computeDistortionFree9x16Crop,
+  ensureNeuralObjectDetector,
+  evaluateUserAnchorSplineAtTime,
   getTrackingStateAtTime,
-  sampleSubjectSignatureFromVideo,
+  interpolateTrackedPathAtTime,
+  resetLiveObjectTrackerState,
+  solveClickedObjectTrajectory,
   trackSubjectSignatureInVideoFrame,
 } from './services/subjectTracker';
 import { exportClipTo9x16Video } from './services/videoExporter';
@@ -158,6 +165,14 @@ export const App: React.FC = () => {
     null
   );
   const liveTrackedAnchorRef = useRef<{ x: number; y: number } | null>(null);
+  const userFocusAnchorsRef = useRef<TrackedObjectPoint[]>([]);
+  const [isSolvingObjectTrack, setIsSolvingObjectTrack] = useState<boolean>(false);
+  const [objectTrackProgress, setObjectTrackProgress] = useState<number>(0);
+
+  // Warm up MediaPipe Neural ObjectDetector in the background on mount
+  useEffect(() => {
+    ensureNeuralObjectDetector().catch(() => {});
+  }, []);
 
   // 4. Razor Blade Tool & In/Out Markers State
   const [isRazorMode, setIsRazorMode] = useState<boolean>(false);
@@ -291,18 +306,44 @@ export const App: React.FC = () => {
   const currentZoom = activeCut ? activeCut.zoom : activeClip?.zoomScale ?? 1.0;
   const currentCutBias = activeCut ? activeCut.cropBiasX : 0;
 
-  // Build effective SubjectFocusConfig with real-time tracked coordinates when 'click-track' is active
+  // Extract sorted user Focus Lock Points along the timeline
+  const userFocusAnchors = React.useMemo(() => {
+    const path = activeClip?.subjectFocus?.trackedPath;
+    if (!path || path.length === 0) return [];
+    return path
+      .filter((pt) => pt.isUserAnchor)
+      .slice()
+      .sort((a, b) => a.time - b.time);
+  }, [activeClip?.subjectFocus?.trackedPath]);
+
+  const activeUserSplinePoint = React.useMemo(
+    () => evaluateUserAnchorSplineAtTime(activeClip?.subjectFocus?.trackedPath, playheadTime),
+    [activeClip?.subjectFocus?.trackedPath, playheadTime]
+  );
+
+  // Build effective SubjectFocusConfig with real-time tracked coordinates when 'click-track' is active.
+  // When 2+ user Focus Lock Points span the current playheadTime, the smooth spline between them takes priority!
   const effectiveSubjectFocus: SubjectFocusConfig | undefined = activeClip?.subjectFocus
     ? {
         ...activeClip.subjectFocus,
         anchorX:
-          activeClip.subjectFocus.strategy === 'click-track' && liveTrackedAnchor
-            ? liveTrackedAnchor.x
-            : activeClip.subjectFocus.anchorX,
+          activeClip.subjectFocus.strategy === 'click-track' && activeUserSplinePoint
+            ? activeUserSplinePoint.x
+            : activeClip.subjectFocus.strategy === 'click-track' && liveTrackedAnchor
+              ? liveTrackedAnchor.x
+              : activeClip.subjectFocus.anchorX,
         anchorY:
-          activeClip.subjectFocus.strategy === 'click-track' && liveTrackedAnchor
-            ? liveTrackedAnchor.y
-            : activeClip.subjectFocus.anchorY,
+          activeClip.subjectFocus.strategy === 'click-track' && activeUserSplinePoint
+            ? activeUserSplinePoint.y
+            : activeClip.subjectFocus.strategy === 'click-track' && liveTrackedAnchor
+              ? liveTrackedAnchor.y
+              : activeClip.subjectFocus.anchorY,
+        trackedPath:
+          activeClip.subjectFocus.strategy === 'click-track' &&
+          liveTrackedAnchor &&
+          !activeUserSplinePoint
+            ? undefined
+            : activeClip.subjectFocus.trackedPath,
       }
     : undefined;
 
@@ -422,7 +463,48 @@ export const App: React.FC = () => {
     [activeSource, activeClip]
   );
 
-  // 60fps synchronization + live Subject Color-Patch Tracking loop while playing
+  // Verify & snap the tracked object position directly on the live visible <video> frame
+  const syncLiveObjectLockOnCurrentFrame = useCallback(() => {
+    const vid = videoRef.current;
+    if (!vid || vid.readyState < 2 || !activeClip?.subjectFocus) return;
+    if (activeClip.subjectFocus.strategy !== 'click-track') return;
+
+    const pathHint = interpolateTrackedPathAtTime(
+      activeClip.subjectFocus.trackedPath,
+      vid.currentTime
+    );
+    const prevPt = liveTrackedAnchorRef.current ||
+      pathHint || {
+        x: activeClip.subjectFocus.anchorX,
+        y: activeClip.subjectFocus.anchorY,
+      };
+
+    const nextPt = trackSubjectSignatureInVideoFrame(
+      vid,
+      prevPt.x,
+      prevPt.y,
+      activeClip.subjectFocus.targetColorRgb,
+      activeClip.subjectFocus.templateSignature,
+      activeClip.subjectFocus.trackedPath
+    );
+    liveTrackedAnchorRef.current = nextPt;
+    setLiveTrackedAnchor(nextPt);
+  }, [activeClip]);
+
+  // Run live frame object snap whenever paused frame / playhead changes
+  useEffect(() => {
+    if (!isPlaying && activeClip?.subjectFocus?.strategy === 'click-track') {
+      syncLiveObjectLockOnCurrentFrame();
+    }
+  }, [
+    isPlaying,
+    playheadTime,
+    activeClip?.subjectFocus?.strategy,
+    activeClip?.subjectFocus?.anchorTime,
+    syncLiveObjectLockOnCurrentFrame,
+  ]);
+
+  // 60fps synchronization + live Subject Tracking loop while playing
   useEffect(() => {
     if (!isPlaying) return;
     let rafId = 0;
@@ -430,11 +512,8 @@ export const App: React.FC = () => {
     const tick = () => {
       const vid = videoRef.current;
       if (vid && activeSource && activeClip) {
-        // Real-time visual patch tracker if user picked a subject with Click-to-Track!
-        if (
-          activeClip.subjectFocus?.strategy === 'click-track' &&
-          activeClip.subjectFocus.targetColorRgb
-        ) {
+        // Always run real-time visual + neural + rigid-object tracker on the live <video> element during playback!
+        if (activeClip.subjectFocus?.strategy === 'click-track') {
           const prevPt = liveTrackedAnchorRef.current || {
             x: activeClip.subjectFocus.anchorX,
             y: activeClip.subjectFocus.anchorY,
@@ -443,7 +522,9 @@ export const App: React.FC = () => {
             vid,
             prevPt.x,
             prevPt.y,
-            activeClip.subjectFocus.targetColorRgb
+            activeClip.subjectFocus.targetColorRgb,
+            activeClip.subjectFocus.templateSignature,
+            activeClip.subjectFocus.trackedPath
           );
           liveTrackedAnchorRef.current = nextPt;
           setLiveTrackedAnchor(nextPt);
@@ -590,10 +671,12 @@ export const App: React.FC = () => {
 
   // Apply a SubjectFocusConfig to the active clip (and optionally all generated clips so the user doesn't have to re-pick!)
   const applySubjectFocusConfig = useCallback(
-    (focusConfig: SubjectFocusConfig) => {
-      const pt = { x: focusConfig.anchorX, y: focusConfig.anchorY };
-      liveTrackedAnchorRef.current = pt;
-      setLiveTrackedAnchor(pt);
+    (focusConfig: SubjectFocusConfig, resetLiveAnchor = true) => {
+      if (resetLiveAnchor) {
+        const pt = { x: focusConfig.anchorX, y: focusConfig.anchorY };
+        liveTrackedAnchorRef.current = pt;
+        setLiveTrackedAnchor(pt);
+      }
 
       if (applyFocusToAllClips) {
         setFullVideoClip((prev) =>
@@ -653,6 +736,10 @@ export const App: React.FC = () => {
         label = 'Center 9:16 Lock';
       }
 
+      if ( strategy !== 'click-track') {
+        userFocusAnchorsRef.current = [];
+      }
+
       applySubjectFocusConfig({
         strategy,
         anchorX,
@@ -667,31 +754,202 @@ export const App: React.FC = () => {
     [currentTrack, playheadTime, applySubjectFocusConfig]
   );
 
-  // Click or Drag directly on the 16:9 Source Video to pick the exact subject to keep centered in 9:16!
-  const handlePointerOnSourceVideo = (e: React.MouseEvent<HTMLDivElement>) => {
+  // Click or Drag directly on the Source Video to pick ANY object and track it across the clip!
+  const handlePointerOnSourceVideo = (
+    e: React.MouseEvent<HTMLDivElement>,
+    runFullTrajectorySolve = false
+  ) => {
     if (!sourceOverlayWrapRef.current || !activeClip) return;
     const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
-    const normX = Math.max(0.16, Math.min(0.84, (e.clientX - rect.left) / rect.width));
-    const normY = Math.max(0.24, Math.min(0.76, (e.clientY - rect.top) / rect.height));
+    const normX = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
+    const normY = Math.max(0.06, Math.min(0.94, (e.clientY - rect.top) / rect.height));
 
-    const sampledRgb = sampleSubjectSignatureFromVideo(videoRef.current, normX, normY);
+    const liveVideoTime =
+      videoRef.current && Number.isFinite(videoRef.current.currentTime)
+        ? videoRef.current.currentTime
+        : playheadTime;
+    const clickTime = Number(liveVideoTime.toFixed(2));
+
+    const captured = captureClickedObjectSignature(videoRef.current, normX, normY);
+    resetLiveObjectTrackerState(captured.templateSignature);
+
     const strategy: SubjectFocusStrategy =
       clickPickMode === 'static' ? 'static-lock' : 'click-track';
 
+    const anchorPt: TrackedObjectPoint = {
+      time: clickTime,
+      x: captured.refinedX,
+      y: captured.refinedY,
+      boxW: captured.templateSignature?.boxW ?? 0.14,
+      boxH: captured.templateSignature?.boxH ?? 0.16,
+      confidence: 1.0,
+      isUserAnchor: true,
+    };
+
+    // Combine anchors from both our synchronous ref and clip state so no lock point is ever lost
+    const pathAnchors = (activeClip.subjectFocus?.trackedPath || []).filter((pt) => pt.isUserAnchor);
+    const mergedSourceAnchors = [...userFocusAnchorsRef.current];
+    for (const pa of pathAnchors) {
+      if (!mergedSourceAnchors.some((m) => Math.abs(m.time - pa.time) <= 0.12)) {
+        mergedSourceAnchors.push(pa);
+      }
+    }
+
+    // Preserve previous user Focus Lock Points at other timestamps (>0.12s apart) so clicking along the timeline strings them together!
+    const existingUserAnchors = mergedSourceAnchors.filter(
+      (pt) => pt.isUserAnchor && Math.abs(pt.time - anchorPt.time) > 0.12
+    );
+    const updatedUserAnchors = [...existingUserAnchors, anchorPt].sort((a, b) => a.time - b.time);
+    userFocusAnchorsRef.current = updatedUserAnchors;
+
+    // Immediately build a smooth spline curve between all user Focus Lock Points (preserving isUserAnchor: true!)
+    const immediateSplineCurve =
+      updatedUserAnchors.length >= 2
+        ? buildSmoothUserAnchorCurvePoints(updatedUserAnchors, 24)
+        : updatedUserAnchors;
+
     const label =
       strategy === 'click-track'
-        ? `Tracked Subject (${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%)`
+        ? updatedUserAnchors.length > 1
+          ? `${captured.detectedLabel} (${updatedUserAnchors.length} Focus Locks)`
+          : captured.detectedLabel
         : `Locked Position (${Math.round(normX * 100)}%, ${Math.round(normY * 100)}%)`;
 
-    applySubjectFocusConfig({
+    const newFocusConfig: SubjectFocusConfig = {
       strategy,
-      anchorX: Number(normX.toFixed(4)),
-      anchorY: Number(normY.toFixed(4)),
-      anchorTime: Number(playheadTime.toFixed(2)),
-      targetColorRgb: sampledRgb,
+      anchorX: captured.refinedX,
+      anchorY: captured.refinedY,
+      anchorTime: clickTime,
+      targetColorRgb: captured.targetColorRgb,
+      templateSignature: captured.templateSignature,
+      trackedPath: strategy === 'click-track' ? immediateSplineCurve : undefined,
       label,
-    });
+    };
+
+    liveTrackedAnchorRef.current = { x: captured.refinedX, y: captured.refinedY };
+    setLiveTrackedAnchor({ x: captured.refinedX, y: captured.refinedY });
+    applySubjectFocusConfig(newFocusConfig, true);
+
+    // Helper to guarantee all user Focus Lock Points stay merged in any solver path
+    const mergeWithLatestUserAnchors = (solverPath: TrackedObjectPoint[]): TrackedObjectPoint[] => {
+      const latestAnchors = userFocusAnchorsRef.current;
+      const nonUser = solverPath.filter(
+        (p) => !p.isUserAnchor && !latestAnchors.some((a) => Math.abs(a.time - p.time) <= 0.1)
+      );
+      return [...latestAnchors, ...nonUser].sort((a, b) => a.time - b.time);
+    };
+
+    // Run full forward/backward Neural + 2D Template + Spline trajectory solve across the video!
+    if (runFullTrajectorySolve && strategy === 'click-track' && activeSource?.url) {
+      const solveStart = Math.max(0, activeClip.sourceStart);
+      const solveEnd = Math.min(
+        activeSource.duration,
+        Math.max(activeClip.sourceEnd, solveStart + 2)
+      );
+      setIsSolvingObjectTrack(true);
+      setObjectTrackProgress(5);
+
+      solveClickedObjectTrajectory(
+        activeSource.url,
+        solveStart,
+        solveEnd,
+        clickTime,
+        captured.refinedX,
+        captured.refinedY,
+        captured.templateSignature,
+        captured.targetColorRgb,
+        existingUserAnchors,
+        (pct, partialPath) => {
+          setObjectTrackProgress(pct);
+          const safePath = mergeWithLatestUserAnchors(partialPath);
+          applySubjectFocusConfig(
+            {
+              ...newFocusConfig,
+              trackedPath: safePath,
+              label:
+                userFocusAnchorsRef.current.length > 1
+                  ? `${captured.detectedLabel} (${userFocusAnchorsRef.current.length} Focus Locks)`
+                  : captured.detectedLabel,
+            },
+            false
+          );
+        }
+      )
+        .then((solvedPath) => {
+          if (solvedPath && solvedPath.length > 0) {
+            const safePath = mergeWithLatestUserAnchors(solvedPath);
+            const totalLocks = userFocusAnchorsRef.current.length;
+            applySubjectFocusConfig(
+              {
+                ...newFocusConfig,
+                trackedPath: safePath,
+                label:
+                  totalLocks > 1
+                    ? `${captured.detectedLabel} (${totalLocks} Focus Locks)`
+                    : captured.detectedLabel,
+              },
+              false
+            );
+            setMarkerNotice(
+              totalLocks > 1
+                ? `🎯 Smoothly strung together ${totalLocks} Focus Lock Points across the timeline!`
+                : `🎯 Locked #1 @ ${clickTime.toFixed(1)}s — Play or scrub ahead on the timeline and click the object again to add Lock #2, #3!`
+            );
+            setTimeout(() => setMarkerNotice(null), 4000);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          setIsSolvingObjectTrack(false);
+          setObjectTrackProgress(0);
+        });
+    }
   };
+
+  // Remove a single user Focus Lock Point by timestamp and smoothly re-blend remaining lock points
+  const handleDeleteFocusLockPoint = useCallback(
+    (anchorTime: number) => {
+      const sourceAnchors =
+        userFocusAnchorsRef.current.length > 0
+          ? userFocusAnchorsRef.current
+          : (activeClip?.subjectFocus?.trackedPath || []).filter((pt) => pt.isUserAnchor);
+
+      const remainingAnchors = sourceAnchors
+        .filter((pt) => pt.isUserAnchor && Math.abs(pt.time - anchorTime) > 0.08)
+        .sort((a, b) => a.time - b.time);
+
+      userFocusAnchorsRef.current = remainingAnchors;
+
+      if (remainingAnchors.length === 0 || !activeClip?.subjectFocus) {
+        liveTrackedAnchorRef.current = null;
+        handleSelectSubjectFocusStrategy('auto-salient');
+        return;
+      }
+
+      const primary = remainingAnchors[remainingAnchors.length - 1];
+      const nextCurve =
+        remainingAnchors.length >= 2
+          ? buildSmoothUserAnchorCurvePoints(remainingAnchors, 24)
+          : remainingAnchors;
+
+      applySubjectFocusConfig(
+        {
+          ...activeClip.subjectFocus,
+          anchorX: primary.x,
+          anchorY: primary.y,
+          anchorTime: primary.time,
+          trackedPath: nextCurve,
+          label: `Tracked Subject (${remainingAnchors.length} Focus Lock${remainingAnchors.length === 1 ? '' : 's'})`,
+        },
+        false
+      );
+      setMarkerNotice(
+        `Removed Focus Lock @ ${anchorTime.toFixed(1)}s (${remainingAnchors.length} lock point${remainingAnchors.length === 1 ? '' : 's'} active)`
+      );
+      setTimeout(() => setMarkerNotice(null), 2600);
+    },
+    [activeClip, applySubjectFocusConfig, handleSelectSubjectFocusStrategy]
+  );
 
   // Razor Cut at any specific clip timeline time (`targetClipTime` in 0 .. activeClip.duration)
   const handleRazorSplitAtClipTime = useCallback(
@@ -1774,9 +2032,10 @@ export const App: React.FC = () => {
             className="btn btn-primary"
             onClick={handleExport}
             disabled={!activeSource || !activeClip || isExporting}
+            title="Export the active 9:16 vertical clip as a classic H.264/AAC .mp4 video file"
           >
             <Download size={14} />
-            {isExporting ? `Exporting ${exportProgress}%...` : 'Export 9:16 Video'}
+            {isExporting ? `Exporting MP4 (${exportProgress}%)...` : 'Export 9:16 MP4'}
           </button>
         </div>
       </header>
@@ -2585,7 +2844,38 @@ export const App: React.FC = () => {
                     }}
                   >
                     <Crosshair size={13} color="#34d399" />
-                    CLICK ANY SUBJECT ON VIDEO TO LOCK IN 9:16 CENTER ({nativeDims.width}×{nativeDims.height})
+                    CLICK ANY OBJECT ON VIDEO TO LOCK &amp; TRACK IN 9:16 ({nativeDims.width}×{nativeDims.height})
+                    {isSolvingObjectTrack && (
+                      <span
+                        style={{
+                          marginLeft: 8,
+                          padding: '1px 7px',
+                          borderRadius: 4,
+                          background: 'rgba(16, 185, 129, 0.22)',
+                          border: '1px solid #10b981',
+                          color: '#6ee7b7',
+                          fontSize: 10.5,
+                        }}
+                      >
+                        Solving Object Path {objectTrackProgress}%...
+                      </span>
+                    )}
+                    {!isSolvingObjectTrack &&
+                      activeClip?.subjectFocus?.trackedPath &&
+                      activeClip.subjectFocus.trackedPath.length > 1 && (
+                        <span
+                          style={{
+                            marginLeft: 8,
+                            padding: '1px 7px',
+                            borderRadius: 4,
+                            background: 'rgba(16, 185, 129, 0.18)',
+                            color: '#34d399',
+                            fontSize: 10.5,
+                          }}
+                        >
+                          ✓ Tracked ({activeClip.subjectFocus.trackedPath.length} frames)
+                        </span>
+                      )}
                   </div>
 
                   <div
@@ -2604,14 +2894,19 @@ export const App: React.FC = () => {
                     }}
                     onMouseDown={(e) => {
                       setIsDraggingCrop(true);
-                      handlePointerOnSourceVideo(e);
+                      handlePointerOnSourceVideo(e, false);
                     }}
                     onMouseMove={(e) => {
-                      if (isDraggingCrop) handlePointerOnSourceVideo(e);
+                      if (isDraggingCrop) handlePointerOnSourceVideo(e, false);
                     }}
-                    onMouseUp={() => setIsDraggingCrop(false)}
+                    onMouseUp={(e) => {
+                      if (isDraggingCrop) {
+                        setIsDraggingCrop(false);
+                        handlePointerOnSourceVideo(e, true);
+                      }
+                    }}
                     onMouseLeave={() => setIsDraggingCrop(false)}
-                    title="Click or drag on any person or object to keep them centered in the 9:16 output"
+                    title="Click any object (car, person, prop) to lock onto it and track its trajectory across the video"
                   >
                     {/* Real Native <video> Element */}
                     <video
@@ -2633,7 +2928,10 @@ export const App: React.FC = () => {
                         }
                         render9x16Preview();
                       }}
-                      onSeeked={() => render9x16Preview()}
+                      onSeeked={() => {
+                        syncLiveObjectLockOnCurrentFrame();
+                        render9x16Preview();
+                      }}
                       style={{
                         width: '100%',
                         height: '100%',
@@ -2642,6 +2940,102 @@ export const App: React.FC = () => {
                         pointerEvents: 'none',
                       }}
                     />
+
+                    {/* Smooth Multi-Point Focus Lock Curve & Numbered Lock Badges (when 2+ user lock points exist) */}
+                    {activeFocusStrategy === 'click-track' && userFocusAnchors.length >= 2 && (
+                      <svg
+                        viewBox="0 0 100 100"
+                        preserveAspectRatio="none"
+                        style={{
+                          position: 'absolute',
+                          inset: 0,
+                          width: '100%',
+                          height: '100%',
+                          pointerEvents: 'none',
+                          zIndex: 2,
+                        }}
+                      >
+                        <polyline
+                          fill="none"
+                          stroke="rgba(16, 185, 129, 0.72)"
+                          strokeWidth="0.65"
+                          strokeDasharray="1.5 1"
+                          points={buildSmoothUserAnchorCurvePoints(userFocusAnchors, 12)
+                            .map((pt) => `${(pt.x * 100).toFixed(2)},${(pt.y * 100).toFixed(2)}`)
+                            .join(' ')}
+                        />
+                      </svg>
+                    )}
+
+                    {activeFocusStrategy === 'click-track' &&
+                      userFocusAnchors.length >= 2 &&
+                      userFocusAnchors.map((pt, idx) => {
+                        const isNearNow = Math.abs(pt.time - playheadTime) < 0.35;
+                        return (
+                          <div
+                            key={`focus-lock-node-${pt.time}-${idx}`}
+                            style={{
+                              position: 'absolute',
+                              left: `${pt.x * 100}%`,
+                              top: `${pt.y * 100}%`,
+                              transform: 'translate(-50%, -50%)',
+                              width: isNearNow ? 20 : 16,
+                              height: isNearNow ? 20 : 16,
+                              borderRadius: '50%',
+                              background: isNearNow ? '#10b981' : 'rgba(15, 23, 42, 0.88)',
+                              border: isNearNow ? '2px solid #fef08a' : '1.5px solid #34d399',
+                              color: isNearNow ? '#052e16' : '#6ee7b7',
+                              fontSize: 9,
+                              fontWeight: 800,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              boxShadow: '0 2px 6px rgba(0,0,0,0.65)',
+                              pointerEvents: 'none',
+                              zIndex: 4,
+                            }}
+                          >
+                            {idx + 1}
+                          </div>
+                        );
+                      })}
+
+                    {/* Tight Target Object Bounding Box (shows exact lock on the car/object itself) */}
+                    {activeFocusStrategy === 'click-track' && (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          left: `${Math.max(0, (currentTrack.rawX - (currentTrack.objectBoxW ?? 0.14) / 2) * 100)}%`,
+                          top: `${Math.max(0, (currentTrack.rawY - (currentTrack.objectBoxH ?? 0.16) / 2) * 100)}%`,
+                          width: `${(currentTrack.objectBoxW ?? 0.14) * 100}%`,
+                          height: `${(currentTrack.objectBoxH ?? 0.16) * 100}%`,
+                          border: '1.5px dashed #34d399',
+                          background: 'rgba(16, 185, 129, 0.08)',
+                          borderRadius: 4,
+                          pointerEvents: 'none',
+                          zIndex: 3,
+                        }}
+                      >
+                        <span
+                          style={{
+                            position: 'absolute',
+                            bottom: '100%',
+                            left: 0,
+                            background: 'rgba(5, 150, 105, 0.9)',
+                            color: '#fff',
+                            fontSize: 8.5,
+                            fontWeight: 700,
+                            padding: '1px 4px',
+                            borderRadius: 2,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {userFocusAnchors.length >= 2
+                            ? `OBJECT LOCK • SMOOTH BLEND (${userFocusAnchors.length} PTS)`
+                            : 'OBJECT LOCK'}
+                        </span>
+                      </div>
+                    )}
 
                     {/* Interactive 9:16 Subject Tracking Crop Box Overlay */}
                     <div
@@ -2948,6 +3342,134 @@ export const App: React.FC = () => {
                     <Zap size={12} />
                     Action Motion
                   </button>
+
+                  {userFocusAnchors.length > 0 && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 5,
+                        flexWrap: 'wrap',
+                        background: 'rgba(6, 78, 59, 0.28)',
+                        border: '1px solid rgba(16, 185, 129, 0.35)',
+                        borderRadius: 6,
+                        padding: '2px 6px',
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          color: '#6ee7b7',
+                        }}
+                        title="Click on the 16:9 video at any point along the timeline to add another Focus Lock Point — ClipMaker smoothly blends between all lock points!"
+                      >
+                        Focus Locks ({userFocusAnchors.length}):
+                      </span>
+
+                      {userFocusAnchors.map((pt, idx) => {
+                        const isNearCurrent = Math.abs(pt.time - playheadTime) < 0.35;
+                        return (
+                          <div
+                            key={`focus-pill-${pt.time}-${idx}`}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 4,
+                              padding: '2px 6px',
+                              borderRadius: 4,
+                              fontSize: 10.5,
+                              fontFamily: 'var(--font-mono)',
+                              background: isNearCurrent
+                                ? 'rgba(16, 185, 129, 0.35)'
+                                : 'rgba(15, 23, 42, 0.85)',
+                              border: isNearCurrent
+                                ? '1px solid #34d399'
+                                : '1px solid rgba(148, 163, 184, 0.3)',
+                              color: isNearCurrent ? '#ecfdf5' : '#cbd5e1',
+                            }}
+                          >
+                            <span
+                              onClick={() => handleSeekSourceTime(pt.time)}
+                              style={{ cursor: 'pointer', fontWeight: 600 }}
+                              title={`Jump playhead to Focus Lock #${idx + 1} at ${pt.time.toFixed(2)}s`}
+                            >
+                              ◆ #{idx + 1} ({pt.time.toFixed(1)}s)
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteFocusLockPoint(pt.time);
+                              }}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#fca5a5',
+                                cursor: 'pointer',
+                                fontSize: 11,
+                                fontWeight: 700,
+                                padding: '0 2px',
+                                lineHeight: 1,
+                              }}
+                              title={`Remove Focus Lock #${idx + 1} (${pt.time.toFixed(1)}s)`}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        );
+                      })}
+
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => {
+                          const curT = videoRef.current?.currentTime ?? playheadTime;
+                          const nextT = Math.min(
+                            activeSource?.duration ?? curT + 2,
+                            Number((curT + 2.0).toFixed(2))
+                          );
+                          handleSeekSourceTime(nextT);
+                          setMarkerNotice(
+                            `⏩ Stepped to ${nextT.toFixed(1)}s — now click the object on the video to add Focus Lock #${userFocusAnchors.length + 1}!`
+                          );
+                          setTimeout(() => setMarkerNotice(null), 3200);
+                        }}
+                        style={{
+                          padding: '2px 7px',
+                          fontSize: 10.5,
+                          borderColor: 'rgba(52, 211, 153, 0.5)',
+                          background: 'rgba(16, 185, 129, 0.2)',
+                          color: '#a7f3d0',
+                          fontWeight: 600,
+                        }}
+                        title="Step forward 2 seconds on the timeline so you can click the object on the video to add your next Focus Lock Point"
+                      >
+                        ⏩ +2s (Add Next Lock)
+                      </button>
+
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => {
+                          userFocusAnchorsRef.current = [];
+                          liveTrackedAnchorRef.current = null;
+                          handleSelectSubjectFocusStrategy('auto-salient');
+                        }}
+                        style={{
+                          padding: '2px 7px',
+                          fontSize: 10.5,
+                          borderColor: 'rgba(248, 113, 113, 0.45)',
+                          background: 'rgba(239, 68, 68, 0.14)',
+                          color: '#fca5a5',
+                        }}
+                        title="Clear all Focus Lock Points and reset to auto subject focus"
+                      >
+                        <RotateCcw size={10} />
+                        Clear All
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Right: Fine Horizontal Trim Slider + Apply to All Clips Toggle */}
@@ -3586,6 +4108,46 @@ export const App: React.FC = () => {
                     </div>
                   </div>
                 )}
+
+                {/* User Focus Lock Point Diamond Markers along the Timeline Scrubber Bar */}
+                {userFocusAnchors.map((pt, idx) => {
+                  const clipSec = sourceTimeToClipTime(activeClip, pt.time);
+                  const pct = Math.max(
+                    0,
+                    Math.min(100, (clipSec / Math.max(0.1, activeClip.duration)) * 100)
+                  );
+                  const isNearCurrent = Math.abs(pt.time - playheadTime) < 0.35;
+                  return (
+                    <div
+                      key={`timeline-focus-lock-${pt.time}-${idx}`}
+                      onMouseDown={(e) => {
+                        if (isRazorMode) return;
+                        e.stopPropagation();
+                        handleSeekSourceTime(pt.time);
+                      }}
+                      style={{
+                        position: 'absolute',
+                        left: `${pct}%`,
+                        bottom: 2,
+                        transform: 'translateX(-50%)',
+                        background: isNearCurrent ? '#10b981' : 'rgba(6, 78, 59, 0.92)',
+                        border: isNearCurrent ? '1.5px solid #fef08a' : '1px solid #34d399',
+                        color: isNearCurrent ? '#052e16' : '#6ee7b7',
+                        fontSize: 8.5,
+                        fontWeight: 800,
+                        padding: '1px 4px',
+                        borderRadius: 3,
+                        cursor: 'pointer',
+                        zIndex: 14,
+                        whiteSpace: 'nowrap',
+                        boxShadow: '0 1px 4px rgba(0,0,0,0.65)',
+                      }}
+                      title={`Focus Lock #${idx + 1} @ ${pt.time.toFixed(2)}s — Click to jump here`}
+                    >
+                      ◆ {idx + 1}
+                    </div>
+                  );
+                })}
 
                 {/* Playhead Needle across the Active Timeline (0% to 100%) */}
                 <div

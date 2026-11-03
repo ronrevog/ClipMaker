@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="14" y1="8" x2="50" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="55%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded App Tile -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bg)" stroke="#334155" stroke-width="2"/>
+  <!-- 16:9 Outer Guide Brackets -->
+  <path d="M9 20V15C9 13.3431 10.3431 12 12 12H17" stroke="#64748b" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M55 20V15C55 13.3431 53.6569 12 52 12H47" stroke="#64748b" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M9 44V49C9 50.6569 10.3431 52 12 52H17" stroke="#64748b" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M55 44V49C55 50.6569 53.6569 52 52 52H47" stroke="#64748b" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Glowing 9:16 Vertical Crop Frame -->
+  <rect x="20" y="9" width="24" height="46" rx="5" fill="#064e3b" fill-opacity="0.35" stroke="url(#frame)" stroke-width="3.5"/>
+  <!-- Center Play / Subject Reticle -->
+  <polygon points="28,24 28,40 40,32" fill="#34d399"/>
+  <!-- Tracking Crosshair Ticks -->
+  <line x1="32" y1="5" x2="32" y2="11" stroke="#34d399" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="32" y1="53" x2="32" y2="59" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round"/>
+</svg>
