@@ -442,7 +442,20 @@ export const App: React.FC = () => {
       currentZoom
     );
 
-    ctx.drawImage(vid, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, outW, outH);
+    const cropAspect = crop.sw / Math.max(1, crop.sh);
+    const canvasAspect = outW / outH;
+    let dx = 0;
+    let dy = 0;
+    let dw = outW;
+    let dh = outH;
+    if (cropAspect > canvasAspect + 0.01) {
+      dw = outW;
+      dh = Math.round(outW / cropAspect);
+      dx = 0;
+      dy = Math.round((outH - dh) / 2);
+    }
+
+    ctx.drawImage(vid, crop.sx, crop.sy, crop.sw, crop.sh, dx, dy, dw, dh);
 
     // Draw caption if present
     if (activeClip) {
@@ -722,6 +735,32 @@ export const App: React.FC = () => {
       }
     },
     [timelineMode, selectedClipObj]
+  );
+
+  // Apply a target zoom level across every sub-cut on the timeline (and optionally all generated clips + scheme)
+  const applyZoomAcrossStudio = useCallback(
+    (rawZoom: number, applyToAllClips = true) => {
+      const z = Number(Math.max(0.55, Math.min(1.5, rawZoom || 1.0)).toFixed(2));
+      const setAllCutsZoom = (clip: GeneratedClip): GeneratedClip => ({
+        ...clip,
+        zoomScale: z,
+        subCuts: clip.subCuts.map((cut) => ({ ...cut, zoom: z })),
+      });
+
+      setFullVideoClip((prev) => (prev ? setAllCutsZoom(prev) : prev));
+      if (applyToAllClips) {
+        setGeneratedClips((prev) => prev.map((c) => setAllCutsZoom(c)));
+        setActiveScheme((prev) => ({
+          ...prev,
+          punchInZoom: Math.max(1.0, z),
+        }));
+      } else if (selectedClipObj) {
+        setGeneratedClips((prev) =>
+          prev.map((c) => (c.id === selectedClipObj.id ? setAllCutsZoom(c) : c))
+        );
+      }
+    },
+    [selectedClipObj]
   );
 
   // Apply a SubjectFocusConfig to the active clip (and optionally all generated clips so the user doesn't have to re-pick!)
@@ -1975,7 +2014,7 @@ export const App: React.FC = () => {
                 trackingMode: activeClip.trackingMode,
                 trackingOffsetX: activeClip.trackingOffsetX,
                 trackingSmoothing: activeClip.trackingSmoothing,
-                zoomScale: activeClip.zoomScale,
+                zoomScale: currentZoom,
                 captionText: activeClip.captionText,
                 subjectFocusLabel: activeClip.subjectFocus?.label,
                 cuts: activeClip.subCuts.map((c) => ({
@@ -1997,10 +2036,53 @@ export const App: React.FC = () => {
       const operations = Array.isArray(data.operations) ? data.operations : [];
       const badges: string[] = [];
 
+      // Helper to parse zoom value resiliently from any AI operation field
+      const parseOpZoom = (op: any): number | null => {
+        const raw = op?.zoom ?? op?.punchInZoom ?? op?.zoomScale ?? op?.scale ?? op?.level;
+        if (typeof raw === 'number' && Number.isFinite(raw)) {
+          if (raw > 10 && raw <= 200) return Number((raw / 100).toFixed(2));
+          if (raw === 0) return 1.0;
+          return Number(Math.max(0.55, Math.min(1.5, raw)).toFixed(2));
+        }
+        if (typeof raw === 'string') {
+          const pctMatch = raw.match(/(\d+(?:\.\d+)?)\s*%/);
+          if (pctMatch) {
+            return Number(Math.max(0.55, Math.min(1.5, parseFloat(pctMatch[1]) / 100)).toFixed(2));
+          }
+          const numMatch = raw.match(/(\d+(?:\.\d+)?)/);
+          if (numMatch) {
+            const v = parseFloat(numMatch[1]);
+            if (v === 0) return 1.0;
+            return Number(Math.max(0.55, Math.min(1.5, v)).toFixed(2));
+          }
+        }
+        return null;
+      };
+
+      // Direct client-side intent detection for zoom removal / reset / fit-width so user commands NEVER fail
+      const lowerPrompt = effectivePrompt.toLowerCase();
+      const wantsFitWidth =
+        /\b(fit\s+(the\s+)?(whole|full|entire)\s+(frame|width|video|shot)|letterbox|0\.56x?)\b/i.test(
+          lowerPrompt
+        );
+      const wantsNoZoom =
+        !wantsFitWidth &&
+        (/\b(remove\s+(all\s+)?(the\s+)?zooms?|all\s+(the\s+)?zooms?\s+(removed|out|off)|zooms?\s+(all\s+)?(the\s+way\s+)?out|no\s+zooms?|without\s+zoom|reset\s+(all\s+)?(timeline\s+)?zooms?|100%\s+(the\s+whole\s+way|zoom)|1\.00?x|stop\s+zooming|clear\s+(all\s+)?zooms?)\b/i.test(
+          lowerPrompt
+        ) ||
+          (currentZoom > 1.01 &&
+            /\b(why\s+is\s+it\s+still\s+there|still\s+zoomed|still\s+1\.2)\b/i.test(lowerPrompt)));
+
+      let targetGlobalZoom: number | null = wantsFitWidth ? 0.56 : wantsNoZoom ? 1.0 : null;
+
       // 1. Handle Scheme Updates
       let schemeAfterOps = { ...activeScheme };
       let schemeChanged = false;
       for (const op of operations) {
+        const parsedZ = parseOpZoom(op);
+        if (parsedZ !== null && (op.type === 'set_zoom' || op.type === 'update_scheme')) {
+          targetGlobalZoom = parsedZ;
+        }
         if (op.type === 'update_scheme' || op.type === 'generate_edited_clips') {
           if (typeof op.clipsCount === 'number') {
             schemeAfterOps.maxClipsCount = Math.max(1, Math.min(12, op.clipsCount));
@@ -2034,8 +2116,8 @@ export const App: React.FC = () => {
             schemeAfterOps.safeZoneGuide = op.safeZoneGuide;
             schemeChanged = true;
           }
-          if (typeof op.zoom === 'number') {
-            schemeAfterOps.punchInZoom = Math.max(1.0, Math.min(1.5, op.zoom));
+          if (parsedZ !== null) {
+            schemeAfterOps.punchInZoom = Math.max(1.0, Math.min(1.5, parsedZ));
             schemeChanged = true;
           }
           if (typeof op.smoothing === 'number') {
@@ -2047,8 +2129,26 @@ export const App: React.FC = () => {
           }
         }
       }
+      if (targetGlobalZoom !== null && targetGlobalZoom <= 1.0) {
+        schemeAfterOps.punchInZoom = 1.0;
+        schemeChanged = true;
+      }
       if (schemeChanged) {
         setActiveScheme(schemeAfterOps);
+      }
+
+      // Immediately apply global zoom change across fullVideoClip and all generatedClips so no subCut stays at 1.20x!
+      if (targetGlobalZoom !== null) {
+        applyZoomAcrossStudio(targetGlobalZoom, true);
+        if (
+          !operations.some((op: any) => op.type === 'set_zoom' || op.type === 'update_scheme')
+        ) {
+          badges.push(
+            targetGlobalZoom === 1.0
+              ? 'Removed All Zoom (1.00x Across All Cuts)'
+              : `Set Timeline Zoom: ${targetGlobalZoom.toFixed(2)}x`
+          );
+        }
       }
 
       // 2. Handle Multimodal Clip Generation
@@ -2155,9 +2255,14 @@ export const App: React.FC = () => {
         ].includes(op.type)
       );
 
-      if (clipOps.length > 0 && activeClip && activeSource) {
+      if ((clipOps.length > 0 || targetGlobalZoom !== null) && activeClip && activeSource) {
         updateActiveTimelineClip((clip) => {
           let next = { ...clip, subCuts: [...clip.subCuts] };
+
+          if (targetGlobalZoom !== null) {
+            next.zoomScale = targetGlobalZoom;
+            next.subCuts = next.subCuts.map((c) => ({ ...c, zoom: targetGlobalZoom! }));
+          }
 
           for (const op of clipOps) {
             badges.push(op.summary || op.type);
@@ -2227,14 +2332,11 @@ export const App: React.FC = () => {
               };
             } else if (op.type === 'adjust_smoothing' && typeof op.smoothing === 'number') {
               next.trackingSmoothing = Math.max(0.15, Math.min(0.96, op.smoothing));
-            } else if (op.type === 'set_zoom' && typeof op.zoom === 'number') {
-              const z = Math.max(1.0, Math.min(1.5, op.zoom));
+            } else if (op.type === 'set_zoom') {
+              const parsed = parseOpZoom(op) ?? targetGlobalZoom ?? 1.0;
+              const z = Math.max(0.55, Math.min(1.5, parsed));
               next.zoomScale = z;
-              next.subCuts = next.subCuts.map((c) =>
-                playheadTime >= c.sourceStart - 0.05 && playheadTime <= c.sourceEnd + 0.05
-                  ? { ...c, zoom: z }
-                  : c
-              );
+              next.subCuts = next.subCuts.map((c) => ({ ...c, zoom: z }));
             } else if (op.type === 'repace_cuts' && typeof op.pacingMultiplier === 'number') {
               const newAsl = Math.max(
                 0.8,
@@ -2250,7 +2352,12 @@ export const App: React.FC = () => {
                     id: `repace-${rebuilt.length + 1}-${Date.now()}`,
                     sourceStart: cur,
                     sourceEnd: endT,
-                    zoom: rebuilt.length % 2 === 1 ? next.zoomScale : 1.0,
+                    zoom:
+                      targetGlobalZoom !== null
+                        ? targetGlobalZoom
+                        : rebuilt.length % 2 === 1
+                          ? next.zoomScale
+                          : 1.0,
                   });
                   cur = endT;
                 }
@@ -4137,8 +4244,79 @@ export const App: React.FC = () => {
                   )}
                 </div>
 
-                {/* Right: Fine Horizontal Trim Slider + Apply to All Clips Toggle */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                {/* Right: Zoom Control + Fine Horizontal Trim Slider + Apply to All Clips Toggle */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      fontSize: 11,
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    <span>Zoom:</span>
+                    <input
+                      type="range"
+                      min={0.56}
+                      max={1.5}
+                      step={0.02}
+                      value={currentZoom}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value);
+                        applyZoomAcrossStudio(v, applyFocusToAllClips);
+                      }}
+                      style={{ width: 72 }}
+                      title="Adjust 9:16 zoom across timeline cuts (1.00x = 100% full height, <1.00x = wide letterbox, >1.00x = punch-in)"
+                    />
+                    <span
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10.5,
+                        color: currentZoom === 1.0 ? '#6ee7b7' : '#e2e8f0',
+                        minWidth: 36,
+                      }}
+                    >
+                      {currentZoom.toFixed(2)}x
+                    </span>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => applyZoomAcrossStudio(1.0, true)}
+                      style={{
+                        padding: '2px 6px',
+                        fontSize: 10,
+                        background:
+                          Math.abs(currentZoom - 1.0) < 0.015
+                            ? 'rgba(16, 185, 129, 0.2)'
+                            : undefined,
+                        borderColor:
+                          Math.abs(currentZoom - 1.0) < 0.015
+                            ? 'rgba(16, 185, 129, 0.5)'
+                            : undefined,
+                        color: Math.abs(currentZoom - 1.0) < 0.015 ? '#6ee7b7' : undefined,
+                      }}
+                      title="Remove all punch-in zoom (set every cut across the timeline to 1.00x / 100% height)"
+                    >
+                      1.0x No Zoom
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => applyZoomAcrossStudio(0.56, true)}
+                      style={{
+                        padding: '2px 6px',
+                        fontSize: 10,
+                        background:
+                          currentZoom <= 0.6 ? 'rgba(56, 189, 248, 0.2)' : undefined,
+                        borderColor:
+                          currentZoom <= 0.6 ? 'rgba(56, 189, 248, 0.5)' : undefined,
+                        color: currentZoom <= 0.6 ? '#7dd3fc' : undefined,
+                      }}
+                      title="Fit the entire 16:9 horizontal width inside the 9:16 frame (0.56x letterbox)"
+                    >
+                      Fit 16:9
+                    </button>
+                  </div>
+
                   <div
                     style={{
                       display: 'flex',
@@ -4159,7 +4337,7 @@ export const App: React.FC = () => {
                         const v = parseFloat(e.target.value);
                         updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: v }));
                       }}
-                      style={{ width: 76 }}
+                      style={{ width: 70 }}
                       title="Fine-tune the horizontal center of the 9:16 frame"
                     />
                   </div>
@@ -4173,7 +4351,7 @@ export const App: React.FC = () => {
                       color: '#cbd5e1',
                       cursor: 'pointer',
                     }}
-                    title="When checked, picking a subject focus applies to all generated clips from this video"
+                    title="When checked, picking a subject focus or zoom applies to all generated clips from this video"
                   >
                     <input
                       type="checkbox"

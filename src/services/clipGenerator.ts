@@ -411,7 +411,7 @@ export function buildCondensedEditSubCuts(
   const subCuts: SubCut[] = orderedShots.map((shot, idx) => {
     const isHook = idx === 0;
     const isEmphasis = idx % 2 === 1;
-    const zoom = isEmphasis ? Number(Math.max(1.04, scheme.punchInZoom).toFixed(2)) : 1.0;
+    const zoom = isEmphasis ? Number(Math.max(0.55, scheme.punchInZoom || 1.0).toFixed(2)) : 1.0;
     const tsRange = `${formatShortTimestamp(shot.start)}–${formatShortTimestamp(shot.end)}`;
     const roleLabel = isHook
       ? `Hook [${tsRange}]`

@@ -2019,7 +2019,7 @@ export function computeDistortionFree9x16Crop(
 } {
   const vw = Math.max(1, videoWidth || 1920);
   const vh = Math.max(1, videoHeight || 1080);
-  const safeZoom = Math.max(1.0, Math.min(2.5, zoom || 1.0));
+  const safeZoom = Math.max(0.55, Math.min(2.5, zoom || 1.0));
   const targetAspect = 9 / 16;
   const sourceAspect = vw / vh;
 

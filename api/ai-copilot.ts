@@ -147,7 +147,11 @@ You are directly wired into every control in ClipMaker Studio:
    - "split_at_playhead": Razor-cut the active clip at currentPlayhead (or targetTime).
    - "delete_current_cut": Delete the currently selected sub-cut segment.
    - "repace_cuts": Speed up (pacingMultiplier < 1, e.g. 0.7) or slow down (pacingMultiplier > 1, e.g. 1.35) sub-cuts.
-   - "set_zoom": Set 9:16 zoom scale (1.0 to 1.5).
+   - "set_zoom": Set 9:16 zoom scale across the timeline (zoom from 0.56 to 1.50):
+     * zoom: 1.0 = 100% Full Height / No Zoom (1.00x) — removes all punch-in zoom across every sub-cut on the timeline so the 9:16 crop uses 100% of the vertical height. Whenever the user asks to "remove all the zoom", "make sure all zooms are out", "100% the whole way", "no zoom", or asks why a 1.20x zoom is still on the crop box, ALWAYS emit BOTH {"type": "set_zoom", "zoom": 1.0, "summary": "Removed All Zoom (1.00x Across Timeline)"} AND {"type": "update_scheme", "zoom": 1.0, "summary": "Scheme Punch-In Zoom: 1.00x"}!
+     * zoom: 0.56 = Fit Full 16:9 Width (Letterbox Mode) — zooms out wider than 1.0x so the entire horizontal 16:9 video width fits inside the 9:16 vertical frame with top/bottom letterbox bars. Emit zoom: 0.56 if the user asks to "fit the whole 16:9 frame", "fit full width", "letterbox the whole shot", or wants to zoom out wider than 1.00x so nothing on the left/right is cropped.
+     * zoom: 1.05..1.50 = Punch-In Zoom — zooms in closer on the subject.
+   - Note on the 16:9 Left Monitor Overlay: The blue/green rectangle on the 16:9 monitor ("Speaker / Face • 1.00x") is the live 9:16 crop window indicator showing which slice of the 16:9 video is rendered into the 9:16 vertical preview on the right.
    - "adjust_tracking_offset": Pan 9:16 crop window horizontally (-0.35 left to +0.35 right).
    - "adjust_smoothing": Set camera damping/smoothing (0.15 snappy to 0.96 ultra-smooth).
    - "center_subject": Switch focus strategy ("auto-salient" | "face-speaker" | "left-subject" | "right-subject" | "action-motion" | "static-lock").
@@ -539,14 +543,48 @@ function buildDeterministicCopilotResponse(
     replies.push(`Updated camera path spring damping to ${Math.round(smooth * 100)}%.`);
   }
 
-  if (p.includes('zoom') || p.includes('punch') || p.includes('closer') || p.includes('wide')) {
-    const zoom = p.includes('wide') || p.includes('out') ? 1.0 : numVal && numVal < 2.5 ? numVal : 1.24;
+  if (
+    p.includes('zoom') ||
+    p.includes('punch') ||
+    p.includes('closer') ||
+    p.includes('wide') ||
+    p.includes('100%') ||
+    p.includes('fit width') ||
+    p.includes('full frame')
+  ) {
+    const isFitWidth =
+      p.includes('fit width') || p.includes('full width') || p.includes('letterbox');
+    const isZoomReset =
+      p.includes('remove') ||
+      p.includes('no zoom') ||
+      p.includes('out') ||
+      p.includes('100%') ||
+      p.includes('reset') ||
+      p.includes('wide');
+    const zoom = isFitWidth
+      ? 0.56
+      : isZoomReset
+        ? 1.0
+        : numVal && numVal >= 0.55 && numVal <= 2.5
+          ? numVal
+          : 1.24;
     ops.push({
       type: 'set_zoom',
       zoom,
-      summary: `Zoom ${zoom.toFixed(2)}x`,
+      summary: zoom === 1.0 ? 'Removed All Zoom (1.00x)' : `Zoom ${zoom.toFixed(2)}x`,
     });
-    replies.push(`Set dynamic punch-in scale to ${zoom.toFixed(2)}x.`);
+    if (zoom <= 1.0) {
+      ops.push({
+        type: 'update_scheme',
+        zoom: 1.0,
+        summary: 'Scheme Punch-In Zoom: 1.00x',
+      });
+    }
+    replies.push(
+      zoom === 1.0
+        ? 'Removed all punch-in zoom (set to 1.00x / 100%) across every cut on the timeline.'
+        : `Set 9:16 zoom scale to ${zoom.toFixed(2)}x across the timeline.`
+    );
   }
 
   if (p.includes('faster') || p.includes('slower') || p.includes('pace') || p.includes('pacing') || p.includes('beat')) {

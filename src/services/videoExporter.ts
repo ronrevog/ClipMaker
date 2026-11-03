@@ -145,16 +145,29 @@ export async function exportClipTo9x16Video(
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, outWidth, outHeight);
 
+    const cropAspect = crop.sw / Math.max(1, crop.sh);
+    const canvasAspect = outWidth / outHeight;
+    let dx = 0;
+    let dy = 0;
+    let dw = outWidth;
+    let dh = outHeight;
+    if (cropAspect > canvasAspect + 0.01) {
+      dw = outWidth;
+      dh = Math.round(outWidth / cropAspect);
+      dx = 0;
+      dy = Math.round((outHeight - dh) / 2);
+    }
+
     ctx.drawImage(
       videoEl,
       crop.sx,
       crop.sy,
       crop.sw,
       crop.sh,
-      0,
-      0,
-      outWidth,
-      outHeight
+      dx,
+      dy,
+      dw,
+      dh
     );
 
     const activeCaption = clip.captions.find(
