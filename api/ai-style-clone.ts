@@ -152,8 +152,14 @@ export async function handleStyleCloneRequest(
         );
         if (resp.ok) {
           const data: any = await resp.json();
-          const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-          const parsed = JSON.parse(raw);
+          const candParts: any[] = data?.candidates?.[0]?.content?.parts || [];
+          const nonThought = candParts.filter((p) => !p?.thought && typeof p?.text === 'string');
+          const rawText =
+            (nonThought.length > 0
+              ? nonThought[nonThought.length - 1].text
+              : candParts[candParts.length - 1]?.text) || '{}';
+          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+          const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
           if (parsed?.scheme) {
             return {
               providerUsed: 'Google Gemini',

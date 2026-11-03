@@ -88,14 +88,14 @@ import {
 } from './services/projectStorage';
 
 const QUICK_FEEDBACK_CHIPS = [
+  'Lock onto the main subject in this frame',
   'Find best viral clips',
   'Create compilation cutdowns',
   'Create 60s edit of video',
-  'Center subject',
-  'Start 2s earlier',
-  'Trim 2s off end',
+  'Faster cut pacing',
   'Zoom 1.25x',
   'Split at playhead',
+  'Export 9:16 MP4',
 ];
 
 /**
@@ -289,9 +289,9 @@ export const App: React.FC = () => {
       id: 'welcome',
       role: 'assistant',
       content:
-        'Upload a video to: (1) Find the Best Possible Viral Clips, (2) Create Compilation Cutdowns up to 3 mins (180s), and (3) Click any subject on the video to keep them locked in the center of the 9:16 crop.',
+        'Gemini 4 Argon Studio Agent is live and connected! Ask me to lock onto any object in the video frame (e.g. "lock onto the car"), generate viral clips or compilation cutdowns, adjust your Editing Scheme, trim/split cuts, or export your 9:16 MP4.',
       timestamp: new Date().toISOString(),
-      providerBadge: 'Google Gemini ★',
+      providerBadge: 'gemini-4-argon [Live]',
     },
   ]);
 
@@ -801,15 +801,16 @@ export const App: React.FC = () => {
     [currentTrack, playheadTime, applySubjectFocusConfig]
   );
 
-  // Click or Drag directly on the Source Video to pick ANY object and track it across the clip!
-  const handlePointerOnSourceVideo = (
-    e: React.MouseEvent<HTMLDivElement>,
-    runFullTrajectorySolve = false
+  // Programmatically or interactively place a Focus Lock Point at normalized (0..1) coordinates on the source video
+  const applyFocusLockAtNormalizedPoint = (
+    rawNormX: number,
+    rawNormY: number,
+    runFullTrajectorySolve = true,
+    customTargetLabel?: string
   ) => {
-    if (!sourceOverlayWrapRef.current || !activeClip) return;
-    const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
-    const normX = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
-    const normY = Math.max(0.06, Math.min(0.94, (e.clientY - rect.top) / rect.height));
+    if (!activeClip) return;
+    const normX = Math.max(0.05, Math.min(0.95, rawNormX));
+    const normY = Math.max(0.06, Math.min(0.94, rawNormY));
 
     const liveVideoTime =
       videoRef.current && Number.isFinite(videoRef.current.currentTime)
@@ -818,6 +819,9 @@ export const App: React.FC = () => {
     const clickTime = Number(liveVideoTime.toFixed(2));
 
     const captured = captureClickedObjectSignature(videoRef.current, normX, normY);
+    if (customTargetLabel) {
+      captured.detectedLabel = customTargetLabel;
+    }
     resetLiveObjectTrackerState(captured.templateSignature);
 
     const strategy: SubjectFocusStrategy =
@@ -951,6 +955,18 @@ export const App: React.FC = () => {
           setObjectTrackProgress(0);
         });
     }
+  };
+
+  // Click or Drag directly on the Source Video to pick ANY object and track it across the clip!
+  const handlePointerOnSourceVideo = (
+    e: React.MouseEvent<HTMLDivElement>,
+    runFullTrajectorySolve = false
+  ) => {
+    if (!sourceOverlayWrapRef.current || !activeClip) return;
+    const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
+    const normX = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
+    const normY = Math.max(0.06, Math.min(0.94, (e.clientY - rect.top) / rect.height));
+    applyFocusLockAtNormalizedPoint(normX, normY, runFullTrajectorySolve);
   };
 
   // Remove a single user Focus Lock Point by timestamp and smoothly re-blend remaining lock points
@@ -1697,60 +1713,58 @@ export const App: React.FC = () => {
     setTimeout(() => setSchemeSavedNotice(null), 2500);
   };
 
-  // Send Cut Iteration Feedback in Chat
+  // Capture current video frame at playhead as compact JPEG data URL for Gemini 4 Argon Multimodal Vision
+  const captureCurrentVideoFrameDataUrl = (): string | undefined => {
+    const vid = videoRef.current;
+    if (!vid || !vid.videoWidth || !vid.videoHeight) return undefined;
+    try {
+      const targetW = 640;
+      const targetH = Math.max(180, Math.round((vid.videoHeight / vid.videoWidth) * targetW));
+      const c = document.createElement('canvas');
+      c.width = targetW;
+      c.height = targetH;
+      const ctx = c.getContext('2d');
+      if (!ctx) return undefined;
+      ctx.drawImage(vid, 0, 0, targetW, targetH);
+      return c.toDataURL('image/jpeg', 0.72);
+    } catch {
+      return undefined;
+    }
+  };
+
+  // Send Studio Agent / Cut Iteration Feedback in Right Pane Chat
   const handleSendChat = async (promptText: string) => {
     if (!promptText.trim()) return;
-    if (!activeClip || !activeSource) {
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          id: `u-${Date.now()}`,
-          role: 'user',
-          content: promptText,
-          timestamp: new Date().toISOString(),
-        },
-        {
-          id: `a-${Date.now() + 1}`,
-          role: 'assistant',
-          content: 'Please upload a video first so I have a video or clip on the timeline to edit.',
-          timestamp: new Date().toISOString(),
-        },
-      ]);
-      return;
-    }
-
-    const lowerPrompt = promptText.toLowerCase();
-    if (lowerPrompt.includes('find best viral')) {
-      handleGenerateClipsFromFullVideo('clip-segment');
-      return;
-    }
-    if (lowerPrompt.includes('create compilation')) {
-      handleGenerateClipsFromFullVideo('condensed-edit');
-      return;
-    }
 
     const userMsg: CopilotChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
       content: promptText,
       timestamp: new Date().toISOString(),
-      clipId: activeClip.id,
-      clipName: activeClip.name,
+      clipId: activeClip?.id,
+      clipName: activeClip?.name,
       playheadTime: clipPlayheadTime,
     };
     setChatMessages((prev) => [...prev, userMsg]);
     setIsCopilotBusy(true);
 
     const snapshotId = `snap-${Date.now()}`;
-    const preEditSnapshot: CopilotRevisionSnapshot = {
-      id: snapshotId,
-      timestamp: new Date().toISOString(),
-      clipSnapshot: JSON.parse(JSON.stringify(activeClip)),
-      summaryBadges: [],
-    };
+    const preEditSnapshot: CopilotRevisionSnapshot | null = activeClip
+      ? {
+          id: snapshotId,
+          timestamp: new Date().toISOString(),
+          clipSnapshot: JSON.parse(JSON.stringify(activeClip)),
+          summaryBadges: [],
+        }
+      : null;
 
     try {
       const provider = aiSettings.activeProvider;
+      const currentFrameDataUrl = captureCurrentVideoFrameDataUrl();
+      const focusLocksCount = (activeClip?.subjectFocus?.trackedPath || []).filter(
+        (p) => p.isUserAnchor
+      ).length;
+
       const resp = await fetch('/api/ai-copilot', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1759,26 +1773,62 @@ export const App: React.FC = () => {
           model: aiSettings.models[provider],
           apiKeyOverride: aiSettings.apiKeys[provider],
           userPrompt: promptText,
-          activeClip: {
-            id: activeClip.id,
-            name: activeClip.name,
-            sourceStart: activeClip.sourceStart,
-            sourceEnd: activeClip.sourceEnd,
-            duration: activeClip.duration,
-            trackingMode: activeClip.trackingMode,
-            trackingOffsetX: activeClip.trackingOffsetX,
-            trackingSmoothing: activeClip.trackingSmoothing,
-            zoomScale: activeClip.zoomScale,
-            captionText: activeClip.captionText,
-            cuts: activeClip.subCuts.map((c) => ({
-              id: c.id,
-              timeOffset: c.timelineStart,
-              label: c.label,
-              zoom: c.zoom,
-              cropCenterX: c.cropBiasX,
-            })),
+          hasVideoLoaded: Boolean(activeSource && activeClip),
+          sourceVideoName: activeSource?.name,
+          sourceDuration: activeSource?.duration,
+          currentFrameDataUrl,
+          timelineMode,
+          inMarker,
+          outMarker,
+          focusLocksCount,
+          generatedClipsList: generatedClips.map((c, idx) => ({
+            index: idx + 1,
+            id: c.id,
+            name: c.name,
+            duration: c.duration,
+            sourceStart: c.sourceStart,
+            sourceEnd: c.sourceEnd,
+          })),
+          activeScheme: {
+            id: activeScheme.id,
+            name: activeScheme.name,
+            clipCreationMode: activeScheme.clipCreationMode,
+            targetClipDuration: activeScheme.targetClipDuration,
+            minClipDuration: activeScheme.minClipDuration,
+            maxClipDuration: activeScheme.maxClipDuration,
+            maxClipsCount: activeScheme.maxClipsCount,
+            targetAvgShotLength: activeScheme.targetAvgShotLength,
+            pacingProfile: activeScheme.pacingProfile,
+            trackingMode: activeScheme.trackingMode,
+            captionStyle: activeScheme.captionStyle,
+            safeZoneGuide: activeScheme.safeZoneGuide,
+            punchInZoom: activeScheme.punchInZoom,
+            trackingSmoothing: activeScheme.trackingSmoothing,
           },
+          activeClip: activeClip
+            ? {
+                id: activeClip.id,
+                name: activeClip.name,
+                sourceStart: activeClip.sourceStart,
+                sourceEnd: activeClip.sourceEnd,
+                duration: activeClip.duration,
+                trackingMode: activeClip.trackingMode,
+                trackingOffsetX: activeClip.trackingOffsetX,
+                trackingSmoothing: activeClip.trackingSmoothing,
+                zoomScale: activeClip.zoomScale,
+                captionText: activeClip.captionText,
+                subjectFocusLabel: activeClip.subjectFocus?.label,
+                cuts: activeClip.subCuts.map((c) => ({
+                  id: c.id,
+                  timeOffset: c.timelineStart,
+                  label: c.label,
+                  zoom: c.zoom,
+                  cropCenterX: c.cropBiasX,
+                })),
+              }
+            : null,
           currentPlayhead: clipPlayheadTime,
+          sourcePlayhead: playheadTime,
           schemeName: activeScheme.name,
         }),
       });
@@ -1787,43 +1837,169 @@ export const App: React.FC = () => {
       const operations = Array.isArray(data.operations) ? data.operations : [];
       const badges: string[] = [];
 
-      const genClipsOp = operations.find((op: any) => op.type === 'generate_edited_clips');
-      if (genClipsOp) {
-        const nextCount =
-          typeof genClipsOp.clipsCount === 'number'
-            ? Math.max(1, Math.min(12, genClipsOp.clipsCount))
-            : activeScheme.maxClipsCount;
-        const nextDur =
-          typeof genClipsOp.targetDuration === 'number'
-            ? Math.max(5, Math.min(180, genClipsOp.targetDuration))
-            : activeScheme.targetClipDuration;
-        const nextMode: ClipCreationMode = genClipsOp.clipMode || 'condensed-edit';
-
-        const updatedScheme: EditingScheme = {
-          ...activeScheme,
-          maxClipsCount: nextCount,
-          targetClipDuration: nextDur,
-          clipCreationMode: nextMode,
-        };
-        setActiveScheme(updatedScheme);
-
-        const currentFocus = activeClip?.subjectFocus;
-        const freshClips = generateClipsFromScheme(activeSource, updatedScheme).map((c) =>
-          currentFocus ? { ...c, subjectFocus: currentFocus } : c
-        );
-        setGeneratedClips(freshClips);
-        if (freshClips[0]) {
-          selectClip(freshClips[0]);
+      // 1. Handle Scheme Updates
+      let schemeAfterOps = { ...activeScheme };
+      let schemeChanged = false;
+      for (const op of operations) {
+        if (op.type === 'update_scheme' || op.type === 'generate_edited_clips') {
+          if (typeof op.clipsCount === 'number') {
+            schemeAfterOps.maxClipsCount = Math.max(1, Math.min(12, op.clipsCount));
+            schemeChanged = true;
+          }
+          if (typeof op.targetDuration === 'number') {
+            schemeAfterOps.targetClipDuration = Math.max(5, Math.min(180, op.targetDuration));
+            schemeChanged = true;
+          }
+          if (op.clipMode === 'condensed-edit' || op.clipMode === 'clip-segment') {
+            schemeAfterOps.clipCreationMode = op.clipMode;
+            schemeChanged = true;
+          }
+          if (typeof op.avgShotLength === 'number') {
+            schemeAfterOps.targetAvgShotLength = Math.max(0.8, Math.min(15, op.avgShotLength));
+            schemeChanged = true;
+          }
+          if (op.pacingProfile) {
+            schemeAfterOps.pacingProfile = op.pacingProfile;
+            schemeChanged = true;
+          }
+          if (op.trackingMode) {
+            schemeAfterOps.trackingMode = op.trackingMode;
+            schemeChanged = true;
+          }
+          if (op.captionStyle) {
+            schemeAfterOps.captionStyle = op.captionStyle;
+            schemeChanged = true;
+          }
+          if (op.safeZoneGuide) {
+            schemeAfterOps.safeZoneGuide = op.safeZoneGuide;
+            schemeChanged = true;
+          }
+          if (typeof op.zoom === 'number') {
+            schemeAfterOps.punchInZoom = Math.max(1.0, Math.min(1.5, op.zoom));
+            schemeChanged = true;
+          }
+          if (typeof op.smoothing === 'number') {
+            schemeAfterOps.trackingSmoothing = Math.max(0.15, Math.min(0.96, op.smoothing));
+            schemeChanged = true;
+          }
+          if (op.type === 'update_scheme') {
+            badges.push(op.summary || 'Updated Scheme');
+          }
         }
+      }
+      if (schemeChanged) {
+        setActiveScheme(schemeAfterOps);
+      }
+
+      // 2. Handle Multimodal Clip Generation
+      const genClipsOp = operations.find((op: any) => op.type === 'generate_edited_clips');
+      if (genClipsOp && activeSource) {
+        const nextMode: ClipCreationMode =
+          genClipsOp.clipMode || schemeAfterOps.clipCreationMode || 'condensed-edit';
         badges.push(
           genClipsOp.summary ||
-            `Created ${freshClips.length} ${nextMode === 'condensed-edit' ? 'Compilations' : 'Viral Clips'} (${nextDur}s)`
+            `Generated ${schemeAfterOps.maxClipsCount} ${
+              nextMode === 'condensed-edit' ? 'Compilations' : 'Viral Clips'
+            } (${schemeAfterOps.targetClipDuration}s)`
         );
-      } else {
+        handleGenerateClipsFromFullVideo(nextMode, schemeAfterOps);
+      }
+
+      // 3. Handle Vision Focus Lock Point Placement (set_focus_point)
+      for (const op of operations) {
+        if (
+          op.type === 'set_focus_point' &&
+          typeof op.focusX === 'number' &&
+          typeof op.focusY === 'number' &&
+          activeClip
+        ) {
+          applyFocusLockAtNormalizedPoint(op.focusX, op.focusY, true, op.targetLabel);
+          badges.push(
+            op.summary ||
+              `🎯 Locked: ${op.targetLabel || 'Object'} (${Math.round(op.focusX * 100)}%, ${Math.round(op.focusY * 100)}%)`
+          );
+        } else if (op.type === 'clear_focus_points' && activeClip) {
+          handleSelectSubjectFocusStrategy('auto-salient');
+          badges.push(op.summary || 'Cleared Focus Locks');
+        } else if (op.type === 'set_in_out_markers' && activeSource) {
+          if (typeof op.inPoint === 'number') {
+            setInMarker(Math.max(0, Math.min(activeSource.duration - 0.5, op.inPoint)));
+          }
+          if (typeof op.outPoint === 'number') {
+            setOutMarker(Math.max(0.5, Math.min(activeSource.duration, op.outPoint)));
+          }
+          if (op.extractClip) {
+            setTimeout(() => {
+              handleCreateClipFromMarkers(true, op.clipMode === 'condensed-edit');
+            }, 60);
+          }
+          badges.push(op.summary || 'Updated In/Out Markers');
+        } else if (op.type === 'select_clip' && activeSource) {
+          if (op.targetView === 'full-source') {
+            selectFullVideoOnTimeline();
+            badges.push(op.summary || 'Switched to Full Video');
+          } else if (typeof op.clipIndex === 'number') {
+            const target = generatedClips[op.clipIndex - 1];
+            if (target) {
+              selectClip(target);
+              badges.push(op.summary || `Selected Clip #${op.clipIndex}`);
+            }
+          }
+        } else if (op.type === 'seek_playhead' && typeof op.targetTime === 'number' && activeClip) {
+          const clamped = Math.max(0, Math.min(activeClip.duration, op.targetTime));
+          const { sourceTime, cutIndex } = clipTimeToSourceTime(activeClip, clamped);
+          activeCutIdxRef.current = Math.max(0, cutIndex);
+          setSelectedCutIndex(Math.max(0, cutIndex));
+          setClipPlayheadTime(clamped);
+          setPlayheadTime(sourceTime);
+          if (videoRef.current) {
+            videoRef.current.currentTime = sourceTime;
+          }
+          badges.push(op.summary || `Seek → ${clamped.toFixed(1)}s`);
+        } else if (op.type === 'playback_control' && activeClip && videoRef.current) {
+          if (op.playbackAction === 'pause') {
+            videoRef.current.pause();
+            setIsPlaying(false);
+          } else if (op.playbackAction === 'play') {
+            if (!isPlaying) handleTogglePlay(false);
+          } else if (op.playbackAction === 'loop_in_out') {
+            handleTogglePlay(true);
+          }
+          badges.push(op.summary || `Playback: ${op.playbackAction}`);
+        } else if (op.type === 'delete_current_cut' && activeClip) {
+          handleDeleteSelectedCut();
+          badges.push(op.summary || 'Deleted Sub-Cut');
+        } else if (op.type === 'export_mp4' && activeClip) {
+          badges.push(op.summary || 'Exporting 9:16 MP4');
+          setTimeout(() => {
+            handleExport();
+          }, 100);
+        } else if (op.type === 'save_project' && activeSource) {
+          handleSaveCurrentProject(op.projectName);
+          badges.push(op.summary || 'Saved Project');
+        }
+      }
+
+      // 4. Handle Active Clip Timeline Mutations
+      const clipOps = operations.filter((op: any) =>
+        [
+          'trim_start',
+          'trim_end',
+          'adjust_tracking_offset',
+          'center_subject',
+          'adjust_smoothing',
+          'set_zoom',
+          'repace_cuts',
+          'update_caption',
+          'save_scheme_preset',
+        ].includes(op.type)
+      );
+
+      if (clipOps.length > 0 && activeClip && activeSource) {
         updateActiveTimelineClip((clip) => {
           let next = { ...clip, subCuts: [...clip.subCuts] };
 
-          for (const op of operations) {
+          for (const op of clipOps) {
             badges.push(op.summary || op.type);
 
             if (op.type === 'trim_start' && typeof op.deltaSeconds === 'number') {
@@ -1865,14 +2041,29 @@ export const App: React.FC = () => {
                 Math.min(0.35, next.trackingOffsetX + op.offsetX)
               );
             } else if (op.type === 'center_subject') {
+              const targetStrategy: SubjectFocusStrategy = op.strategy || 'auto-salient';
               next.trackingOffsetX = 0;
               next.manualKeyframes = [];
               next.subjectFocus = {
-                strategy: 'auto-salient',
-                anchorX: 0.5,
+                strategy: targetStrategy,
+                anchorX:
+                  targetStrategy === 'left-subject'
+                    ? 0.3
+                    : targetStrategy === 'right-subject'
+                      ? 0.7
+                      : 0.5,
                 anchorY: 0.48,
                 anchorTime: playheadTime,
-                label: 'Auto Salient Subject',
+                label:
+                  targetStrategy === 'face-speaker'
+                    ? 'Auto Face / Speaker'
+                    : targetStrategy === 'left-subject'
+                      ? 'Left Subject Focus'
+                      : targetStrategy === 'right-subject'
+                        ? 'Right Subject Focus'
+                        : targetStrategy === 'action-motion'
+                          ? 'Action / Motion Focus'
+                          : 'Auto Salient Subject',
               };
             } else if (op.type === 'adjust_smoothing' && typeof op.smoothing === 'number') {
               next.trackingSmoothing = Math.max(0.15, Math.min(0.96, op.smoothing));
@@ -1887,7 +2078,7 @@ export const App: React.FC = () => {
             } else if (op.type === 'repace_cuts' && typeof op.pacingMultiplier === 'number') {
               const newAsl = Math.max(
                 0.8,
-                Math.min(15.0, activeScheme.targetAvgShotLength * op.pacingMultiplier)
+                Math.min(15.0, schemeAfterOps.targetAvgShotLength * op.pacingMultiplier)
               );
               const rebuilt: SubCut[] = [];
               for (const c of next.subCuts) {
@@ -1907,12 +2098,12 @@ export const App: React.FC = () => {
               const recalc = recalculateClipTimeline(rebuilt);
               next.subCuts = recalc.subCuts;
               next.duration = recalc.duration;
-            } else if (op.type === 'update_caption' && op.captionText) {
+            } else if (op.type === 'update_caption' && op.captionText !== undefined) {
               next.captionText = op.captionText;
             } else if (op.type === 'save_scheme_preset') {
-              const presetName = op.schemePresetName || `Custom ${activeScheme.name}`;
+              const presetName = op.schemePresetName || `Custom ${schemeAfterOps.name}`;
               const saved: EditingScheme = {
-                ...activeScheme,
+                ...schemeAfterOps,
                 id: `scheme-${Date.now()}`,
                 name: presetName,
                 isBuiltIn: false,
@@ -1928,28 +2119,31 @@ export const App: React.FC = () => {
           }
           return next;
         });
-
-        if (operations.some((o: any) => o.type === 'split_at_playhead')) {
-          handleSplitAtPlayhead();
-        }
       }
 
-      preEditSnapshot.summaryBadges = badges;
-      setRevisions((prev) => [preEditSnapshot, ...prev]);
+      if (operations.some((o: any) => o.type === 'split_at_playhead') && activeClip) {
+        handleSplitAtPlayhead();
+        badges.push(`Razor Cut @ ${clipPlayheadTime.toFixed(1)}s`);
+      }
+
+      if (preEditSnapshot && badges.length > 0) {
+        preEditSnapshot.summaryBadges = badges;
+        setRevisions((prev) => [preEditSnapshot, ...prev]);
+      }
 
       setChatMessages((prev) => [
         ...prev,
         {
           id: `ast-${Date.now()}`,
           role: 'assistant',
-          content: data.reply || 'Updated clip cuts and 9:16 framing.',
+          content: data.reply || 'Applied requested Studio actions.',
           timestamp: new Date().toISOString(),
           playheadTime: clipPlayheadTime,
           providerBadge: data.liveApiUsed
-            ? `${data.providerUsed} [Live]`
+            ? `${data.modelUsed || data.providerUsed} [Live]`
             : `${data.providerUsed} Engine`,
           operationBadges: badges,
-          revisionSnapshotId: snapshotId,
+          revisionSnapshotId: preEditSnapshot && badges.length > 0 ? snapshotId : undefined,
         },
       ]);
     } catch (err: any) {
@@ -4739,23 +4933,25 @@ export const App: React.FC = () => {
           )}
         </section>
 
-        {/* RIGHT COLUMN: Cut Iteration Chat ("Cut Copilot") */}
+        {/* RIGHT COLUMN: Studio AI Agent ("Cut Copilot") */}
         <aside className="studio-panel">
           <div className="studio-panel-header">
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Bot size={15} color="#60a5fa" />
-              3. Cut Feedback Chat
+              3. Studio AI Agent
             </span>
             <span
               style={{
-                fontSize: 10.5,
-                color: '#93c5fd',
-                background: 'rgba(45, 140, 235, 0.14)',
+                fontSize: 10,
+                color: '#34d399',
+                background: 'rgba(16, 185, 129, 0.14)',
+                border: '1px solid rgba(16, 185, 129, 0.35)',
                 padding: '2px 7px',
                 borderRadius: 4,
+                fontWeight: 700,
               }}
             >
-              {aiSettings.activeProvider.toUpperCase()}
+              ● {(aiSettings.models[aiSettings.activeProvider] || aiSettings.activeProvider).toUpperCase()}
             </span>
           </div>
 
@@ -4788,6 +4984,19 @@ export const App: React.FC = () => {
                   lineHeight: 1.45,
                 }}
               >
+                {msg.role === 'assistant' && msg.providerBadge && (
+                  <div
+                    style={{
+                      fontSize: 9.5,
+                      color: '#60a5fa',
+                      fontWeight: 700,
+                      marginBottom: 4,
+                      letterSpacing: '0.2px',
+                    }}
+                  >
+                    {msg.providerBadge}
+                  </div>
+                )}
                 <div style={{ color: '#fff' }}>{msg.content}</div>
 
                 {msg.operationBadges && msg.operationBadges.length > 0 && (
@@ -4835,6 +5044,23 @@ export const App: React.FC = () => {
                 )}
               </div>
             ))}
+
+            {isCopilotBusy && (
+              <div
+                style={{
+                  alignSelf: 'flex-start',
+                  padding: '8px 11px',
+                  borderRadius: 8,
+                  background: 'rgba(45, 140, 235, 0.12)',
+                  border: '1px solid rgba(96, 165, 250, 0.35)',
+                  fontSize: 11.5,
+                  color: '#93c5fd',
+                  fontWeight: 600,
+                }}
+              >
+                ✨ {aiSettings.models[aiSettings.activeProvider] || 'Gemini 4 Argon'} is analyzing video frame & applying studio actions...
+              </div>
+            )}
           </div>
 
           {/* Quick Feedback Pills */}
