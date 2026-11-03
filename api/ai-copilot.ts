@@ -13,6 +13,14 @@ export interface CopilotRequestPayload {
   sourceVideoName?: string;
   sourceDuration?: number;
   currentFrameDataUrl?: string; // Live JPEG frame captured from the video player at the current playhead
+  attachments?: Array<{
+    name: string;
+    mimeType: string;
+    kind: 'image' | 'video' | 'text';
+    dataUrl?: string;
+    videoFramesDataUrls?: string[];
+    textContent?: string;
+  }>;
   timelineMode?: 'full-source' | 'elected-clip';
   inMarker?: number | null;
   outMarker?: number | null;
@@ -128,6 +136,10 @@ You are directly wired into every control in ClipMaker Studio:
    - When an image of the current video frame is attached, you can SEE the exact frame at the current playhead!
    - If the user asks to lock onto, track, or focus on any specific object or person visible in the frame (e.g., "lock onto the car", "track the guy in the red hoodie", "focus on the sneaker", "add a focus lock on the car"), visually locate that target in the attached 16:9 frame and emit a "set_focus_point" operation with its normalized center coordinates: "focusX" (0.0 = left edge, 0.5 = center, 1.0 = right edge) and "focusY" (0.0 = top edge, 0.5 = middle, 1.0 = bottom edge), plus "targetLabel".
    - If the user asks what is happening in the frame or asks for a caption based on the visual scene, describe or caption what you see accurately.
+   - If the user pastes or attaches reference image(s), reference video frames, or text/script files in the chat:
+     * When they paste a reference photo of a person/car/object and say "lock onto this" or "track this in the video", locate that matching subject in the live 16:9 video frame and emit "set_focus_point" with its normalized (focusX, focusY) coordinates.
+     * When they paste a screenshot or reference video showing a 9:16 layout, caption style, or cut pacing and ask to match/copy that reference style, emit "update_scheme" (setting captionStyle, pacingProfile, avgShotLength, punchInZoom, safeZoneGuide) and/or "set_zoom".
+     * When they attach a script, transcript, or notes file, use its text to set captions ("update_caption"), timecodes ("set_in_out_markers"), or answer their question.
 3. Timeline & Transport Controls:
    - "generate_edited_clips": Generate viral clips ("clip-segment") or compilation cutdowns ("condensed-edit") from the uploaded video using multimodal AI analysis.
    - "set_in_out_markers": Set In (inPoint in seconds) and Out (outPoint in seconds) markers on the timeline, and set "extractClip": true if the user wants to cut/create a clip from that range.
@@ -251,6 +263,12 @@ export async function handleCopilotRequest(
       outMarkerSeconds: body.outMarker ?? null,
       focusLocksCount: body.focusLocksCount ?? 0,
       hasAttachedVideoFrame: Boolean(body.currentFrameDataUrl),
+      userAttachments: (body.attachments || []).map((a) => ({
+        name: a.name,
+        kind: a.kind,
+        mimeType: a.mimeType,
+        textContent: a.textContent ? a.textContent.slice(0, 12000) : undefined,
+      })),
       activeEditingScheme: body.activeScheme || { name: body.schemeName },
       activeClip: body.activeClip || null,
       generatedClipsList: body.generatedClipsList || [],
@@ -265,11 +283,47 @@ export async function handleCopilotRequest(
           const [header, b64] = body.currentFrameDataUrl.split('base64,');
           const mimeMatch = header.match(/data:([^;]+)/);
           userParts.push({
+            text: '[LIVE 16:9 VIDEO FRAME AT CURRENT PLAYHEAD]:',
+          });
+          userParts.push({
             inlineData: {
               mimeType: mimeMatch ? mimeMatch[1] : 'image/jpeg',
               data: b64,
             },
           });
+        }
+
+        // Attach any user-pasted images, reference video keyframes, or text files
+        for (const att of body.attachments || []) {
+          if (att.kind === 'image' && att.dataUrl && att.dataUrl.includes('base64,')) {
+            const [header, b64] = att.dataUrl.split('base64,');
+            const mimeMatch = header.match(/data:([^;]+)/);
+            userParts.push({
+              text: `[USER ATTACHED REFERENCE IMAGE: "${att.name}"]`,
+            });
+            userParts.push({
+              inlineData: {
+                mimeType: mimeMatch ? mimeMatch[1] : 'image/jpeg',
+                data: b64,
+              },
+            });
+          } else if (att.kind === 'video' && Array.isArray(att.videoFramesDataUrls)) {
+            userParts.push({
+              text: `[USER ATTACHED REFERENCE VIDEO KEYFRAMES: "${att.name}"]`,
+            });
+            for (const frameUrl of att.videoFramesDataUrls.slice(0, 4)) {
+              if (frameUrl && frameUrl.includes('base64,')) {
+                const [header, b64] = frameUrl.split('base64,');
+                const mimeMatch = header.match(/data:([^;]+)/);
+                userParts.push({
+                  inlineData: {
+                    mimeType: mimeMatch ? mimeMatch[1] : 'image/jpeg',
+                    data: b64,
+                  },
+                });
+              }
+            }
+          }
         }
 
         const resp = await fetch(

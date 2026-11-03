@@ -4,12 +4,15 @@ import {
   CornerDownLeft,
   Crosshair,
   Download,
+  FileText,
   Film,
   Flame,
   FolderOpen,
+  Image as ImageIcon,
   Layers,
   Lock,
   LogOut,
+  Paperclip,
   Pause,
   Play,
   Plus,
@@ -25,12 +28,14 @@ import {
   Volume2,
   VolumeX,
   Wand2,
+  X,
   Zap,
 } from 'lucide-react';
 import {
   AIProviderId,
   AIProviderSettings,
   ClipCreationMode,
+  CopilotAttachment,
   CopilotChatMessage,
   CopilotRevisionSnapshot,
   EditingScheme,
@@ -282,6 +287,8 @@ export const App: React.FC = () => {
 
   // 7. Cut Copilot Chat State
   const [chatInput, setChatInput] = useState<string>('');
+  const [pendingChatAttachments, setPendingChatAttachments] = useState<CopilotAttachment[]>([]);
+  const [isDraggingChatFile, setIsDraggingChatFile] = useState<boolean>(false);
   const [isCopilotBusy, setIsCopilotBusy] = useState<boolean>(false);
   const [revisions, setRevisions] = useState<CopilotRevisionSnapshot[]>([]);
   const [chatMessages, setChatMessages] = useState<CopilotChatMessage[]>([
@@ -289,7 +296,7 @@ export const App: React.FC = () => {
       id: 'welcome',
       role: 'assistant',
       content:
-        'Gemini 4 Argon Studio Agent is live and connected! Ask me to lock onto any object in the video frame (e.g. "lock onto the car"), generate viral clips or compilation cutdowns, adjust your Editing Scheme, trim/split cuts, or export your 9:16 MP4.',
+        'Gemini 4 Argon Studio Agent is live! You can paste screenshots/images (Ctrl+V), drag & drop reference files, or click 📎 to attach images, reference videos, or scripts. Ask me to lock onto any object, match a reference style, generate clips, or edit your timeline.',
       timestamp: new Date().toISOString(),
       providerBadge: 'gemini-4-argon [Live]',
     },
@@ -297,6 +304,7 @@ export const App: React.FC = () => {
 
   const sourceFileInputRef = useRef<HTMLInputElement | null>(null);
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
+  const chatAttachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   // Helper to build a fresh unedited Full Video clip object
   const createInitialFullVideoClip = useCallback(
@@ -1732,18 +1740,162 @@ export const App: React.FC = () => {
     }
   };
 
+  // Convert pasted or selected files (images, reference videos, text/SRT scripts) into CopilotAttachments
+  const handleAddFilesToChat = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+
+    const newAttachments: CopilotAttachment[] = [];
+
+    for (const file of files.slice(0, 6)) {
+      const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const mime = file.type || 'application/octet-stream';
+
+      if (mime.startsWith('image/')) {
+        try {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const img = new Image();
+            const objUrl = URL.createObjectURL(file);
+            img.onload = () => {
+              const maxW = 840;
+              const scale = img.width > maxW ? maxW / img.width : 1;
+              const w = Math.max(64, Math.round(img.width * scale));
+              const h = Math.max(64, Math.round(img.height * scale));
+              const c = document.createElement('canvas');
+              c.width = w;
+              c.height = h;
+              const ctx = c.getContext('2d');
+              if (ctx) ctx.drawImage(img, 0, 0, w, h);
+              URL.revokeObjectURL(objUrl);
+              resolve(c.toDataURL('image/jpeg', 0.82));
+            };
+            img.onerror = () => {
+              URL.revokeObjectURL(objUrl);
+              reject(new Error('Failed to load image'));
+            };
+            img.src = objUrl;
+          });
+          newAttachments.push({
+            id,
+            name: file.name || 'Pasted Image.jpg',
+            mimeType: 'image/jpeg',
+            kind: 'image',
+            dataUrl,
+            sizeBytes: file.size,
+          });
+        } catch {}
+      } else if (mime.startsWith('video/')) {
+        try {
+          const frames = await new Promise<string[]>((resolve) => {
+            const vid = document.createElement('video');
+            const objUrl = URL.createObjectURL(file);
+            vid.muted = true;
+            vid.playsInline = true;
+            vid.src = objUrl;
+            const sampled: string[] = [];
+            vid.onloadedmetadata = async () => {
+              const dur = Math.max(1, vid.duration || 4);
+              const times = [dur * 0.12, dur * 0.36, dur * 0.62, dur * 0.85];
+              for (const t of times) {
+                await new Promise<void>((resSeek) => {
+                  vid.onseeked = () => {
+                    const w = 480;
+                    const h = Math.max(160, Math.round(((vid.videoHeight || 270) / (vid.videoWidth || 480)) * w));
+                    const c = document.createElement('canvas');
+                    c.width = w;
+                    c.height = h;
+                    const ctx = c.getContext('2d');
+                    if (ctx) {
+                      ctx.drawImage(vid, 0, 0, w, h);
+                      sampled.push(c.toDataURL('image/jpeg', 0.75));
+                    }
+                    resSeek();
+                  };
+                  vid.currentTime = t;
+                });
+              }
+              URL.revokeObjectURL(objUrl);
+              resolve(sampled);
+            };
+            vid.onerror = () => {
+              URL.revokeObjectURL(objUrl);
+              resolve([]);
+            };
+          });
+          newAttachments.push({
+            id,
+            name: file.name,
+            mimeType: mime,
+            kind: 'video',
+            dataUrl: frames[0],
+            videoFramesDataUrls: frames,
+            sizeBytes: file.size,
+          });
+        } catch {}
+      } else {
+        try {
+          const textContent = await file.text();
+          newAttachments.push({
+            id,
+            name: file.name,
+            mimeType: mime || 'text/plain',
+            kind: 'text',
+            textContent: textContent.slice(0, 15000),
+            sizeBytes: file.size,
+          });
+        } catch {}
+      }
+    }
+
+    if (newAttachments.length > 0) {
+      setPendingChatAttachments((prev) => [...prev, ...newAttachments].slice(0, 6));
+    }
+  };
+
+  // Handle Ctrl+V / Cmd+V clipboard paste of screenshots, images, or files in the Agent Chat
+  const handleChatPaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      handleAddFilesToChat(files);
+    }
+  };
+
   // Send Studio Agent / Cut Iteration Feedback in Right Pane Chat
-  const handleSendChat = async (promptText: string) => {
-    if (!promptText.trim()) return;
+  const handleSendChat = async (
+    promptText: string,
+    attachmentsOverride?: CopilotAttachment[]
+  ) => {
+    const attachmentsToSend = attachmentsOverride ?? pendingChatAttachments;
+    const trimmedPrompt = promptText.trim();
+    if (!trimmedPrompt && attachmentsToSend.length === 0) return;
+
+    const effectivePrompt =
+      trimmedPrompt ||
+      `Analyze the attached reference (${attachmentsToSend.map((a) => a.name).join(', ')}) and apply it to my 9:16 edit.`;
+
+    if (!attachmentsOverride && pendingChatAttachments.length > 0) {
+      setPendingChatAttachments([]);
+    }
 
     const userMsg: CopilotChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
-      content: promptText,
+      content: effectivePrompt,
       timestamp: new Date().toISOString(),
       clipId: activeClip?.id,
       clipName: activeClip?.name,
       playheadTime: clipPlayheadTime,
+      attachments: attachmentsToSend.length > 0 ? attachmentsToSend : undefined,
     };
     setChatMessages((prev) => [...prev, userMsg]);
     setIsCopilotBusy(true);
@@ -1772,11 +1924,19 @@ export const App: React.FC = () => {
           provider,
           model: aiSettings.models[provider],
           apiKeyOverride: aiSettings.apiKeys[provider],
-          userPrompt: promptText,
+          userPrompt: effectivePrompt,
           hasVideoLoaded: Boolean(activeSource && activeClip),
           sourceVideoName: activeSource?.name,
           sourceDuration: activeSource?.duration,
           currentFrameDataUrl,
+          attachments: attachmentsToSend.map((a) => ({
+            name: a.name,
+            mimeType: a.mimeType,
+            kind: a.kind,
+            dataUrl: a.dataUrl,
+            videoFramesDataUrls: a.videoFramesDataUrls,
+            textContent: a.textContent,
+          })),
           timelineMode,
           inMarker,
           outMarker,
@@ -4934,7 +5094,39 @@ export const App: React.FC = () => {
         </section>
 
         {/* RIGHT COLUMN: Studio AI Agent ("Cut Copilot") */}
-        <aside className="studio-panel">
+        <aside
+          className="studio-panel"
+          onPaste={handleChatPaste}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!isDraggingChatFile) setIsDraggingChatFile(true);
+          }}
+          onDragLeave={() => setIsDraggingChatFile(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setIsDraggingChatFile(false);
+            if (e.dataTransfer?.files?.length) {
+              handleAddFilesToChat(e.dataTransfer.files);
+            }
+          }}
+          style={{
+            outline: isDraggingChatFile ? '2px dashed #60a5fa' : undefined,
+            outlineOffset: -4,
+          }}
+        >
+          <input
+            ref={chatAttachmentInputRef}
+            type="file"
+            multiple
+            accept="image/*,video/*,.txt,.srt,.md,.json,.csv"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              if (e.target.files) {
+                handleAddFilesToChat(e.target.files);
+                e.target.value = '';
+              }
+            }}
+          />
           <div className="studio-panel-header">
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Bot size={15} color="#60a5fa" />
@@ -4997,6 +5189,69 @@ export const App: React.FC = () => {
                     {msg.providerBadge}
                   </div>
                 )}
+
+                {/* Attached Images / Reference Videos / Files in Message */}
+                {msg.attachments && msg.attachments.length > 0 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 6,
+                      marginBottom: 6,
+                    }}
+                  >
+                    {msg.attachments.map((att) => (
+                      <div
+                        key={att.id}
+                        style={{
+                          borderRadius: 6,
+                          overflow: 'hidden',
+                          border: '1px solid rgba(255,255,255,0.22)',
+                          background: 'rgba(0,0,0,0.35)',
+                          maxWidth: 180,
+                        }}
+                      >
+                        {att.dataUrl ? (
+                          <img
+                            src={att.dataUrl}
+                            alt={att.name}
+                            style={{
+                              display: 'block',
+                              width: '100%',
+                              maxHeight: 110,
+                              objectFit: 'cover',
+                            }}
+                          />
+                        ) : null}
+                        <div
+                          style={{
+                            padding: '3px 6px',
+                            fontSize: 10,
+                            color: '#e2e8f0',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}
+                        >
+                          {att.kind === 'image' ? (
+                            <ImageIcon size={10} />
+                          ) : att.kind === 'video' ? (
+                            <Film size={10} />
+                          ) : (
+                            <FileText size={10} />
+                          )}
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {att.name}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div style={{ color: '#fff' }}>{msg.content}</div>
 
                 {msg.operationBadges && msg.operationBadges.length > 0 && (
@@ -5094,11 +5349,92 @@ export const App: React.FC = () => {
             ))}
           </div>
 
-          {/* Chat Input */}
+          {/* Pending Attachments Bar (Pasted Images / Reference Videos / Files) */}
+          {pendingChatAttachments.length > 0 && (
+            <div
+              style={{
+                padding: '8px 10px',
+                borderTop: '1px solid var(--border-subtle)',
+                background: 'rgba(15, 23, 42, 0.85)',
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 6,
+                alignItems: 'center',
+              }}
+            >
+              {pendingChatAttachments.map((att) => (
+                <div
+                  key={att.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '3px 7px 3px 4px',
+                    borderRadius: 6,
+                    background: '#1e293b',
+                    border: '1px solid #475569',
+                    fontSize: 10.5,
+                    color: '#e2e8f0',
+                    maxWidth: 175,
+                  }}
+                >
+                  {att.dataUrl ? (
+                    <img
+                      src={att.dataUrl}
+                      alt={att.name}
+                      style={{
+                        width: 26,
+                        height: 26,
+                        borderRadius: 4,
+                        objectFit: 'cover',
+                        flexShrink: 0,
+                      }}
+                    />
+                  ) : att.kind === 'video' ? (
+                    <Film size={14} color="#60a5fa" />
+                  ) : (
+                    <FileText size={14} color="#60a5fa" />
+                  )}
+                  <span
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      flex: 1,
+                    }}
+                    title={att.name}
+                  >
+                    {att.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPendingChatAttachments((prev) => prev.filter((p) => p.id !== att.id))
+                    }
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#94a3b8',
+                      cursor: 'pointer',
+                      padding: 2,
+                      display: 'flex',
+                      alignItems: 'center',
+                    }}
+                    title="Remove attachment"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Chat Input (Supports Ctrl+V Paste of Images/Files & File Attachment Button) */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              if (!chatInput.trim() || isCopilotBusy) return;
+              if ((!chatInput.trim() && pendingChatAttachments.length === 0) || isCopilotBusy)
+                return;
               handleSendChat(chatInput);
               setChatInput('');
             }}
@@ -5108,19 +5444,39 @@ export const App: React.FC = () => {
               display: 'flex',
               gap: 6,
               background: 'var(--bg-panel-header)',
+              alignItems: 'center',
             }}
           >
+            <button
+              type="button"
+              className="btn"
+              onClick={() => chatAttachmentInputRef.current?.click()}
+              disabled={isCopilotBusy}
+              title="Attach reference image, video, or script file (or paste with Ctrl+V)"
+              style={{
+                padding: '7px 8px',
+                flexShrink: 0,
+                border:
+                  pendingChatAttachments.length > 0
+                    ? '1px solid #60a5fa'
+                    : '1px solid var(--border-subtle)',
+                color: pendingChatAttachments.length > 0 ? '#60a5fa' : 'var(--text-secondary)',
+              }}
+            >
+              <Paperclip size={14} />
+            </button>
             <input
               type="text"
               className="input-field"
-              placeholder="e.g. 'Create compilation cutdowns' or 'Center subject'..."
+              placeholder="Paste image (Ctrl+V), attach file, or ask Agent..."
               value={chatInput}
+              onPaste={handleChatPaste}
               onChange={(e) => setChatInput(e.target.value)}
             />
             <button
               type="submit"
               className="btn btn-primary"
-              disabled={!chatInput.trim() || isCopilotBusy}
+              disabled={(!chatInput.trim() && pendingChatAttachments.length === 0) || isCopilotBusy}
             >
               <CornerDownLeft size={14} />
             </button>

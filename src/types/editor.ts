@@ -233,6 +233,17 @@ export interface CopilotRevisionSnapshot {
   summaryBadges: string[];
 }
 
+export interface CopilotAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: 'image' | 'video' | 'text';
+  dataUrl?: string; // Compact JPEG/PNG data URL for images or primary video thumbnail
+  videoFramesDataUrls?: string[]; // Up to 4 sampled frames when a reference video is attached
+  textContent?: string; // Extracted text for .txt, .srt, .md, .json, .csv files
+  sizeBytes?: number;
+}
+
 export interface CopilotChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -245,4 +256,5 @@ export interface CopilotChatMessage {
   liveApiUsed?: boolean;
   operationBadges?: string[];
   revisionSnapshotId?: string;
+  attachments?: CopilotAttachment[];
 }
