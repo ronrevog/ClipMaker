@@ -1,10 +1,41 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { KeyRound, Scissors, ShieldCheck, Sparkles } from 'lucide-react';
+import React, { useState } from 'react';
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut as firebaseSignOut,
+} from 'firebase/auth';
+import { Scissors, ShieldCheck, Sparkles } from 'lucide-react';
 import {
   ComplexAuthUser,
-  verifyGoogleAccessTokenWithServer,
+  isComplexDomainEmail,
+  verifyFirebaseIdTokenWithServer,
   verifyGoogleIdTokenWithServer,
 } from '../services/projectStorage';
+
+const firebaseConfig = {
+  apiKey:
+    (import.meta as any).env?.VITE_FIREBASE_API_KEY ||
+    'AIzaSyBYDLdyGhvgvFZtWJB2UxHTzaoD5UItids',
+  authDomain:
+    (import.meta as any).env?.VITE_FIREBASE_AUTH_DOMAIN ||
+    'slop-board-pro.firebaseapp.com',
+  projectId:
+    (import.meta as any).env?.VITE_FIREBASE_PROJECT_ID || 'slop-board-pro',
+  storageBucket:
+    (import.meta as any).env?.VITE_FIREBASE_STORAGE_BUCKET ||
+    'slop-board-pro.firebasestorage.app',
+  messagingSenderId:
+    (import.meta as any).env?.VITE_FIREBASE_MESSAGING_SENDER_ID ||
+    '1070451506699',
+  appId:
+    (import.meta as any).env?.VITE_FIREBASE_APP_ID ||
+    '1:1070451506699:web:cc894cd3d6b9ba5fdf910e',
+};
+
+const firebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
+const firebaseAuth = getAuth(firebaseApp);
 
 interface ComplexAuthGateProps {
   serverAIStatus?: {
@@ -16,151 +47,65 @@ interface ComplexAuthGateProps {
   onAuthenticated: (user: ComplexAuthUser) => void;
 }
 
-const LOCAL_GCLIENT_KEY = 'clipmaker_google_oauth_client_id_v1';
-
 export const ComplexAuthGate: React.FC<ComplexAuthGateProps> = ({
   serverAIStatus,
   onAuthenticated,
 }) => {
-  const envClientId =
-    ((import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || '').trim() ||
-    (serverAIStatus?.googleClientId || '').trim();
-
-  const [customClientId, setCustomClientId] = useState<string>(
-    () => localStorage.getItem(LOCAL_GCLIENT_KEY) || ''
-  );
-  const [showClientIdSetup, setShowClientIdSetup] = useState<boolean>(false);
-  const [gsiReady, setGsiReady] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const googleButtonContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const activeClientId = envClientId || customClientId.trim();
-
-  // Load Google Identity Services script (https://accounts.google.com/gsi/client)
-  useEffect(() => {
-    const existing = document.querySelector(
-      'script[src="https://accounts.google.com/gsi/client"]'
-    ) as HTMLScriptElement | null;
-
-    if ((window as any).google?.accounts) {
-      setGsiReady(true);
-      return;
-    }
-
-    if (existing) {
-      const onLoad = () => setGsiReady(true);
-      existing.addEventListener('load', onLoad);
-      return () => existing.removeEventListener('load', onLoad);
-    }
-
-    const script = document.createElement('script');
-    script.src = 'https://accounts.google.com/gsi/client';
-    script.async = true;
-    script.defer = true;
-    script.onload = () => setGsiReady(true);
-    script.onerror = () =>
-      setError('Could not load Google Sign-In SDK. Check your network connection.');
-    document.head.appendChild(script);
-  }, []);
-
-  // Initialize Google Identity Services button with hosted_domain: 'complex.com'
-  useEffect(() => {
-    if (!gsiReady || !activeClientId || !googleButtonContainerRef.current) return;
-    const g = (window as any).google;
-    if (!g?.accounts?.id) return;
-
-    try {
-      g.accounts.id.initialize({
-        client_id: activeClientId,
-        hosted_domain: 'complex.com',
-        ux_mode: 'popup',
-        callback: async (response: { credential?: string }) => {
-          if (!response?.credential) return;
-          setError(null);
-          setIsLoading(true);
-          try {
-            const res = await verifyGoogleIdTokenWithServer(
-              response.credential,
-              activeClientId
-            );
-            if (!res.ok || !res.user) {
-              setError(
-                res.error ||
-                  'Access Denied: You must sign in with a @complex.com Google Workspace account.'
-              );
-            } else {
-              onAuthenticated(res.user);
-            }
-          } finally {
-            setIsLoading(false);
-          }
-        },
-      });
-
-      googleButtonContainerRef.current.innerHTML = '';
-      g.accounts.id.renderButton(googleButtonContainerRef.current, {
-        theme: 'filled_blue',
-        size: 'large',
-        type: 'standard',
-        shape: 'rectangular',
-        text: 'signin_with',
-        width: 360,
-      });
-    } catch (e: any) {
-      console.warn('Google button render warning:', e);
-    }
-  }, [gsiReady, activeClientId, onAuthenticated]);
-
-  // Trigger Google OAuth2 Popup with hd: 'complex.com'
-  const handleGooglePopupSignIn = () => {
+  const handleGooglePopupSignIn = async () => {
     setError(null);
-    if (!activeClientId) {
-      setShowClientIdSetup(true);
-      setError(
-        'Google OAuth Client ID is required. Set GOOGLE_CLIENT_ID in Vercel Environment Variables (or .env) or paste it below.'
-      );
-      return;
-    }
-
-    const g = (window as any).google;
-    if (!g?.accounts?.oauth2) {
-      setError('Google OAuth SDK is still loading. Please try again in a moment.');
-      return;
-    }
-
+    setIsLoading(true);
     try {
-      const tokenClient = g.accounts.oauth2.initTokenClient({
-        client_id: activeClientId,
-        scope: 'openid email profile',
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({
         hd: 'complex.com',
         prompt: 'select_account',
-        callback: async (tokenResponse: { access_token?: string; error?: string }) => {
-          if (tokenResponse?.error || !tokenResponse?.access_token) {
-            if (tokenResponse?.error && tokenResponse.error !== 'popup_closed_by_user') {
-              setError(`Google Sign-In error: ${tokenResponse.error}`);
-            }
-            return;
-          }
-          setIsLoading(true);
-          try {
-            const res = await verifyGoogleAccessTokenWithServer(tokenResponse.access_token);
-            if (!res.ok || !res.user) {
-              setError(
-                res.error ||
-                  'Access Denied: Only @complex.com Google Workspace accounts are permitted.'
-              );
-            } else {
-              onAuthenticated(res.user);
-            }
-          } finally {
-            setIsLoading(false);
-          }
-        },
       });
-      tokenClient.requestAccessToken();
+
+      const result = await signInWithPopup(firebaseAuth, provider);
+      const email = (result.user?.email || '').trim().toLowerCase();
+
+      if (!email || !isComplexDomainEmail(email)) {
+        await firebaseSignOut(firebaseAuth);
+        setError(
+          `Access Denied (${email || 'unknown account'}): Only @complex.com Google Workspace accounts are allowed.`
+        );
+        return;
+      }
+
+      const firebaseIdToken = await result.user.getIdToken();
+      const verifyRes = await verifyFirebaseIdTokenWithServer(firebaseIdToken);
+
+      if (verifyRes.ok && verifyRes.user) {
+        onAuthenticated(verifyRes.user);
+        return;
+      }
+
+      // Fallback to raw Google OAuth ID token if present on credential
+      const oauthCred = GoogleAuthProvider.credentialFromResult(result);
+      if (oauthCred?.idToken) {
+        const googleRes = await verifyGoogleIdTokenWithServer(oauthCred.idToken);
+        if (googleRes.ok && googleRes.user) {
+          onAuthenticated(googleRes.user);
+          return;
+        }
+      }
+
+      await firebaseSignOut(firebaseAuth);
+      setError(
+        verifyRes.error ||
+          'Access Denied: Could not verify your @complex.com Google Workspace account.'
+      );
     } catch (e: any) {
-      setError(e?.message || 'Failed to launch Google Sign-In popup.');
+      if (e?.code === 'auth/popup-closed-by-user' || e?.code === 'auth/cancelled-popup-request') {
+        // User closed the popup intentionally
+        return;
+      }
+      setError(e?.message || 'Google Sign-In failed. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -181,7 +126,7 @@ export const ComplexAuthGate: React.FC<ComplexAuthGateProps> = ({
       <div
         style={{
           width: '100%',
-          maxWidth: 440,
+          maxWidth: 430,
           background: 'rgba(17, 20, 28, 0.96)',
           border: '1px solid rgba(96, 165, 250, 0.35)',
           borderRadius: 12,
@@ -256,18 +201,6 @@ export const ComplexAuthGate: React.FC<ComplexAuthGateProps> = ({
             </span>
           </div>
 
-          {/* Official Google Identity Services Button Container (when Client ID is present) */}
-          {activeClientId && (
-            <div
-              ref={googleButtonContainerRef}
-              style={{
-                display: 'flex',
-                justifyContent: 'center',
-                minHeight: 44,
-              }}
-            />
-          )}
-
           {/* Direct Google OAuth Popup Button (enforces hd=complex.com) */}
           <button
             type="button"
@@ -275,7 +208,7 @@ export const ComplexAuthGate: React.FC<ComplexAuthGateProps> = ({
             disabled={isLoading}
             style={{
               width: '100%',
-              padding: '11px 16px',
+              padding: '12px 16px',
               borderRadius: 7,
               border: '1px solid #475569',
               background: '#ffffff',
@@ -302,11 +235,11 @@ export const ComplexAuthGate: React.FC<ComplexAuthGateProps> = ({
                 d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
               />
               <path
-                fill="#FBBC05"
+                fill="#34A853"
                 d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
               />
               <path
-                fill="#34A853"
+                fill="#FBBC05"
                 d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
               />
             </svg>
@@ -331,62 +264,6 @@ export const ComplexAuthGate: React.FC<ComplexAuthGateProps> = ({
               }}
             >
               {error}
-            </div>
-          )}
-
-          {/* Setup box if GOOGLE_CLIENT_ID is not yet configured in Vercel / .env */}
-          {(!envClientId || showClientIdSetup) && (
-            <div
-              style={{
-                padding: 12,
-                borderRadius: 8,
-                background: 'rgba(15, 23, 42, 0.75)',
-                border: '1px solid #334155',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-              }}
-            >
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  fontSize: 11.5,
-                  fontWeight: 600,
-                  color: '#93c5fd',
-                }}
-              >
-                <KeyRound size={13} />
-                <span>Google OAuth Client ID Setup (`GOOGLE_CLIENT_ID`)</span>
-              </div>
-              <div style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.4 }}>
-                Add <code>GOOGLE_CLIENT_ID</code> in Vercel Environment Variables (or{' '}
-                <code>.env</code>), or paste your Google OAuth 2.0 Web Client ID below:
-              </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <input
-                  type="text"
-                  placeholder="xxxx-xxxx.apps.googleusercontent.com"
-                  value={customClientId}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setCustomClientId(val);
-                    localStorage.setItem(LOCAL_GCLIENT_KEY, val.trim());
-                    if (error) setError(null);
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: '7px 10px',
-                    borderRadius: 5,
-                    border: '1px solid #475569',
-                    background: '#090b10',
-                    color: '#fff',
-                    fontSize: 11.5,
-                    fontFamily: 'var(--font-mono, monospace)',
-                  }}
-                />
-              </div>
             </div>
           )}
 

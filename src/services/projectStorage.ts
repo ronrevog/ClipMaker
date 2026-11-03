@@ -106,6 +106,37 @@ export async function verifyGoogleIdTokenWithServer(
   }
 }
 
+export async function verifyFirebaseIdTokenWithServer(
+  firebaseIdToken: string
+): Promise<{ ok: boolean; user?: ComplexAuthUser; error?: string }> {
+  try {
+    const resp = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'firebase-id-token',
+        firebaseIdToken,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok || !data.user) {
+      return {
+        ok: false,
+        error:
+          data.error ||
+          'Google authentication failed. You must sign in with a @complex.com Google Workspace account.',
+      };
+    }
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data.user));
+    return { ok: true, user: data.user };
+  } catch (e: any) {
+    return {
+      ok: false,
+      error: e?.message || 'Could not reach authentication server.',
+    };
+  }
+}
+
 export async function verifyGoogleAccessTokenWithServer(
   accessToken: string
 ): Promise<{ ok: boolean; user?: ComplexAuthUser; error?: string }> {

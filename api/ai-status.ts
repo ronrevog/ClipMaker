@@ -51,7 +51,8 @@ export function getGoogleOAuthClientId(): string {
   return (
     cleanEnvKey(process.env.GOOGLE_CLIENT_ID) ||
     cleanEnvKey(process.env.VITE_GOOGLE_CLIENT_ID) ||
-    cleanEnvKey(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID)
+    cleanEnvKey(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID) ||
+    '1070451506699-56j7rbaehmeidl3olg5o3vftepmnak41.apps.googleusercontent.com'
   );
 }
 

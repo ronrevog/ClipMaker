@@ -94,9 +94,10 @@ export function verifyComplexSessionToken(token?: string): ComplexAuthUser | nul
 }
 
 export async function handleAuthRequest(body: {
-  action?: 'google-id-token' | 'google-access-token' | 'verify';
+  action?: 'google-id-token' | 'google-access-token' | 'firebase-id-token' | 'verify';
   credential?: string;
   accessToken?: string;
+  firebaseIdToken?: string;
   clientId?: string;
   token?: string;
 }): Promise<{ ok: boolean; user?: ComplexAuthUser; error?: string }> {
@@ -109,6 +110,60 @@ export async function handleAuthRequest(body: {
       };
     }
     return { ok: true, user: verified };
+  }
+
+  // 0. Verify Firebase Google Auth ID Token via Google Identity Toolkit
+  if (body.firebaseIdToken) {
+    const firebaseApiKey =
+      process.env.VITE_FIREBASE_API_KEY ||
+      process.env.FIREBASE_API_KEY ||
+      'AIzaSyBYDLdyGhvgvFZtWJB2UxHTzaoD5UItids';
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseApiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken: body.firebaseIdToken }),
+      }
+    );
+    if (!resp.ok) {
+      return {
+        ok: false,
+        error: 'Google authentication token verification failed. Please sign in with Google again.',
+      };
+    }
+    const data: any = await resp.json();
+    const account = data?.users?.[0];
+    if (!account) {
+      return {
+        ok: false,
+        error: 'Could not verify Google account identity.',
+      };
+    }
+
+    const email = (account.email || '').trim().toLowerCase();
+    const emailVerified = account.emailVerified === true;
+
+    if (!emailVerified || !email) {
+      return {
+        ok: false,
+        error: 'Your Google account email is not verified.',
+      };
+    }
+
+    if (!isValidComplexEmail(email)) {
+      return {
+        ok: false,
+        error: `Access Denied (${email}): Only @complex.com Google Workspace accounts are allowed.`,
+      };
+    }
+
+    const user = createComplexSessionToken(
+      email,
+      account.displayName || email.split('@')[0],
+      account.photoUrl
+    );
+    return { ok: true, user };
   }
 
   // 1. Verify Google ID Token (JWT from Google Sign-In button / One Tap)
