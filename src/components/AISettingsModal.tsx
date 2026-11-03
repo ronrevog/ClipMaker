@@ -168,7 +168,13 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                 id: 'gemini' as AIProviderId,
                 name: 'Google Gemini',
                 envVar: 'GEMINI_API_KEY',
-                models: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
+                models: [
+                  'gemini-4-argon',
+                  'gemini-3.8-flash',
+                  'gemini-3.1-pro-preview',
+                  'gemini-2.5-pro',
+                  'gemini-2.5-flash',
+                ],
               },
               {
                 id: 'claude' as AIProviderId,

@@ -143,7 +143,7 @@ const sharedViteKeys = {
 export const DEFAULT_AI_SETTINGS: AIProviderSettings = {
   activeProvider: 'gemini',
   models: {
-    gemini: 'gemini-2.5-flash',
+    gemini: 'gemini-4-argon',
     claude: 'claude-3-7-sonnet-latest',
     openai: 'gpt-4o',
   },
@@ -160,9 +160,18 @@ export function loadAISettings(): AIProviderSettings {
     const raw = localStorage.getItem(AI_SETTINGS_STORAGE_KEY);
     if (!raw) return DEFAULT_AI_SETTINGS;
     const parsed = JSON.parse(raw);
+    const savedGeminiModel = parsed?.models?.gemini;
     return {
       ...DEFAULT_AI_SETTINGS,
       ...parsed,
+      models: {
+        ...DEFAULT_AI_SETTINGS.models,
+        ...(parsed?.models || {}),
+        gemini:
+          !savedGeminiModel || savedGeminiModel === 'gemini-2.5-flash'
+            ? 'gemini-4-argon'
+            : savedGeminiModel,
+      },
       apiKeys: {
         gemini: parsed?.apiKeys?.gemini || sharedViteKeys.gemini,
         claude: parsed?.apiKeys?.claude || sharedViteKeys.claude,

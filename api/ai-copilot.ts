@@ -122,7 +122,7 @@ export async function handleCopilotRequest(body: CopilotRequestPayload): Promise
   const apiKey = resolveProviderApiKey(provider, body.apiKeyOverride) || envKey?.trim();
   const defaultModel =
     provider === 'gemini'
-      ? 'gemini-2.5-flash'
+      ? 'gemini-4-argon'
       : provider === 'claude'
         ? 'claude-3-7-sonnet-latest'
         : 'gpt-4o';
