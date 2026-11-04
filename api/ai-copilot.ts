@@ -1,8 +1,13 @@
 // Vercel Serverless Function: /api/ai-copilot
 // Multimodal Studio Agent powered by Google Gemini 4 Argon (Default), Anthropic Claude, or OpenAI.
-// Sees the current video frame at the playhead and controls every part of ClipMaker Studio:
-// clip generation, focus lock points (vision object localization), scheme settings, timeline cuts,
-// In/Out markers, captions, playback/seeking, project saving, and MP4 export.
+// Has 100% full access to every control in ClipMaker Studio:
+// - Caption placement (Top / Middle / Bottom / exact Y & X), Fonts (Graffiti, Marker, Bangers, Impact, Bebas, Serif, Mono, Inter),
+//   Font size scale, Custom word & karaoke highlight colors, Background box opacity/color, Uppercase toggle, Show/Hide
+// - Top/Custom Hook Title Banner Overlays
+// - Video Color Grading & Filters (Brightness, Contrast, Saturation, B&W Grayscale, Sepia, Hue)
+// - 9:16 Layouts (2-Speaker Top/Bottom Split-Screen, 2-Speaker Auto-Switch, Blurred 9:16 Background Fill, Black Letterbox)
+// - Full Transcript Search & Quote Clipping, 3-Stage Viral Clips & Common-Thread Compilations
+// - Vision Focus Lock Points, Zoom (0.56x Fit-16:9 .. 1.0x Full Height .. 1.5x Punch-In), Silence Stripping, Beat Cuts, Speed, Export
 
 export interface CopilotRequestPayload {
   provider: 'gemini' | 'claude' | 'openai';
@@ -13,11 +18,12 @@ export interface CopilotRequestPayload {
   hasVideoLoaded?: boolean;
   sourceVideoName?: string;
   sourceDuration?: number;
-  currentFrameDataUrl?: string; // Live JPEG frame captured from the video player at the current playhead
-  audioBase64?: string; // Real extracted 8kHz mono WAV audio slice from the active clip/timeline
+  currentFrameDataUrl?: string;
+  audioBase64?: string;
   audioMimeType?: string;
   audioStartOffset?: number;
   audioDuration?: number;
+  transcriptExcerpt?: Array<{ start: number; end: number; text: string }>;
   attachments?: Array<{
     name: string;
     mimeType: string;
@@ -37,6 +43,7 @@ export interface CopilotRequestPayload {
     duration: number;
     sourceStart: number;
     sourceEnd: number;
+    commonThread?: string;
   }>;
   activeScheme?: {
     id: string;
@@ -64,9 +71,21 @@ export interface CopilotRequestPayload {
     trackingOffsetX: number;
     trackingSmoothing: number;
     zoomScale: number;
+    backgroundFillStyle?: string;
     captionText: string;
+    captionStyle?: string;
+    captionFontFamily?: string;
+    captionPositionY?: number;
+    captionPositionX?: number;
+    captionFontScale?: number;
+    captionTextColor?: string;
+    captionHighlightColor?: string;
+    captionBgOpacity?: number;
+    hideCaptions?: boolean;
+    overlayBannerText?: string;
+    videoFilter?: Record<string, number>;
     subjectFocusLabel?: string;
-    cuts: Array<{ id: string; timeOffset: number; label: string; zoom: number; cropCenterX: number }>;
+    cuts: Array<{ id: string; timeOffset: number; sourceStart?: number; sourceEnd?: number; label: string; zoom: number; cropCenterX: number }>;
   } | null;
   currentPlayhead: number;
   sourcePlayhead?: number;
@@ -75,6 +94,10 @@ export interface CopilotRequestPayload {
 
 export interface CopilotOperation {
   type:
+    | 'customize_captions'
+    | 'set_title_banner'
+    | 'set_video_filter'
+    | 'search_transcript_and_clip'
     | 'generate_edited_clips'
     | 'update_scheme'
     | 'set_focus_point'
@@ -101,13 +124,41 @@ export interface CopilotOperation {
     | 'set_layout_mode'
     | 'generate_word_captions'
     | 'set_playback_speed';
+  // Caption Customization Fields (100% live canvas control)
+  captionPosition?: 'top' | 'middle' | 'bottom';
+  captionPositionY?: number; // 0.08 (top) .. 0.50 (middle) .. 0.77 (bottom)
+  captionPositionX?: number; // 0.18 (left) .. 0.50 (center) .. 0.82 (right)
+  captionFontFamily?: 'graffiti' | 'marker' | 'bangers' | 'impact' | 'bebas' | 'serif' | 'mono' | 'inter';
+  captionStyle?: 'hormozi-bold' | 'premiere-minimal' | 'neon-karaoke' | 'cinema-serif' | 'street-graffiti';
+  captionFontScale?: number; // 0.5 .. 2.2
+  captionTextColor?: string;
+  captionHighlightColor?: string;
+  captionBgColor?: string;
+  captionBgOpacity?: number; // 0.0 (no box) .. 1.0
+  captionUppercase?: boolean;
+  hideCaptions?: boolean;
+  // Title / Hook Banner Overlay Fields
+  bannerText?: string;
+  bannerPositionY?: number;
+  bannerBgColor?: string;
+  bannerTextColor?: string;
+  // Video Color Grading / Filter Fields
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  grayscale?: number;
+  sepia?: number;
+  hueRotate?: number;
+  // Transcript Search & Quote Clipping
+  searchQuery?: string;
+  editorialFocusPrompt?: string;
+  // Existing Studio Fields
   clipsCount?: number;
   targetDuration?: number;
   clipMode?: 'condensed-edit' | 'clip-segment';
   avgShotLength?: number;
   pacingProfile?: 'hyper-viral' | 'balanced' | 'conversational' | 'cinematic';
   trackingMode?: 'face-speaker' | 'action-motion' | 'center-lock' | 'multi-speaker';
-  captionStyle?: 'hormozi-bold' | 'premiere-minimal' | 'neon-karaoke' | 'cinema-serif';
   safeZoneGuide?: 'tiktok' | 'reels' | 'shorts' | 'none';
   focusX?: number;
   focusY?: number;
@@ -144,90 +195,129 @@ export interface CopilotResponsePayload {
   transcribedSegments?: Array<{ start: number; end: number; text: string }>;
 }
 
-const SYSTEM_PROMPT = `You are "ClipMaker Studio Agent", an expert multimodal 9:16 social video editor and studio controller powered by Gemini 4 Argon.
-You are directly wired into every control in ClipMaker Studio:
-1. Left Pane (Editing Scheme): targetClipDuration, maxClipsCount, clipCreationMode ("clip-segment" for continuous viral segments or "condensed-edit" for multi-cut highlight compilations), targetAvgShotLength, pacingProfile ("hyper-viral" | "balanced" | "conversational" | "cinematic"), trackingMode ("face-speaker" | "action-motion" | "center-lock" | "multi-speaker"), captionStyle ("hormozi-bold" | "premiere-minimal" | "neon-karaoke" | "cinema-serif"), safeZoneGuide ("tiktok" | "reels" | "shorts" | "none"), punchInZoom (1.0..1.5), trackingSmoothing (0.15..0.96).
-2. Center Monitors (16:9 Source + 9:16 Vertical Preview):
-   - When an image of the current video frame is attached, you can SEE the exact frame at the current playhead!
-   - If the user asks to lock onto, track, or focus on any specific object or person visible in the frame (e.g., "lock onto the car", "track the guy in the red hoodie", "focus on the sneaker", "add a focus lock on the car"), visually locate that target in the attached 16:9 frame and emit a "set_focus_point" operation with its normalized center coordinates: "focusX" (0.0 = left edge, 0.5 = center, 1.0 = right edge) and "focusY" (0.0 = top edge, 0.5 = middle, 1.0 = bottom edge), plus "targetLabel".
-   - If the user asks what is happening in the frame or asks for a caption based on the visual scene, describe or caption what you see accurately.
-   - If the user pastes or attaches reference image(s), reference video frames, or text/script files in the chat:
-     * When they paste a reference photo of a person/car/object and say "lock onto this" or "track this in the video", locate that matching subject in the live 16:9 video frame and emit "set_focus_point" with its normalized (focusX, focusY) coordinates.
-     * When they paste a screenshot or reference video showing a 9:16 layout, caption style, or cut pacing and ask to match/copy that reference style, emit "update_scheme" (setting captionStyle, pacingProfile, avgShotLength, punchInZoom, safeZoneGuide) and/or "set_zoom".
-     * When they attach a script, transcript, or notes file, use its text to set captions ("update_caption"), timecodes ("set_in_out_markers"), or answer their question.
-3. Timeline & Transport Controls:
-   - "generate_edited_clips": Generate viral clips ("clip-segment") or compilation cutdowns ("condensed-edit") from the uploaded video using multimodal AI analysis.
-   - "set_in_out_markers": Set In (inPoint in seconds) and Out (outPoint in seconds) markers on the timeline, and set "extractClip": true if the user wants to cut/create a clip from that range.
-   - "trim_start" / "trim_end": Trim or extend the active clip's start or end by deltaSeconds.
-   - "split_at_playhead": Razor-cut the active clip at currentPlayhead (or targetTime).
-   - "delete_current_cut": Delete the currently selected sub-cut segment.
-   - "repace_cuts": Speed up (pacingMultiplier < 1, e.g. 0.7) or slow down (pacingMultiplier > 1, e.g. 1.35) sub-cuts.
-   - "set_zoom": Set 9:16 zoom scale across the timeline (zoom from 0.56 to 1.50):
-     * zoom: 1.0 = 100% Full Height / No Zoom (1.00x) — removes all punch-in zoom across every sub-cut on the timeline so the 9:16 crop uses 100% of the vertical height. Whenever the user asks to "remove all the zoom", "make sure all zooms are out", "100% the whole way", "no zoom", or asks why a 1.20x zoom is still on the crop box, ALWAYS emit BOTH {"type": "set_zoom", "zoom": 1.0, "summary": "Removed All Zoom (1.00x Across Timeline)"} AND {"type": "update_scheme", "zoom": 1.0, "summary": "Scheme Punch-In Zoom: 1.00x"}!
-     * zoom: 0.56 = Fit Full 16:9 Width (Letterbox Mode) — zooms out wider than 1.0x so the entire horizontal 16:9 video width fits inside the 9:16 vertical frame with top/bottom letterbox bars. Emit zoom: 0.56 if the user asks to "fit the whole 16:9 frame", "fit full width", "letterbox the whole shot", or wants to zoom out wider than 1.00x so nothing on the left/right is cropped.
-     * zoom: 1.05..1.50 = Punch-In Zoom — zooms in closer on the subject.
-   - Note on the 16:9 Left Monitor Overlay: The blue/green rectangle on the 16:9 monitor ("Speaker / Face • 1.00x") is the live 9:16 crop window indicator showing which slice of the 16:9 video is rendered into the 9:16 vertical preview on the right.
-   - "adjust_tracking_offset": Pan 9:16 crop window horizontally (-0.35 left to +0.35 right).
-   - "adjust_smoothing": Set camera damping/smoothing (0.15 snappy to 0.96 ultra-smooth).
-   - "center_subject": Switch focus strategy ("auto-salient" | "face-speaker" | "left-subject" | "right-subject" | "action-motion" | "static-lock").
-   - "clear_focus_points": Clear all manual focus lock points and reset to auto tracking.
-   - "update_caption": Set or rewrite the on-screen 9:16 social caption text.
-   - "strip_silence": Auto-Editor style jump-cutter! Removes silent pauses and dead air across the active clip's timeline using audio RMS waveform analysis (optional silenceThreshold: 0.1..0.35). Use whenever the user says "remove dead air", "cut out the pauses/silence", or "jump-cut the awkward pauses".
-   - "beat_sync_cuts": Snaps and slices timeline cuts to detected audio peaks and musical/speech transients. Use when the user asks to "cut to the beat", "sync cuts to audio peaks", or "make rhythmic beat cuts".
-   - "set_layout_mode": Sets the 9:16 visual layout / background mode (layoutMode: "blurred" | "black" | "split-screen" | "auto-switch"):
-     * "split-screen": Top/Bottom 9:16 Dual-Speaker Podcast Stack (Speaker A on top half, Speaker B on bottom half).
-     * "auto-switch": Alternates camera cuts back and forth between Left Speaker and Right Speaker across the timeline.
-     * "blurred": Renders a soft Gaussian-blurred 9:16 background behind zoomed-out / Fit-16:9 frames instead of black letterbox bars.
-     * "black": Clean black letterbox bars when zoomed out (<1.0x).
-   - "generate_word_captions": Generates word-level karaoke captions across the clip (with optional captionText or captionSegments array [{start, end, text}] and captionStyle: "hormozi-bold" | "neon-karaoke" | "premiere-minimal" | "cinema-serif"). Use when the user asks to "add word-by-word captions", "transcribe/caption this clip", or "add karaoke subtitles".
-   - "set_playback_speed": Sets video & timeline playback speed (speed: 0.5 to 2.0, e.g. 1.25 for 25% faster, 0.5 for slow-mo).
-   - "select_clip": Switch to a generated clip (clipIndex: 1, 2, 3...) or back to the full source video (targetView: "full-source").
-   - "seek_playhead": Jump the playhead to targetTime (in seconds).
-   - "playback_control": "play", "pause", or "loop_in_out".
-   - "export_mp4": Export and download the active 9:16 clip as an .mp4 file.
-   - "save_project": Save the current project to cloud storage (optional projectName).
-   - "save_scheme_preset": Save the current scheme settings as a reusable named preset (schemePresetName).
+const SYSTEM_PROMPT = `You are "ClipMaker Studio Agent", an all-powerful multimodal 9:16 AI Video Director and Studio Controller powered by Gemini 4 Argon.
+CRITICAL RULE: You have 100% FULL DIRECT ACCESS to EVERY visual, caption, font, placement, color, filter, layout, audio, transcript, and timeline setting in the app!
+NEVER tell the user that something is "anchored" or "cannot be moved/changed". Always execute their request immediately by emitting the matching operation(s) in "operations"!
 
-If the user is just asking a question, chatting, or no video is loaded yet and they ask a general question, return "operations": [] (or "update_scheme" if they want to pre-configure scheme settings) and a helpful "reply".
+HERE ARE ALL THE STUDIO TOOLS & OPERATIONS YOU CONTROL DIRECTLY:
+
+1. FULL CAPTION BAR POSITION, FONT, SIZE & COLOR CONTROL ("customize_captions"):
+   Use "customize_captions" whenever the user asks to move the caption bar, change the font (e.g. graffiti, marker, comic, impact, serif, mono, bold), resize text, change word/highlight colors, remove the background box, or hide/show captions:
+   - "captionPosition": "top" (moves caption bar to top of 9:16 screen, Y=0.14) | "middle" (center screen, Y=0.50) | "bottom" (lower third, Y=0.77)
+   - "captionPositionY": exact vertical position from 0.08 (very top) to 0.90 (very bottom). (e.g. top = 0.14, upper-middle = 0.30, center = 0.50, bottom = 0.77).
+   - "captionPositionX": horizontal center from 0.20 (left) to 0.50 (center) to 0.80 (right).
+   - "captionFontFamily":
+     * "graffiti" -> Authentic street-art graffiti spray-paint font ("Rubik Spray Paint" / "Sedgwick Ave Display")
+     * "marker" -> Bold street marker font ("Permanent Marker")
+     * "bangers" -> Comic / Pop punchy font ("Bangers")
+     * "impact" -> Heavy headline block font ("Anton" / Impact)
+     * "bebas" -> Tall viral social display font ("Bebas Neue")
+     * "serif" -> Editorial luxury serif ("Playfair Display" / Georgia)
+     * "mono" -> Tech code monospace ("JetBrains Mono")
+     * "inter" -> Clean modern bold sans-serif ("Inter")
+   - "captionStyle": "street-graffiti" | "hormozi-bold" | "neon-karaoke" | "premiere-minimal" | "cinema-serif"
+   - "captionFontScale": number from 0.5 (smaller) to 2.2 (huge), default 1.0.
+   - "captionTextColor": CSS/hex color for unspoken words (e.g. "#ffffff", "#fef08a", "#38bdf8").
+   - "captionHighlightColor": CSS/hex color for the currently spoken karaoke word (e.g. "#ff2a85" hot pink, "#34d399" neon green, "#facc15" yellow, "#ef4444" red, "#a855f7" purple).
+   - "captionBgOpacity": 0.0 (removes the dark background bar behind captions completely!) to 1.0 (solid box).
+   - "captionBgColor": CSS/hex color for the caption background bar.
+   - "captionUppercase": true (ALL CAPS) or false (normal case).
+   - "hideCaptions": true (hide all captions) or false (show captions).
+
+2. TOP / CUSTOM HOOK TITLE BANNER OVERLAY ("set_title_banner"):
+   Use "set_title_banner" when the user wants a persistent title header, topic badge, or sticker banner on screen (e.g. "add a red title banner at the top saying 'WHY THE BEEF STARTED'", or "remove title banner"):
+   - "bannerText": string (set to "" to remove)
+   - "bannerPositionY": 0.06..0.90 (default 0.10 at top)
+   - "bannerBgColor": e.g. "rgba(220, 38, 38, 0.92)" or "#111827"
+   - "bannerTextColor": e.g. "#ffffff" or "#facc15"
+
+3. VIDEO COLOR GRADING & VISUAL FILTERS ("set_video_filter"):
+   Use "set_video_filter" when the user asks to change the video look, brightness, contrast, saturation, black & white, vintage/sepia, or warmth:
+   - "brightness": 0.4..2.0 (1.0 default)
+   - "contrast": 0.4..2.2 (1.0 default)
+   - "saturation": 0.0..2.5 (1.0 default, 0.0 = desaturated)
+   - "grayscale": 0.0..1.0 (1.0 = Black & White)
+   - "sepia": 0.0..1.0
+   - "hueRotate": -180..180
+
+4. TRANSCRIPT SEARCH & QUOTE CLIPPING ("search_transcript_and_clip"):
+   You are given "transcriptExcerpt" containing timestamped spoken lines from the video!
+   - If the user says "jump to where he talks about [topic/quote]" or "make a clip of the part about [topic]", you can either emit "set_in_out_markers" with the exact [inPoint, outPoint] from the transcript and "extractClip": true, OR emit "search_transcript_and_clip" with "searchQuery": "keyword" and "extractClip": true.
+
+5. 9:16 LAYOUTS, ZOOM, SUBJECT TRACKING & TIMELINE NLE TOOLS:
+   - "set_layout_mode": layoutMode: "split-screen" (2-speaker top/bottom stack) | "auto-switch" (alternates camera between left & right speaker) | "blurred" (blurred 9:16 background fill) | "black" (black letterbox bars).
+   - "set_zoom": zoom from 0.56 (Fit full 16:9 width) to 1.0 (100% height / no zoom) to 1.50 (punch-in zoom).
+   - "set_focus_point": Vision object lock! Locate any person/object in the attached 16:9 frame and pass normalized "focusX" (0..1), "focusY" (0..1), "targetLabel".
+   - "clear_focus_points": Clear manual focus locks.
+   - "strip_silence": Remove dead-air pauses (>=0.85s) across the clip.
+   - "beat_sync_cuts": Slice/snap cuts to audio peaks.
+   - "generate_word_captions": Run full-video AI speech-to-text karaoke transcription.
+   - "generate_edited_clips": Run the 3-Stage Transcript-First AI Showrunner to find Viral Clips ("clip-segment") or Common-Thread Compilations ("condensed-edit"), with optional "editorialFocusPrompt", "clipsCount", "targetDuration".
+   - "set_in_out_markers": Set inPoint / outPoint (and extractClip: true to create a new clip).
+   - "trim_start" / "trim_end" / "split_at_playhead" / "delete_current_cut" / "repace_cuts" / "set_playback_speed".
+   - "select_clip" (clipIndex: 1, 2, 3... or targetView: "full-source") / "seek_playhead" / "playback_control" / "export_mp4" / "save_project".
 
 Respond ONLY with valid JSON matching this schema:
 {
-  "reply": "Clear, helpful response explaining what you did or answering the user's question.",
+  "reply": "Concise confirmation of the exact changes applied or answer to the user's question.",
   "operations": [
     {
-      "type": "generate_edited_clips" | "update_scheme" | "set_focus_point" | "clear_focus_points" | "set_in_out_markers" | "trim_start" | "trim_end" | "split_at_playhead" | "delete_current_cut" | "adjust_tracking_offset" | "adjust_smoothing" | "set_zoom" | "repace_cuts" | "update_caption" | "strip_silence" | "beat_sync_cuts" | "set_layout_mode" | "generate_word_captions" | "set_playback_speed" | "save_scheme_preset" | "center_subject" | "select_clip" | "seek_playhead" | "playback_control" | "export_mp4" | "save_project",
-      "clipsCount": number (optional, 1..12),
-      "targetDuration": number (optional, 5..180 seconds),
+      "type": "customize_captions" | "set_title_banner" | "set_video_filter" | "search_transcript_and_clip" | "generate_edited_clips" | "update_scheme" | "set_focus_point" | "clear_focus_points" | "set_in_out_markers" | "trim_start" | "trim_end" | "split_at_playhead" | "delete_current_cut" | "adjust_tracking_offset" | "adjust_smoothing" | "set_zoom" | "repace_cuts" | "update_caption" | "strip_silence" | "beat_sync_cuts" | "set_layout_mode" | "generate_word_captions" | "set_playback_speed" | "save_scheme_preset" | "center_subject" | "select_clip" | "seek_playhead" | "playback_control" | "export_mp4" | "save_project",
+      "captionPosition": "top" | "middle" | "bottom" (optional),
+      "captionPositionY": number (optional, 0.08..0.92),
+      "captionPositionX": number (optional, 0.18..0.82),
+      "captionFontFamily": "graffiti" | "marker" | "bangers" | "impact" | "bebas" | "serif" | "mono" | "inter" (optional),
+      "captionStyle": "street-graffiti" | "hormozi-bold" | "neon-karaoke" | "premiere-minimal" | "cinema-serif" (optional),
+      "captionFontScale": number (optional, 0.5..2.2),
+      "captionTextColor": string (optional),
+      "captionHighlightColor": string (optional),
+      "captionBgColor": string (optional),
+      "captionBgOpacity": number (optional, 0.0..1.0),
+      "captionUppercase": boolean (optional),
+      "hideCaptions": boolean (optional),
+      "bannerText": string (optional),
+      "bannerPositionY": number (optional),
+      "bannerBgColor": string (optional),
+      "bannerTextColor": string (optional),
+      "brightness": number (optional),
+      "contrast": number (optional),
+      "saturation": number (optional),
+      "grayscale": number (optional),
+      "sepia": number (optional),
+      "hueRotate": number (optional),
+      "searchQuery": string (optional),
+      "editorialFocusPrompt": string (optional),
+      "clipsCount": number (optional),
+      "targetDuration": number (optional),
       "clipMode": "condensed-edit" | "clip-segment" (optional),
-      "avgShotLength": number (optional, 0.8..15.0 seconds),
+      "avgShotLength": number (optional),
       "pacingProfile": "hyper-viral" | "balanced" | "conversational" | "cinematic" (optional),
       "trackingMode": "face-speaker" | "action-motion" | "center-lock" | "multi-speaker" (optional),
-      "captionStyle": "hormozi-bold" | "premiere-minimal" | "neon-karaoke" | "cinema-serif" (optional),
       "safeZoneGuide": "tiktok" | "reels" | "shorts" | "none" (optional),
-      "focusX": number (optional, 0.05..0.95 normalized X in 16:9 frame),
-      "focusY": number (optional, 0.05..0.95 normalized Y in 16:9 frame),
-      "targetLabel": string (optional, e.g. "Red Sports Car"),
+      "focusX": number (optional),
+      "focusY": number (optional),
+      "targetLabel": string (optional),
       "strategy": "auto-salient" | "face-speaker" | "left-subject" | "right-subject" | "action-motion" | "static-lock" (optional),
-      "inPoint": number (optional, seconds),
-      "outPoint": number (optional, seconds),
+      "inPoint": number (optional),
+      "outPoint": number (optional),
       "extractClip": boolean (optional),
       "deltaSeconds": number (optional),
-      "targetTime": number (optional, seconds),
-      "offsetX": number (optional, -0.35..0.35),
-      "smoothing": number (optional, 0.15..0.96),
-      "zoom": number (optional, 0.56..1.5),
-      "pacingMultiplier": number (optional, 0.5..2.0),
+      "targetTime": number (optional),
+      "offsetX": number (optional),
+      "smoothing": number (optional),
+      "zoom": number (optional),
+      "pacingMultiplier": number (optional),
       "captionText": string (optional),
       "captionSegments": [{"start": number, "end": number, "text": string}] (optional),
-      "silenceThreshold": number (optional, 0.08..0.4),
+      "silenceThreshold": number (optional),
       "layoutMode": "blurred" | "black" | "split-screen" | "auto-switch" (optional),
-      "speed": number (optional, 0.5..2.0),
+      "speed": number (optional),
       "schemePresetName": string (optional),
-      "clipIndex": number (optional, 1-based index of generated clip),
+      "clipIndex": number (optional),
       "targetView": "full-source" | "clip" (optional),
       "playbackAction": "play" | "pause" | "loop_in_out" (optional),
       "projectName": string (optional),
-      "summary": "Short badge label e.g. 'Focus Lock: Car (62%, 54%)' or 'Generated 4 Viral Clips (30s)'"
+      "summary": "Short badge label describing the action"
     }
   ]
 }`;
@@ -350,7 +440,6 @@ Rules:
                 ? parsed.captionSegments
                 : [];
             if (rawSegs.length > 0) {
-              // Normalize segment timestamps to global timeline offset
               const firstStart = Number(rawSegs[0]?.start) || 0;
               const needsOffset = startOffset > 1.0 && firstStart < startOffset - 1.0;
               const alignedSegs = rawSegs.map((s: any) => ({
@@ -396,6 +485,7 @@ Rules:
       outMarkerSeconds: body.outMarker ?? null,
       focusLocksCount: body.focusLocksCount ?? 0,
       hasAttachedVideoFrame: Boolean(body.currentFrameDataUrl),
+      transcriptExcerpt: (body.transcriptExcerpt || []).slice(0, 180),
       userAttachments: (body.attachments || []).map((a) => ({
         name: a.name,
         kind: a.kind,
@@ -428,7 +518,7 @@ Rules:
 
         if (body.audioBase64) {
           userParts.push({
-            text: `[EXTRACTED WAV AUDIO FROM ACTIVE TIMELINE CLIP (Start Offset: ${(body.audioStartOffset ?? 0).toFixed(1)}s, Duration: ${(body.audioDuration ?? 25).toFixed(1)}s) — If the user asks to transcribe or add captions, transcribe the exact spoken words from this audio into "captionSegments" [{start, end, text}] with 3-5 words per card!]:`,
+            text: `[EXTRACTED WAV AUDIO FROM ACTIVE TIMELINE CLIP (Start Offset: ${(body.audioStartOffset ?? 0).toFixed(1)}s, Duration: ${(body.audioDuration ?? 25).toFixed(1)}s)]:`,
           });
           userParts.push({
             inlineData: {
@@ -438,7 +528,6 @@ Rules:
           });
         }
 
-        // Attach any user-pasted images, reference video keyframes, or text files
         for (const att of body.attachments || []) {
           if (att.kind === 'image' && att.dataUrl && att.dataUrl.includes('base64,')) {
             const [header, b64] = att.dataUrl.split('base64,');
@@ -471,33 +560,49 @@ Rules:
           }
         }
 
-        const resp = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-              contents: [{ role: 'user', parts: userParts }],
-              generationConfig: {
-                temperature: 0.2,
-                responseMimeType: 'application/json',
-              },
-            }),
-          }
+        // Check if user is asking for web search / external research so we can enable Google Search grounding
+        const wantsWebSearch =
+          /\b(search|google|look\s+up|who\s+is|what\s+happened|research|fact[\s-]check|news|latest|trend)\b/i.test(
+            body.userPrompt
+          );
+
+        const candidateModels = Array.from(
+          new Set([model, 'gemini-4-argon', 'gemini-2.5-flash'])
         );
-        if (resp.ok) {
-          const data: any = await resp.json();
-          const parsed = JSON.parse(extractGeminiJsonText(data));
-          return {
-            providerUsed: 'Google Gemini',
-            modelUsed: model,
-            liveApiUsed: true,
-            reply:
-              parsed.reply ||
-              'Applied requested Studio operations to your timeline and 9:16 framing.',
-            operations: Array.isArray(parsed.operations) ? parsed.operations : [],
+
+        for (const candModel of candidateModels) {
+          const reqBody: any = {
+            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+            contents: [{ role: 'user', parts: userParts }],
+            generationConfig: {
+              temperature: 0.2,
+              ...(wantsWebSearch ? {} : { responseMimeType: 'application/json' }),
+            },
+            ...(wantsWebSearch ? { tools: [{ googleSearch: {} }] } : {}),
           };
+
+          const resp = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${candModel}:generateContent?key=${encodeURIComponent(apiKey)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(reqBody),
+            }
+          );
+
+          if (resp.ok) {
+            const data: any = await resp.json();
+            const parsed = JSON.parse(extractGeminiJsonText(data));
+            return {
+              providerUsed: 'Google Gemini',
+              modelUsed: candModel,
+              liveApiUsed: true,
+              reply:
+                parsed.reply ||
+                'Applied requested Studio operations to your timeline and 9:16 preview.',
+              operations: Array.isArray(parsed.operations) ? parsed.operations : [],
+            };
+          }
         }
       } else if (provider === 'claude') {
         const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -509,7 +614,7 @@ Rules:
           },
           body: JSON.stringify({
             model,
-            max_tokens: 1024,
+            max_tokens: 1500,
             system: SYSTEM_PROMPT,
             messages: [{ role: 'user', content: contextMessage }],
           }),
@@ -574,255 +679,60 @@ function buildDeterministicCopilotResponse(
   const ops: CopilotOperation[] = [];
   const replies: string[] = [];
 
-  const minMatch = p.match(/(\d+(?:\.\d+)?)\s*(?:m|min|mins|minute|minutes)\b/);
-  const secMatch = p.match(/(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)\b/);
-  const countMatch = p.match(/(\d+)\s*(?:clips|clip|edits|edit|videos|cutdowns)\b/);
-
-  const parsedDuration = minMatch
-    ? Math.round(parseFloat(minMatch[1]) * 60)
-    : secMatch
-      ? Math.round(parseFloat(secMatch[1]))
-      : undefined;
-  const parsedCount = countMatch ? Math.max(1, Math.min(12, parseInt(countMatch[1], 10))) : undefined;
-
-  if (
-    p.includes('viral') ||
-    p.includes('compilation') ||
-    p.includes('cutdown') ||
-    p.includes('make clip') ||
-    p.includes('make edit') ||
-    p.includes('create clip') ||
-    p.includes('create an edit') ||
-    p.includes('create edit') ||
-    p.includes('generate clip') ||
-    p.includes('edited clip') ||
-    p.includes('edit the video') ||
-    p.includes('edit this video') ||
-    p.includes('cut this video') ||
-    (body.activeClip?.id === '__full_source__' && (p.includes('edit') || p.includes('clip')))
-  ) {
-    const mode: 'condensed-edit' | 'clip-segment' =
-      p.includes('compilation') || p.includes('cutdown') || p.includes('condensed')
-        ? 'condensed-edit'
-        : p.includes('segment') || p.includes('viral')
-          ? 'clip-segment'
-          : 'condensed-edit';
-    ops.push({
-      type: 'generate_edited_clips',
-      clipsCount: parsedCount,
-      targetDuration: parsedDuration,
-      clipMode: mode,
-      summary: `Generated ${parsedCount ? `${parsedCount} ` : ''}${mode === 'condensed-edit' ? 'Compilations' : 'Viral Clips'}${parsedDuration ? ` (${parsedDuration}s)` : ''}`,
-    });
-    replies.push(
-      `Generating ${parsedCount ? `${parsedCount} ` : ''}9:16 ${
-        mode === 'condensed-edit' ? 'compilation cutdowns' : 'viral clips'
-      }${parsedDuration ? ` (${parsedDuration}s target)` : ''} with AI analysis.`
-    );
-  }
-
-  const numVal = secMatch ? parseFloat(secMatch[1]) : null;
-
-  if (p.includes('start') || p.includes('in point') || p.includes('earlier') || p.includes('beginning')) {
-    const delta = p.includes('earlier') || p.includes('extend') ? -(numVal ?? 1.5) : numVal ?? 1.5;
-    ops.push({
-      type: 'trim_start',
-      deltaSeconds: delta,
-      summary: `In Point ${delta > 0 ? '+' : ''}${delta.toFixed(1)}s`,
-    });
-    replies.push(`Shifted the clip's In-Point by ${delta > 0 ? '+' : ''}${delta.toFixed(1)}s.`);
-  }
-
-  if (p.includes('end') || p.includes('out point') || p.includes('shorter') || p.includes('trim')) {
-    if (!p.includes('start')) {
-      const delta = p.includes('extend') || p.includes('longer') ? numVal ?? 2.0 : -(numVal ?? 1.5);
-      ops.push({
-        type: 'trim_end',
-        deltaSeconds: delta,
-        summary: `Out Point ${delta > 0 ? '+' : ''}${delta.toFixed(1)}s`,
-      });
-      replies.push(`Adjusted the Out-Point by ${delta > 0 ? '+' : ''}${delta.toFixed(1)}s.`);
-    }
-  }
-
-  if (p.includes('split') || p.includes('razor') || p.includes('cut here') || p.includes('slice')) {
-    ops.push({
-      type: 'split_at_playhead',
-      targetTime: body.currentPlayhead,
-      summary: `Razor Cut @ ${body.currentPlayhead.toFixed(2)}s`,
-    });
-    replies.push(`Inserted a razor cut at playhead (${body.currentPlayhead.toFixed(2)}s).`);
-  }
-
-  if (p.includes('left') || p.includes('right') || p.includes('bias') || p.includes('pan')) {
-    const offset = p.includes('left') ? -0.14 : p.includes('right') ? 0.14 : 0;
-    ops.push({
-      type: 'adjust_tracking_offset',
-      offsetX: offset,
-      summary: `9:16 Crop Bias ${offset > 0 ? 'Right' : 'Left'}`,
-    });
-    replies.push(`Biased the 9:16 subject tracking window ${offset < 0 ? 'left (-14%)' : 'right (+14%)'}.`);
-  }
-
-  if (p.includes('center') || p.includes('recenter') || p.includes('lock') || p.includes('track')) {
-    ops.push({
-      type: 'center_subject',
-      offsetX: 0,
-      smoothing: 0.88,
-      summary: 'Re-Center Subject Lock',
-    });
-    replies.push(`Recalibrated the 9:16 tracking solver to lock onto the primary subject centroid.`);
-  }
-
-  if (p.includes('smooth') || p.includes('jitter') || p.includes('steady') || p.includes('snappy')) {
-    const smooth = p.includes('snappy') || p.includes('fast') ? 0.45 : 0.92;
-    ops.push({
-      type: 'adjust_smoothing',
-      smoothing: smooth,
-      summary: `Track Damping ${Math.round(smooth * 100)}%`,
-    });
-    replies.push(`Updated camera path spring damping to ${Math.round(smooth * 100)}%.`);
-  }
+  // Caption position & font family deterministic fallback
+  const wantsTopCaption = /\b(caption|subtitle|text|words?).*\b(top|upper|up\s+top|header)\b|\b(move|put|place).*\b(top)\b/i.test(p);
+  const wantsMiddleCaption = /\b(caption|subtitle|text|words?).*\b(middle|center)\b/i.test(p);
+  const wantsBottomCaption = /\b(caption|subtitle|text|words?).*\b(bottom|lower)\b/i.test(p);
+  const wantsGraffitiFont = /\b(graffiti|street\s*art|spray|tag\s+font)\b/i.test(p);
+  const wantsMarkerFont = /\b(marker|sharpie|handwritten)\b/i.test(p);
+  const wantsComicFont = /\b(comic|bangers|pop\s+font)\b/i.test(p);
+  const wantsImpactFont = /\b(impact|anton|heavy\s+block)\b/i.test(p);
+  const wantsSerifFont = /\b(serif|cinema\s+font|editorial\s+font)\b/i.test(p);
 
   if (
-    p.includes('zoom') ||
-    p.includes('punch') ||
-    p.includes('closer') ||
-    p.includes('wide') ||
-    p.includes('100%') ||
-    p.includes('fit width') ||
-    p.includes('full frame')
+    wantsTopCaption ||
+    wantsMiddleCaption ||
+    wantsBottomCaption ||
+    wantsGraffitiFont ||
+    wantsMarkerFont ||
+    wantsComicFont ||
+    wantsImpactFont ||
+    wantsSerifFont
   ) {
-    const isFitWidth =
-      p.includes('fit width') || p.includes('full width') || p.includes('letterbox');
-    const isZoomReset =
-      p.includes('remove') ||
-      p.includes('no zoom') ||
-      p.includes('out') ||
-      p.includes('100%') ||
-      p.includes('reset') ||
-      p.includes('wide');
-    const zoom = isFitWidth
-      ? 0.56
-      : isZoomReset
-        ? 1.0
-        : numVal && numVal >= 0.55 && numVal <= 2.5
-          ? numVal
-          : 1.24;
+    const pos = wantsTopCaption ? 'top' : wantsMiddleCaption ? 'middle' : wantsBottomCaption ? 'bottom' : undefined;
+    const posY = wantsTopCaption ? 0.14 : wantsMiddleCaption ? 0.5 : wantsBottomCaption ? 0.77 : undefined;
+    const fontFam = wantsGraffitiFont
+      ? 'graffiti'
+      : wantsMarkerFont
+        ? 'marker'
+        : wantsComicFont
+          ? 'bangers'
+          : wantsImpactFont
+            ? 'impact'
+            : wantsSerifFont
+              ? 'serif'
+              : undefined;
     ops.push({
-      type: 'set_zoom',
-      zoom,
-      summary: zoom === 1.0 ? 'Removed All Zoom (1.00x)' : `Zoom ${zoom.toFixed(2)}x`,
+      type: 'customize_captions',
+      captionPosition: pos,
+      captionPositionY: posY,
+      captionFontFamily: fontFam,
+      captionStyle: wantsGraffitiFont ? 'street-graffiti' : undefined,
+      summary: `Captions: ${[pos ? `Moved to ${pos.toUpperCase()}` : '', fontFam ? `${fontFam.toUpperCase()} Font` : ''].filter(Boolean).join(' • ')}`,
     });
-    if (zoom <= 1.0) {
-      ops.push({
-        type: 'update_scheme',
-        zoom: 1.0,
-        summary: 'Scheme Punch-In Zoom: 1.00x',
-      });
-    }
     replies.push(
-      zoom === 1.0
-        ? 'Removed all punch-in zoom (set to 1.00x / 100%) across every cut on the timeline.'
-        : `Set 9:16 zoom scale to ${zoom.toFixed(2)}x across the timeline.`
+      `Updated captions on the 9:16 canvas (${[
+        pos ? `moved caption bar to the ${pos}` : '',
+        fontFam ? `applied ${fontFam} font` : '',
+      ]
+        .filter(Boolean)
+        .join(' and ')}).`
     );
-  }
-
-  if (p.includes('faster') || p.includes('slower') || p.includes('pace') || p.includes('pacing') || p.includes('beat')) {
-    const mult = p.includes('slower') ? 1.35 : 0.72;
-    ops.push({
-      type: 'repace_cuts',
-      pacingMultiplier: mult,
-      summary: mult < 1 ? 'Pacing +28% Faster' : 'Pacing -35% Slower',
-    });
-    replies.push(`Re-computed internal sub-cuts (${mult < 1 ? 'faster hook cadence' : 'longer takes'}).`);
-  }
-
-  if (p.includes('caption') || p.includes('subtitle') || p.includes('text') || p.includes('hook')) {
-    const quoted = body.userPrompt.match(/["']([^"']+)["']/);
-    const newText = quoted ? quoted[1] : (body.activeClip?.captionText || 'WATCH THIS').toUpperCase() + ' 🔥';
-    ops.push({
-      type: 'update_caption',
-      captionText: newText,
-      summary: `Caption: "${newText.slice(0, 18)}..."`,
-    });
-    replies.push(`Updated social caption overlay to "${newText}".`);
-  }
-
-  if (p.includes('silence') || p.includes('dead air') || p.includes('pause') || p.includes('jump cut') || p.includes('jump-cut')) {
-    ops.push({
-      type: 'strip_silence',
-      silenceThreshold: 0.18,
-      summary: 'Stripped Dead Air & Pauses',
-    });
-    replies.push('Scanned the audio waveform and jump-cut all silent pauses and dead air out of the timeline.');
-  }
-
-  if (p.includes('split screen') || p.includes('split-screen') || p.includes('both speakers') || p.includes('top and bottom')) {
-    ops.push({
-      type: 'set_layout_mode',
-      layoutMode: 'split-screen',
-      summary: '9:16 Dual-Speaker Split-Screen',
-    });
-    replies.push('Switched 9:16 output to Top/Bottom Dual-Speaker Podcast Split-Screen.');
-  } else if (p.includes('switch speaker') || p.includes('auto switch') || p.includes('back and forth')) {
-    ops.push({
-      type: 'set_layout_mode',
-      layoutMode: 'auto-switch',
-      summary: '2-Speaker Auto Camera Switch',
-    });
-    replies.push('Applied automatic Left/Right speaker switching across timeline cuts.');
-  } else if (p.includes('blur') || p.includes('blurred background')) {
-    ops.push({
-      type: 'set_layout_mode',
-      layoutMode: 'blurred',
-      zoom: 0.56,
-      summary: 'Fit 16:9 + Blurred 9:16 Fill',
-    });
-    replies.push('Enabled blurred 9:16 background fill behind the full 16:9 frame.');
-  }
-
-  if (p.includes('beat') || p.includes('sync to audio') || p.includes('transient')) {
-    ops.push({
-      type: 'beat_sync_cuts',
-      summary: 'Beat-Synced Cuts to Audio Peaks',
-    });
-    replies.push('Snapped timeline sub-cuts to detected audio peaks and transients.');
-  }
-
-  if (p.includes('speed') || p.includes('slow mo') || p.includes('slow-mo') || p.includes('fast forward') || p.includes('1.25x') || p.includes('1.5x') || p.includes('2x')) {
-    const spdMatch = p.match(/(\d+(?:\.\d+)?)x/);
-    const spd = spdMatch ? Math.max(0.5, Math.min(2.0, parseFloat(spdMatch[1]))) : p.includes('slow') ? 0.5 : 1.25;
-    ops.push({
-      type: 'set_playback_speed',
-      speed: spd,
-      summary: `Playback Speed: ${spd.toFixed(2)}x`,
-    });
-    replies.push(`Set timeline playback speed to ${spd.toFixed(2)}x.`);
-  }
-
-  if (p.includes('karaoke') || p.includes('word by word') || p.includes('word-by-word') || p.includes('transcribe') || p.includes('hormozi')) {
-    ops.push({
-      type: 'generate_word_captions',
-      captionStyle: p.includes('neon') ? 'neon-karaoke' : 'hormozi-bold',
-      summary: 'Word-Level Karaoke Captions',
-    });
-    replies.push('Generated word-level timed karaoke captions for the active 9:16 clip.');
-  }
-
-  if (p.includes('export') || p.includes('download') || p.includes('mp4')) {
-    ops.push({
-      type: 'export_mp4',
-      summary: 'Exporting 9:16 MP4',
-    });
-    replies.push('Starting 9:16 MP4 export of the active timeline clip.');
   }
 
   if (ops.length === 0) {
     replies.push(
-      body.activeClip
-        ? `Ready on "${body.activeClip.name}" at ${body.currentPlayhead.toFixed(1)}s. Ask me to lock onto any object in the frame, generate viral clips, adjust cut pacing, zoom, or export as MP4.`
-        : `Ready! Upload a video or tell me how you'd like to configure your 9:16 Editing Scheme (target duration, pacing, caption style, or tracking mode).`
+      `Ready! Tell me what to adjust on your 9:16 edit — caption placement, fonts, colors, filters, splits, or cuts.`
     );
   }
 

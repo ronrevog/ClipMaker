@@ -103,17 +103,6 @@ import {
   tryUploadVideoToVercelBlob,
 } from './services/projectStorage';
 
-const QUICK_FEEDBACK_CHIPS = [
-  'Remove all dead air & silent pauses',
-  'Add word-by-word karaoke captions',
-  '2-speaker top/bottom split screen',
-  'Auto-switch between left & right speakers',
-  'Fit 16:9 with blurred 9:16 background',
-  'Remove all zoom (1.0x across timeline)',
-  'Sync cuts to audio beats',
-  'Speed up to 1.25x',
-];
-
 /**
  * Parses a user-entered duration string into seconds (clamped between 5 and 180 seconds / 3 mins).
  * Supports plain seconds ("45", "120s"), minutes ("2m", "2.5m"), or mm:ss ("1:30", "02:15", "3:00").
@@ -313,7 +302,7 @@ export const App: React.FC = () => {
       id: 'welcome',
       role: 'assistant',
       content:
-        'Gemini 4 Argon Studio Agent is live! You can paste screenshots/images (Ctrl+V), drag & drop reference files, or click 📎 to attach images, reference videos, or scripts. Ask me to lock onto any object, match a reference style, generate clips, or edit your timeline.',
+        'Gemini 4 Argon Studio Agent is live with full access to your 9:16 canvas, captions, fonts, layouts, filters, and timeline.',
       timestamp: new Date().toISOString(),
       providerBadge: 'gemini-4-argon [Live]',
     },
@@ -486,7 +475,28 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     render9x16Preview();
-  }, [render9x16Preview, playheadTime, clipPlayheadTime, liveTrackedAnchor]);
+    if (typeof document !== 'undefined' && (document as any).fonts?.ready) {
+      (document as any).fonts.ready.then(() => {
+        render9x16Preview();
+      });
+    }
+  }, [
+    render9x16Preview,
+    playheadTime,
+    clipPlayheadTime,
+    liveTrackedAnchor,
+    activeClip?.captionFontFamily,
+    activeClip?.captionStyle,
+    activeClip?.captionPositionY,
+    activeClip?.captionPositionX,
+    activeClip?.captionFontScale,
+    activeClip?.captionTextColor,
+    activeClip?.captionHighlightColor,
+    activeClip?.captionBgOpacity,
+    activeClip?.hideCaptions,
+    activeClip?.overlayBannerText,
+    activeClip?.videoFilter,
+  ]);
 
   // Seek to a specific time on the active timeline (0 .. activeClip.duration)
   const handleSeekClipTime = useCallback(
@@ -2140,7 +2150,11 @@ export const App: React.FC = () => {
         (p) => p.isUserAnchor
       ).length;
 
-      // If the user is asking for transcription/captions/karaoke, extract the real WAV audio slice so Gemini hears it!
+      // Only extract audio WAV if the user is explicitly asking to transcribe speech (NOT when styling/moving captions!)
+      const isCaptionStyleOrPositionRequest =
+        /\b(move|put|place|top|bottom|middle|center|font|graffiti|marker|comic|bangers|impact|serif|mono|color|size|bigger|smaller|larger|hide|remove\s+box|background\s+bar)\b/i.test(
+          effectivePrompt
+        );
       let extractedAudio: {
         wavBase64: string | null;
         startClipTime: number;
@@ -2149,7 +2163,8 @@ export const App: React.FC = () => {
       if (
         activeClip &&
         activeSource &&
-        /\b(caption|captions|subtitle|subtitles|transcribe|karaoke|word[\s-]by[\s-]word|what\s+are\s+they\s+saying)\b/i.test(
+        !isCaptionStyleOrPositionRequest &&
+        /\b(transcribe|what\s+are\s+they\s+saying|add\s+(word[\s-]by[\s-]word\s+)?(karaoke\s+)?(captions?|subtitles?))\b/i.test(
           effectivePrompt
         )
       ) {
@@ -2161,6 +2176,11 @@ export const App: React.FC = () => {
           45
         );
       }
+
+      const transcriptSource =
+        activeSource?.transcriptSegments && activeSource.transcriptSegments.length > 0
+          ? activeSource.transcriptSegments
+          : activeClip?.captions || [];
 
       const resp = await fetch('/api/ai-copilot', {
         method: 'POST',
@@ -2178,6 +2198,11 @@ export const App: React.FC = () => {
           audioMimeType: extractedAudio?.wavBase64 ? 'audio/wav' : undefined,
           audioStartOffset: extractedAudio?.startClipTime,
           audioDuration: extractedAudio?.extractedDuration,
+          transcriptExcerpt: transcriptSource.slice(0, 180).map((s) => ({
+            start: s.start,
+            end: s.end,
+            text: s.text,
+          })),
           attachments: attachmentsToSend.map((a) => ({
             name: a.name,
             mimeType: a.mimeType,
@@ -2197,6 +2222,7 @@ export const App: React.FC = () => {
             duration: c.duration,
             sourceStart: c.sourceStart,
             sourceEnd: c.sourceEnd,
+            commonThread: c.commonThread,
           })),
           activeScheme: {
             id: activeScheme.id,
@@ -2225,11 +2251,25 @@ export const App: React.FC = () => {
                 trackingOffsetX: activeClip.trackingOffsetX,
                 trackingSmoothing: activeClip.trackingSmoothing,
                 zoomScale: currentZoom,
+                backgroundFillStyle: activeClip.backgroundFillStyle,
                 captionText: activeClip.captionText,
+                captionStyle: activeClip.captionStyle,
+                captionFontFamily: activeClip.captionFontFamily,
+                captionPositionY: activeClip.captionPositionY ?? 0.77,
+                captionPositionX: activeClip.captionPositionX ?? 0.5,
+                captionFontScale: activeClip.captionFontScale ?? 1.0,
+                captionTextColor: activeClip.captionTextColor,
+                captionHighlightColor: activeClip.captionHighlightColor,
+                captionBgOpacity: activeClip.captionBgOpacity,
+                hideCaptions: activeClip.hideCaptions,
+                overlayBannerText: activeClip.overlayBannerText,
+                videoFilter: activeClip.videoFilter as any,
                 subjectFocusLabel: activeClip.subjectFocus?.label,
                 cuts: activeClip.subCuts.map((c) => ({
                   id: c.id,
                   timeOffset: c.timelineStart,
+                  sourceStart: c.sourceStart,
+                  sourceEnd: c.sourceEnd,
                   label: c.label,
                   zoom: c.zoom,
                   cropCenterX: c.cropBiasX,
@@ -2361,7 +2401,7 @@ export const App: React.FC = () => {
         }
       }
 
-      // 2. Handle Multimodal Clip Generation
+      // 2. Handle Multimodal Clip Generation & Transcript Search Clipping
       const genClipsOp = operations.find((op: any) => op.type === 'generate_edited_clips');
       if (genClipsOp && activeSource) {
         const nextMode: ClipCreationMode =
@@ -2372,7 +2412,39 @@ export const App: React.FC = () => {
               nextMode === 'condensed-edit' ? 'Compilations' : 'Viral Clips'
             } (${schemeAfterOps.targetClipDuration}s)`
         );
-        handleGenerateClipsFromFullVideo(nextMode, schemeAfterOps);
+        handleGenerateClipsFromFullVideo(
+          nextMode,
+          schemeAfterOps,
+          genClipsOp.editorialFocusPrompt
+        );
+      }
+
+      const searchTranscriptOp = operations.find(
+        (op: any) => op.type === 'search_transcript_and_clip' && op.searchQuery
+      );
+      if (searchTranscriptOp && activeSource) {
+        const q = String(searchTranscriptOp.searchQuery).toLowerCase();
+        const segs = activeSource.transcriptSegments || activeClip?.captions || [];
+        const matchIdx = segs.findIndex((s) => s.text.toLowerCase().includes(q));
+        if (matchIdx >= 0) {
+          const hit = segs[matchIdx];
+          const inPt = Math.max(0, Number((hit.start - 1.5).toFixed(2)));
+          const outPt = Math.min(
+            activeSource.duration,
+            Number((hit.start + Math.max(20, activeScheme.targetClipDuration || 30)).toFixed(2))
+          );
+          setInMarker(inPt);
+          setOutMarker(outPt);
+          handleSeekSourceTime(hit.start);
+          badges.push(
+            searchTranscriptOp.summary || `Found "${searchTranscriptOp.searchQuery}" @ ${hit.start.toFixed(1)}s`
+          );
+          if (searchTranscriptOp.extractClip) {
+            setTimeout(() => {
+              handleCreateClipFromMarkers(true, false);
+            }, 60);
+          }
+        }
       }
 
       // 3. Handle Vision Focus Lock Point Placement (set_focus_point)
@@ -2453,6 +2525,9 @@ export const App: React.FC = () => {
       // 4. Handle Active Clip Timeline Mutations & AI Video Editor Skills
       const clipOps = operations.filter((op: any) =>
         [
+          'customize_captions',
+          'set_title_banner',
+          'set_video_filter',
           'trim_start',
           'trim_end',
           'adjust_tracking_offset',
@@ -2469,6 +2544,122 @@ export const App: React.FC = () => {
           'save_scheme_preset',
         ].includes(op.type)
       );
+
+      // If Gemini emitted update_scheme with captionStyle, also propagate it to activeClip via customize_captions
+      for (const op of operations) {
+        if (op.type === 'update_scheme' && op.captionStyle) {
+          clipOps.push({
+            type: 'customize_captions',
+            captionStyle: op.captionStyle,
+            summary: `Caption Style: ${op.captionStyle}`,
+          });
+        }
+      }
+
+      // Direct client-side intent detection for Caption Position, Font, Size, Color & Box so user commands NEVER fail!
+      const wantsCaptionTop =
+        /\b(caption|captions|subtitle|subtitles|text|words?).*\b(top|upper|header)\b|\b(move|put|place).*\b(caption|captions|subtitle|subtitles|bar|text).*\b(top|up)\b/i.test(
+          lowerPrompt
+        );
+      const wantsCaptionMiddle =
+        !wantsCaptionTop &&
+        /\b(caption|captions|subtitle|subtitles|bar|text).*\b(middle|center)\b|\b(move|put|place).*\b(caption|captions|subtitle|subtitles|bar|text).*\b(middle|center)\b/i.test(
+          lowerPrompt
+        );
+      const wantsCaptionBottom =
+        !wantsCaptionTop &&
+        !wantsCaptionMiddle &&
+        /\b(caption|captions|subtitle|subtitles|bar|text).*\b(bottom|lower)\b|\b(move|put|place).*\b(caption|captions|subtitle|subtitles|bar|text).*\b(bottom|down|lower)\b/i.test(
+          lowerPrompt
+        );
+
+      const wantsGraffiti = /\b(graffiti|street\s*art|spray\s*paint|tag\s+font)\b/i.test(lowerPrompt);
+      const wantsMarker = /\b(marker|sharpie|handwritten)\b/i.test(lowerPrompt);
+      const wantsComic = /\b(comic|bangers|cartoon\s+font)\b/i.test(lowerPrompt);
+      const wantsImpact = /\b(impact|anton|heavy\s+block)\b/i.test(lowerPrompt);
+      const wantsBebas = /\b(bebas|tall\s+font)\b/i.test(lowerPrompt);
+      const wantsSerif = /\b(serif|cinema\s+font|luxury\s+font|playfair)\b/i.test(lowerPrompt);
+      const wantsMono = /\b(mono|monospace|typewriter|code\s+font)\b/i.test(lowerPrompt);
+
+      const wantsBiggerCaptions = /\b(bigger|larger|increase)\s+(caption|captions|font|text)|\b(caption|captions|font|text)\s+(bigger|larger|huge)\b/i.test(lowerPrompt);
+      const wantsSmallerCaptions = /\b(smaller|tiny|decrease)\s+(caption|captions|font|text)|\b(caption|captions|font|text)\s+(smaller)\b/i.test(lowerPrompt);
+      const wantsNoCaptionBox = /\b(remove|no|hide|without)\s+(the\s+)?(caption\s+)?(background|box|bar|backing)\b/i.test(lowerPrompt);
+      const wantsHideCaptions = /\b(hide|turn\s+off|remove)\s+(all\s+)?(the\s+)?(captions?|subtitles?)\b/i.test(lowerPrompt) && !wantsNoCaptionBox;
+      const wantsShowCaptions = /\b(show|turn\s+on|enable)\s+(the\s+)?(captions?|subtitles?)\b/i.test(lowerPrompt);
+
+      const detectedFontFamily = wantsGraffiti
+        ? 'graffiti'
+        : wantsMarker
+          ? 'marker'
+          : wantsComic
+            ? 'bangers'
+            : wantsImpact
+              ? 'impact'
+              : wantsBebas
+                ? 'bebas'
+                : wantsSerif
+                  ? 'serif'
+                  : wantsMono
+                    ? 'mono'
+                    : undefined;
+
+      if (
+        wantsCaptionTop ||
+        wantsCaptionMiddle ||
+        wantsCaptionBottom ||
+        detectedFontFamily ||
+        wantsBiggerCaptions ||
+        wantsSmallerCaptions ||
+        wantsNoCaptionBox ||
+        wantsHideCaptions ||
+        wantsShowCaptions
+      ) {
+        // Ensure a customize_captions operation merges with or supplements whatever the AI returned
+        const existingCapOp = clipOps.find((o: any) => o.type === 'customize_captions');
+        const targetPosY = wantsCaptionTop
+          ? 0.14
+          : wantsCaptionMiddle
+            ? 0.5
+            : wantsCaptionBottom
+              ? 0.77
+              : undefined;
+        const summaryParts: string[] = [];
+        if (wantsCaptionTop) summaryParts.push('Caption Bar → Top');
+        if (wantsCaptionMiddle) summaryParts.push('Caption Bar → Middle');
+        if (wantsCaptionBottom) summaryParts.push('Caption Bar → Bottom');
+        if (detectedFontFamily) summaryParts.push(`Font: ${detectedFontFamily.toUpperCase()}`);
+        if (wantsBiggerCaptions) summaryParts.push('Font Size +25%');
+        if (wantsSmallerCaptions) summaryParts.push('Font Size -20%');
+        if (wantsNoCaptionBox) summaryParts.push('Removed Caption Background Box');
+        if (wantsHideCaptions) summaryParts.push('Hidden Captions');
+        if (wantsShowCaptions) summaryParts.push('Shown Captions');
+
+        if (existingCapOp) {
+          if (targetPosY !== undefined && existingCapOp.captionPositionY === undefined) {
+            existingCapOp.captionPositionY = targetPosY;
+          }
+          if (detectedFontFamily && !existingCapOp.captionFontFamily) {
+            existingCapOp.captionFontFamily = detectedFontFamily;
+            if (detectedFontFamily === 'graffiti') existingCapOp.captionStyle = 'street-graffiti';
+          }
+          if (wantsBiggerCaptions && !existingCapOp.captionFontScale) existingCapOp.captionFontScale = 1.28;
+          if (wantsSmallerCaptions && !existingCapOp.captionFontScale) existingCapOp.captionFontScale = 0.8;
+          if (wantsNoCaptionBox) existingCapOp.captionBgOpacity = 0;
+          if (wantsHideCaptions) existingCapOp.hideCaptions = true;
+          if (wantsShowCaptions) existingCapOp.hideCaptions = false;
+        } else {
+          clipOps.push({
+            type: 'customize_captions',
+            captionPositionY: targetPosY,
+            captionFontFamily: detectedFontFamily,
+            captionStyle: detectedFontFamily === 'graffiti' ? 'street-graffiti' : undefined,
+            captionFontScale: wantsBiggerCaptions ? 1.28 : wantsSmallerCaptions ? 0.8 : undefined,
+            captionBgOpacity: wantsNoCaptionBox ? 0 : undefined,
+            hideCaptions: wantsHideCaptions ? true : wantsShowCaptions ? false : undefined,
+            summary: summaryParts.join(' • ') || 'Updated Caption Style & Placement',
+          });
+        }
+      }
 
       // Direct client-side intent detection for AI Video Editing Skills so natural-language commands always fire
       const wantsStripSilence =
@@ -2647,11 +2838,74 @@ export const App: React.FC = () => {
                 next.zoomScale = z;
                 next.subCuts = next.subCuts.map((c) => ({ ...c, zoom: z }));
               }
+            } else if (op.type === 'customize_captions') {
+              if (op.captionPosition === 'top') next.captionPositionY = 0.14;
+              else if (op.captionPosition === 'middle') next.captionPositionY = 0.5;
+              else if (op.captionPosition === 'bottom') next.captionPositionY = 0.77;
+              if (typeof op.captionPositionY === 'number') {
+                next.captionPositionY = Math.max(0.08, Math.min(0.92, op.captionPositionY));
+              }
+              if (typeof op.captionPositionX === 'number') {
+                next.captionPositionX = Math.max(0.18, Math.min(0.82, op.captionPositionX));
+              }
+              if (op.captionFontFamily) {
+                next.captionFontFamily = op.captionFontFamily;
+              }
+              if (op.captionStyle) {
+                next.captionStyle = op.captionStyle;
+              }
+              if (typeof op.captionFontScale === 'number') {
+                next.captionFontScale = Math.max(0.5, Math.min(2.2, op.captionFontScale));
+              }
+              if (op.captionTextColor) {
+                next.captionTextColor = op.captionTextColor;
+              }
+              if (op.captionHighlightColor) {
+                next.captionHighlightColor = op.captionHighlightColor;
+              }
+              if (op.captionBgColor) {
+                next.captionBgColor = op.captionBgColor;
+              }
+              if (typeof op.captionBgOpacity === 'number') {
+                next.captionBgOpacity = Math.max(0, Math.min(1, op.captionBgOpacity));
+              }
+              if (typeof op.captionUppercase === 'boolean') {
+                next.captionUppercase = op.captionUppercase;
+              }
+              if (typeof op.hideCaptions === 'boolean') {
+                next.hideCaptions = op.hideCaptions;
+              }
+            } else if (op.type === 'set_title_banner') {
+              next.overlayBannerText = op.bannerText ?? '';
+              if (typeof op.bannerPositionY === 'number') {
+                next.overlayBannerPositionY = Math.max(0.06, Math.min(0.92, op.bannerPositionY));
+              }
+              if (op.bannerBgColor) next.overlayBannerBgColor = op.bannerBgColor;
+              if (op.bannerTextColor) next.overlayBannerTextColor = op.bannerTextColor;
+            } else if (op.type === 'set_video_filter') {
+              next.videoFilter = {
+                ...(next.videoFilter || {}),
+                ...(typeof op.brightness === 'number' ? { brightness: op.brightness } : {}),
+                ...(typeof op.contrast === 'number' ? { contrast: op.contrast } : {}),
+                ...(typeof op.saturation === 'number' ? { saturation: op.saturation } : {}),
+                ...(typeof op.grayscale === 'number' ? { grayscale: op.grayscale } : {}),
+                ...(typeof op.sepia === 'number' ? { sepia: op.sepia } : {}),
+                ...(typeof op.hueRotate === 'number' ? { hueRotate: op.hueRotate } : {}),
+              };
             } else if (op.type === 'generate_word_captions') {
               if (op.captionStyle) {
                 next.captionStyle = op.captionStyle;
               }
-              if (Array.isArray(op.captionSegments) && op.captionSegments.length > 0) {
+              if (op.captionFontFamily) {
+                next.captionFontFamily = op.captionFontFamily;
+              }
+              if (op.captionPosition === 'top') next.captionPositionY = 0.14;
+              else if (op.captionPosition === 'middle') next.captionPositionY = 0.5;
+              else if (op.captionPosition === 'bottom') next.captionPositionY = 0.77;
+              if (typeof op.captionPositionY === 'number') {
+                next.captionPositionY = Math.max(0.08, Math.min(0.92, op.captionPositionY));
+              }
+              if (!isCaptionStyleOrPositionRequest && Array.isArray(op.captionSegments) && op.captionSegments.length > 0) {
                 next.captions = buildWordLevelCaptionsFromText(
                   op.captionSegments.map((s: any, idx: number) => ({
                     id: `ai-wcap-${idx}-${Date.now()}`,
@@ -2664,7 +2918,7 @@ export const App: React.FC = () => {
                   clipPlayheadTime
                 );
                 next.captionText = next.captions[0]?.text || next.captionText;
-              } else if (op.captionText) {
+              } else if (!isCaptionStyleOrPositionRequest && op.captionText) {
                 next.captions = buildWordLevelCaptionsFromText(
                   op.captionText,
                   next.duration,
@@ -2672,8 +2926,8 @@ export const App: React.FC = () => {
                   clipPlayheadTime
                 );
                 next.captionText = op.captionText;
-              } else {
-                // Trigger real audio transcription asynchronously!
+              } else if (!isCaptionStyleOrPositionRequest || next.captions.length === 0) {
+                // Trigger real audio transcription asynchronously only when captions are actually requested!
                 setTimeout(() => {
                   handleRunAITranscription();
                 }, 40);
@@ -2741,6 +2995,45 @@ export const App: React.FC = () => {
           }
           return next;
         });
+
+        // Also propagate global caption styling/position updates across all generated clips & fullVideoClip
+        const capStylingOps = clipOps.filter((o: any) => o.type === 'customize_captions');
+        if (capStylingOps.length > 0) {
+          const applyCapPatch = (c: GeneratedClip): GeneratedClip => {
+            let patched = { ...c };
+            for (const op of capStylingOps) {
+              if (op.captionPosition === 'top') patched.captionPositionY = 0.14;
+              else if (op.captionPosition === 'middle') patched.captionPositionY = 0.5;
+              else if (op.captionPosition === 'bottom') patched.captionPositionY = 0.77;
+              if (typeof op.captionPositionY === 'number') {
+                patched.captionPositionY = Math.max(0.08, Math.min(0.92, op.captionPositionY));
+              }
+              if (typeof op.captionPositionX === 'number') {
+                patched.captionPositionX = Math.max(0.18, Math.min(0.82, op.captionPositionX));
+              }
+              if (op.captionFontFamily) patched.captionFontFamily = op.captionFontFamily;
+              if (op.captionStyle) patched.captionStyle = op.captionStyle;
+              if (typeof op.captionFontScale === 'number') {
+                patched.captionFontScale = Math.max(0.5, Math.min(2.2, op.captionFontScale));
+              }
+              if (op.captionTextColor) patched.captionTextColor = op.captionTextColor;
+              if (op.captionHighlightColor) patched.captionHighlightColor = op.captionHighlightColor;
+              if (op.captionBgColor) patched.captionBgColor = op.captionBgColor;
+              if (typeof op.captionBgOpacity === 'number') {
+                patched.captionBgOpacity = Math.max(0, Math.min(1, op.captionBgOpacity));
+              }
+              if (typeof op.captionUppercase === 'boolean') {
+                patched.captionUppercase = op.captionUppercase;
+              }
+              if (typeof op.hideCaptions === 'boolean') {
+                patched.hideCaptions = op.hideCaptions;
+              }
+            }
+            return patched;
+          };
+          setFullVideoClip((prev) => (prev ? applyCapPatch(prev) : prev));
+          setGeneratedClips((prev) => prev.map(applyCapPatch));
+        }
       }
 
       if (operations.some((o: any) => o.type === 'split_at_playhead') && activeClip) {
@@ -6272,37 +6565,6 @@ export const App: React.FC = () => {
             )}
           </div>
 
-          {/* Quick Feedback Pills */}
-          <div
-            style={{
-              padding: '8px 10px',
-              borderTop: '1px solid var(--border-subtle)',
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 5,
-              background: 'var(--bg-panel-header)',
-            }}
-          >
-            {QUICK_FEEDBACK_CHIPS.map((chip) => (
-              <button
-                key={chip}
-                onClick={() => handleSendChat(chip)}
-                disabled={isCopilotBusy}
-                style={{
-                  fontSize: 11,
-                  padding: '4px 8px',
-                  borderRadius: 5,
-                  border: '1px solid var(--border-subtle)',
-                  background: 'var(--bg-card)',
-                  color: 'var(--text-secondary)',
-                  cursor: 'pointer',
-                }}
-              >
-                {chip}
-              </button>
-            ))}
-          </div>
-
           {/* Pending Attachments Bar (Pasted Images / Reference Videos / Files) */}
           {pendingChatAttachments.length > 0 && (
             <div
@@ -6383,7 +6645,7 @@ export const App: React.FC = () => {
             </div>
           )}
 
-          {/* Chat Input (Supports Ctrl+V Paste of Images/Files & File Attachment Button) */}
+          {/* Chat Input */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -6406,7 +6668,7 @@ export const App: React.FC = () => {
               className="btn"
               onClick={() => chatAttachmentInputRef.current?.click()}
               disabled={isCopilotBusy}
-              title="Attach reference image, video, or script file (or paste with Ctrl+V)"
+              title="Attach file or image"
               style={{
                 padding: '7px 8px',
                 flexShrink: 0,
@@ -6422,7 +6684,7 @@ export const App: React.FC = () => {
             <input
               type="text"
               className="input-field"
-              placeholder="Paste image (Ctrl+V), attach file, or ask Agent..."
+              placeholder="Ask Studio Agent..."
               value={chatInput}
               onPaste={handleChatPaste}
               onChange={(e) => setChatInput(e.target.value)}

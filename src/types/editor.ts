@@ -62,7 +62,31 @@ export interface SubjectFocusConfig {
   label: string;
 }
 
-export type CaptionStyleId = 'hormozi-bold' | 'premiere-minimal' | 'neon-karaoke' | 'cinema-serif';
+export type CaptionStyleId =
+  | 'hormozi-bold'
+  | 'premiere-minimal'
+  | 'neon-karaoke'
+  | 'cinema-serif'
+  | 'street-graffiti';
+
+export type CaptionFontFamilyId =
+  | 'graffiti'
+  | 'marker'
+  | 'bangers'
+  | 'impact'
+  | 'bebas'
+  | 'serif'
+  | 'mono'
+  | 'inter';
+
+export interface VideoFilterConfig {
+  brightness?: number; // 0.4 .. 2.0 (default 1.0)
+  contrast?: number; // 0.4 .. 2.2 (default 1.0)
+  saturation?: number; // 0.0 .. 2.5 (default 1.0)
+  grayscale?: number; // 0.0 .. 1.0 (default 0.0)
+  sepia?: number; // 0.0 .. 1.0 (default 0.0)
+  hueRotate?: number; // -180 .. 180 deg (default 0)
+}
 export type SafeZoneGuideId = 'tiktok' | 'reels' | 'shorts' | 'none';
 export type NLEToolId =
   | 'select'
@@ -201,6 +225,21 @@ export interface GeneratedClip {
   playbackSpeed?: number;
   captionText: string;
   captionStyle: CaptionStyleId;
+  captionFontFamily?: CaptionFontFamilyId;
+  captionPositionY?: number; // 0.08 (top) .. 0.50 (middle) .. 0.78 (bottom)
+  captionPositionX?: number; // 0.15 (left) .. 0.50 (center) .. 0.85 (right)
+  captionFontScale?: number; // 0.5 .. 2.2 multiplier
+  captionTextColor?: string;
+  captionHighlightColor?: string;
+  captionBgColor?: string;
+  captionBgOpacity?: number; // 0 (transparent) .. 1
+  captionUppercase?: boolean;
+  hideCaptions?: boolean;
+  overlayBannerText?: string;
+  overlayBannerPositionY?: number;
+  overlayBannerBgColor?: string;
+  overlayBannerTextColor?: string;
+  videoFilter?: VideoFilterConfig;
   safeZoneGuide: SafeZoneGuideId;
   subCuts: SubCut[];
   captions: CaptionSegment[];

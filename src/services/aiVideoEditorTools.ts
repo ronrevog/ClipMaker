@@ -1045,7 +1045,27 @@ export function renderComposite9x16Frame(params: {
       const sh = Math.max(64, Math.min(vh, sw / panelAspect));
       const sx = Math.max(0, Math.min(vw - sw, centerX * vw - sw / 2));
       const sy = Math.max(0, Math.min(vh - sh, centerY * vh - sh / 2));
-      ctx.drawImage(videoEl, sx, sy, sw, sh, 0, destY, outW, destH);
+      const vf = activeClip?.videoFilter;
+      const filterStr = vf
+        ? [
+            vf.brightness !== undefined ? `brightness(${vf.brightness})` : '',
+            vf.contrast !== undefined ? `contrast(${vf.contrast})` : '',
+            vf.saturation !== undefined ? `saturate(${vf.saturation})` : '',
+            vf.grayscale ? `grayscale(${vf.grayscale})` : '',
+            vf.sepia ? `sepia(${vf.sepia})` : '',
+            vf.hueRotate ? `hue-rotate(${vf.hueRotate}deg)` : '',
+          ]
+            .filter(Boolean)
+            .join(' ')
+        : '';
+      if (filterStr) {
+        ctx.save();
+        ctx.filter = filterStr;
+        ctx.drawImage(videoEl, sx, sy, sw, sh, 0, destY, outW, destH);
+        ctx.restore();
+      } else {
+        ctx.drawImage(videoEl, sx, sy, sw, sh, 0, destY, outW, destH);
+      }
 
       // Subtle speaker label pill in corner
       ctx.save();
@@ -1114,11 +1134,59 @@ export function renderComposite9x16Frame(params: {
       }
     }
 
-    ctx.drawImage(videoEl, crop.sx, crop.sy, crop.sw, crop.sh, dx, dy, dw, dh);
+    const vf = activeClip?.videoFilter;
+    const filterStr = vf
+      ? [
+          vf.brightness !== undefined ? `brightness(${vf.brightness})` : '',
+          vf.contrast !== undefined ? `contrast(${vf.contrast})` : '',
+          vf.saturation !== undefined ? `saturate(${vf.saturation})` : '',
+          vf.grayscale ? `grayscale(${vf.grayscale})` : '',
+          vf.sepia ? `sepia(${vf.sepia})` : '',
+          vf.hueRotate ? `hue-rotate(${vf.hueRotate}deg)` : '',
+        ]
+          .filter(Boolean)
+          .join(' ')
+      : '';
+    if (filterStr) {
+      ctx.save();
+      ctx.filter = filterStr;
+      ctx.drawImage(videoEl, crop.sx, crop.sy, crop.sw, crop.sh, dx, dy, dw, dh);
+      ctx.restore();
+    } else {
+      ctx.drawImage(videoEl, crop.sx, crop.sy, crop.sw, crop.sh, dx, dy, dw, dh);
+    }
+  }
+
+  // Draw Optional Title / Hook Banner Overlay if configured by Studio Agent
+  if (activeClip?.overlayBannerText?.trim()) {
+    const scale = outW / 360;
+    const bannerY = outH * Math.max(0.06, Math.min(0.92, activeClip.overlayBannerPositionY ?? 0.10));
+    const bannerFontSize = Math.round(18 * scale);
+    ctx.save();
+    ctx.font = `800 ${bannerFontSize}px "Anton", "Bebas Neue", Inter, sans-serif`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    const bText = activeClip.overlayBannerText.trim();
+    const tw = Math.min(outW * 0.88, ctx.measureText(bText).width);
+    const padX = Math.round(14 * scale);
+    const padY = Math.round(8 * scale);
+    ctx.fillStyle = activeClip.overlayBannerBgColor || 'rgba(220, 38, 38, 0.92)';
+    ctx.beginPath();
+    ctx.roundRect(
+      outW / 2 - tw / 2 - padX,
+      bannerY - bannerFontSize / 2 - padY,
+      tw + padX * 2,
+      bannerFontSize + padY * 2,
+      Math.round(6 * scale)
+    );
+    ctx.fill();
+    ctx.fillStyle = activeClip.overlayBannerTextColor || '#ffffff';
+    ctx.fillText(bText, outW / 2, bannerY, outW * 0.88);
+    ctx.restore();
   }
 
   // Draw Styled Social Captions + Word-Level Karaoke Highlighting
-  if (activeClip) {
+  if (activeClip && !activeClip.hideCaptions) {
     renderWordLevelCaptionOverlay(ctx, outW, outH, activeClip, clipPlayheadTime);
   }
 }
@@ -1128,8 +1196,9 @@ function outWidthToHeight(outW: number, cropAspect: number): number {
 }
 
 /**
- * Renders Hormozi Bold / Neon Karaoke / Premiere Minimal / Cinema Serif captions
- * with active spoken-word karaoke highlighting when `seg.words` is present!
+ * Renders Hormozi Bold / Neon Karaoke / Street Graffiti / Premiere Minimal / Cinema Serif captions
+ * with full Studio Agent control over Y-position (top/middle/bottom), font family (graffiti, marker,
+ * bangers, impact, bebas, serif, mono, inter), font size scale, colors, and background box!
  */
 export function renderWordLevelCaptionOverlay(
   ctx: CanvasRenderingContext2D,
@@ -1138,6 +1207,7 @@ export function renderWordLevelCaptionOverlay(
   clip: GeneratedClip,
   clipPlayheadTime: number
 ) {
+  if (clip.hideCaptions) return;
   const seg = clip.captions.find(
     (c) => clipPlayheadTime >= c.start - 0.05 && clipPlayheadTime <= c.end + 0.05
   );
@@ -1147,23 +1217,58 @@ export function renderWordLevelCaptionOverlay(
 
   const scale = outW / 360;
   const style: CaptionStyleId = clip.captionStyle || 'hormozi-bold';
-  const yPos = outH * 0.77;
+  const fontChoice =
+    clip.captionFontFamily ||
+    (style === 'street-graffiti'
+      ? 'graffiti'
+      : style === 'cinema-serif'
+        ? 'serif'
+        : 'inter');
+
+  const normY = Math.max(0.08, Math.min(0.92, clip.captionPositionY ?? 0.77));
+  const normX = Math.max(0.18, Math.min(0.82, clip.captionPositionX ?? 0.5));
+  const yPos = outH * normY;
+  const xCenter = outW * normX;
+  const fontScale = Math.max(0.5, Math.min(2.2, clip.captionFontScale ?? 1.0));
 
   ctx.save();
   ctx.textBaseline = 'middle';
 
-  const fontSize = Math.round(
-    (style === 'hormozi-bold' ? 23 : style === 'neon-karaoke' ? 22 : 19) * scale
-  );
+  const baseSize =
+    fontChoice === 'graffiti' || fontChoice === 'bangers' || fontChoice === 'marker'
+      ? 25
+      : fontChoice === 'impact' || fontChoice === 'bebas'
+        ? 26
+        : style === 'hormozi-bold'
+          ? 23
+          : style === 'neon-karaoke'
+            ? 22
+            : 19;
+  const fontSize = Math.round(baseSize * scale * fontScale);
+
   const fontFamily =
-    style === 'cinema-serif'
-      ? `700 ${fontSize}px Georgia, serif`
-      : `800 ${fontSize}px Inter, system-ui, sans-serif`;
+    fontChoice === 'graffiti'
+      ? `400 ${fontSize}px "Rubik Spray Paint", "Sedgwick Ave Display", "Permanent Marker", "Bangers", cursive`
+      : fontChoice === 'marker'
+        ? `400 ${fontSize}px "Permanent Marker", "Bangers", cursive`
+        : fontChoice === 'bangers'
+          ? `400 ${fontSize}px "Bangers", Impact, cursive`
+          : fontChoice === 'impact'
+            ? `400 ${fontSize}px "Anton", Impact, sans-serif`
+            : fontChoice === 'bebas'
+              ? `400 ${fontSize}px "Bebas Neue", "Anton", sans-serif`
+              : fontChoice === 'serif'
+                ? `700 ${fontSize}px "Playfair Display", Georgia, serif`
+                : fontChoice === 'mono'
+                  ? `700 ${fontSize}px "JetBrains Mono", monospace`
+                  : `800 ${fontSize}px Inter, system-ui, sans-serif`;
   ctx.font = fontFamily;
 
   const rawWords = text.split(/\s+/).filter(Boolean);
   const segStart = seg ? seg.start : 0;
-  const segEnd = seg ? seg.end : Math.min(clip.duration, segStart + Math.max(1.2, rawWords.length * 0.35));
+  const segEnd = seg
+    ? seg.end
+    : Math.min(clip.duration, segStart + Math.max(1.2, rawWords.length * 0.35));
   const wordDur = Math.max(0.12, (segEnd - segStart) / Math.max(1, rawWords.length));
 
   const wordsWithTiming: CaptionWordTiming[] =
@@ -1176,7 +1281,7 @@ export function renderWordLevelCaptionOverlay(
         }));
 
   const spaceW = ctx.measureText(' ').width;
-  const maxLineW = outW * 0.84;
+  const maxLineW = outW * 0.86;
 
   interface MeasuredWord {
     word: string;
@@ -1186,11 +1291,19 @@ export function renderWordLevelCaptionOverlay(
     isPast: boolean;
   }
 
+  const shouldUppercase =
+    clip.captionUppercase !== undefined
+      ? clip.captionUppercase
+      : style === 'hormozi-bold' ||
+        style === 'neon-karaoke' ||
+        style === 'street-graffiti' ||
+        fontChoice === 'graffiti' ||
+        fontChoice === 'bangers' ||
+        fontChoice === 'impact' ||
+        fontChoice === 'bebas';
+
   const measured: MeasuredWord[] = wordsWithTiming.map((wt) => {
-    const displayWord =
-      style === 'hormozi-bold' || style === 'neon-karaoke'
-        ? wt.word.toUpperCase()
-        : wt.word;
+    const displayWord = shouldUppercase ? wt.word.toUpperCase() : wt.word;
     const isActive =
       clipPlayheadTime >= wt.start - 0.04 && clipPlayheadTime <= wt.end + 0.04;
     const isPast = clipPlayheadTime > wt.end + 0.04;
@@ -1231,32 +1344,56 @@ export function renderWordLevelCaptionOverlay(
   );
   const padX = Math.round(14 * scale);
   const padY = Math.round(8 * scale);
-  ctx.fillStyle =
-    style === 'premiere-minimal'
-      ? 'rgba(15, 23, 42, 0.82)'
-      : 'rgba(0, 0, 0, 0.68)';
-  ctx.beginPath();
-  ctx.roundRect(
-    outW / 2 - widestLineW / 2 - padX,
-    startY - lineHeight / 2 - padY,
-    widestLineW + padX * 2,
-    totalBlockH + padY * 2,
-    Math.round(8 * scale)
-  );
-  ctx.fill();
+
+  const bgOpacity =
+    clip.captionBgOpacity !== undefined
+      ? clip.captionBgOpacity
+      : fontChoice === 'graffiti'
+        ? 0.52
+        : style === 'premiere-minimal'
+          ? 0.82
+          : 0.68;
+
+  if (bgOpacity > 0.02) {
+    ctx.fillStyle =
+      clip.captionBgColor ||
+      (style === 'premiere-minimal'
+        ? `rgba(15, 23, 42, ${bgOpacity})`
+        : `rgba(0, 0, 0, ${bgOpacity})`);
+    ctx.beginPath();
+    ctx.roundRect(
+      xCenter - widestLineW / 2 - padX,
+      startY - lineHeight / 2 - padY,
+      widestLineW + padX * 2,
+      totalBlockH + padY * 2,
+      Math.round(8 * scale)
+    );
+    ctx.fill();
+  }
+
+  const activeHighlightColor =
+    clip.captionHighlightColor ||
+    (fontChoice === 'graffiti' || style === 'street-graffiti'
+      ? '#ff2a85'
+      : style === 'neon-karaoke'
+        ? '#34d399'
+        : '#facc15');
+  const baseTextColor = clip.captionTextColor || '#ffffff';
 
   lines.forEach((ln, lineIdx) => {
     const lineW = ln.reduce((acc, w, i) => acc + w.width + (i > 0 ? spaceW : 0), 0);
-    let cursorX = outW / 2 - lineW / 2;
+    let cursorX = xCenter - lineW / 2;
     const lineY = startY + lineIdx * lineHeight;
 
     for (const mw of ln) {
       if (mw.isActive) {
         ctx.save();
         ctx.fillStyle =
-          style === 'neon-karaoke'
-            ? 'rgba(16, 185, 129, 0.32)'
-            : 'rgba(250, 204, 21, 0.25)';
+          fontChoice === 'graffiti' || style === 'street-graffiti'
+            ? 'rgba(255, 42, 133, 0.28)'
+            : style === 'neon-karaoke'
+              ? 'rgba(16, 185, 129, 0.32)'
+              : 'rgba(250, 204, 21, 0.25)';
         ctx.beginPath();
         ctx.roundRect(
           cursorX - 4 * scale,
@@ -1269,19 +1406,32 @@ export function renderWordLevelCaptionOverlay(
         ctx.restore();
       }
 
-      ctx.lineWidth = Math.max(2, Math.round(3.2 * scale));
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.92)';
+      // Graffiti / Bold street drop-shadow + thick outline
+      ctx.save();
+      if (fontChoice === 'graffiti' || fontChoice === 'marker' || fontChoice === 'bangers') {
+        ctx.shadowColor = mw.isActive ? 'rgba(255, 42, 133, 0.85)' : 'rgba(0, 0, 0, 0.95)';
+        ctx.shadowBlur = Math.round(6 * scale);
+        ctx.shadowOffsetX = Math.round(2 * scale);
+        ctx.shadowOffsetY = Math.round(2 * scale);
+      }
+
+      ctx.lineWidth = Math.max(
+        2,
+        Math.round((fontChoice === 'graffiti' ? 4.2 : 3.2) * scale * fontScale)
+      );
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.96)';
       ctx.strokeText(mw.displayWord, cursorX, lineY);
 
       if (mw.isActive) {
-        ctx.fillStyle = style === 'neon-karaoke' ? '#34d399' : '#facc15';
+        ctx.fillStyle = activeHighlightColor;
       } else if (mw.isPast && style === 'neon-karaoke') {
         ctx.fillStyle = '#e2e8f0';
       } else {
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = baseTextColor;
       }
 
       ctx.fillText(mw.displayWord, cursorX, lineY);
+      ctx.restore();
       cursorX += mw.width + spaceW;
     }
   });
