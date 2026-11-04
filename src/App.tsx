@@ -293,6 +293,8 @@ export const App: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isDraggingCrop, setIsDraggingCrop] = useState<boolean>(false);
+  const [draggingSpeaker, setDraggingSpeaker] = useState<'A' | 'B' | null>(null);
+  const [selectedSpeakerTarget, setSelectedSpeakerTarget] = useState<'A' | 'B'>('A');
 
   // 6. Progress & Busy States
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
@@ -501,6 +503,10 @@ export const App: React.FC = () => {
     clipPlayheadTime,
     liveTrackedAnchor,
     activeClip?.backgroundFillStyle,
+    activeClip?.speakerAX,
+    activeClip?.speakerAY,
+    activeClip?.speakerBX,
+    activeClip?.speakerBY,
     activeClip?.subCuts,
     activeClip?.zoomScale,
     activeClip?.trackingOffsetX,
@@ -1083,6 +1089,56 @@ export const App: React.FC = () => {
     }
   };
 
+  // Move Speaker A or Speaker B crop box freely anywhere on the Source Video (2D X & Y)
+  const updateSpeakerPositionOnClip = useCallback(
+    (speaker: 'A' | 'B', rawNormX: number, rawNormY: number) => {
+      const clampedX = Number(Math.max(0.06, Math.min(0.94, rawNormX)).toFixed(3));
+      const clampedY = Number(Math.max(0.06, Math.min(0.94, rawNormY)).toFixed(3));
+      const defaultY = nativeDims.width < nativeDims.height ? 0.39 : 0.44;
+
+      const patchClip = (c: GeneratedClip): GeneratedClip => {
+        const nextAX = speaker === 'A' ? clampedX : (c.speakerAX ?? 0.26);
+        const nextAY = speaker === 'A' ? clampedY : (c.speakerAY ?? defaultY);
+        const nextBX = speaker === 'B' ? clampedX : (c.speakerBX ?? 0.74);
+        const nextBY = speaker === 'B' ? clampedY : (c.speakerBY ?? defaultY);
+
+        const isAutoSwitch = c.subjectFocus?.label === '2-Speaker Auto-Switch';
+        const nextSubCuts = isAutoSwitch
+          ? c.subCuts.map((sc, idx) => {
+              const isSpkA = sc.label.includes('Speaker A') || (!sc.label.includes('Speaker B') && idx % 2 === 0);
+              return {
+                ...sc,
+                cropBiasX: Number(((isSpkA ? nextAX : nextBX) - 0.5).toFixed(3)),
+              };
+            })
+          : c.subCuts;
+
+        return {
+          ...c,
+          speakerAX: nextAX,
+          speakerAY: nextAY,
+          speakerBX: nextBX,
+          speakerBY: nextBY,
+          subjectFocus: isAutoSwitch && c.subjectFocus
+            ? {
+                ...c.subjectFocus,
+                anchorY: Number(((nextAY + nextBY) / 2).toFixed(3)),
+              }
+            : c.subjectFocus,
+          subCuts: nextSubCuts,
+        };
+      };
+
+      if (applyFocusToAllClips) {
+        setFullVideoClip((prev) => (prev ? patchClip(prev) : prev));
+        setGeneratedClips((prev) => prev.map(patchClip));
+      } else {
+        updateActiveTimelineClip(patchClip);
+      }
+    },
+    [applyFocusToAllClips, nativeDims, updateActiveTimelineClip]
+  );
+
   // Click or Drag directly on the Source Video to pick ANY object and track it across the clip!
   const handlePointerOnSourceVideo = (
     e: React.MouseEvent<HTMLDivElement>,
@@ -1092,6 +1148,17 @@ export const App: React.FC = () => {
     const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
     const normX = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
     const normY = Math.max(0.06, Math.min(0.94, (e.clientY - rect.top) / rect.height));
+
+    const isTwoSpeakerActive =
+      activeClip.backgroundFillStyle === 'split-screen' ||
+      activeClip.subjectFocus?.label === '2-Speaker Auto-Switch';
+
+    if (isTwoSpeakerActive) {
+      const targetSpk = draggingSpeaker || selectedSpeakerTarget;
+      updateSpeakerPositionOnClip(targetSpk, normX, normY);
+      return;
+    }
+
     applyFocusLockAtNormalizedPoint(normX, normY, runFullTrajectorySolve);
   };
 
@@ -4388,15 +4455,60 @@ export const App: React.FC = () => {
                         justifyContent: 'space-between',
                         marginBottom: 4,
                         padding: '0 2px',
+                        gap: 6,
+                        flexWrap: 'wrap',
                       }}
                     >
                       <span className="section-label">
                         Source · {nativeDims.width}×{nativeDims.height}
                       </span>
-                      {isSolvingObjectTrack ? (
+                      {activeClip?.backgroundFillStyle === 'split-screen' ||
+                      activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <div className="seg-group">
+                            <button
+                              type="button"
+                              className="seg-item"
+                              style={{ height: 20, fontSize: 10.5, padding: '0 7px' }}
+                              data-active={selectedSpeakerTarget === 'A'}
+                              onClick={() => setSelectedSpeakerTarget('A')}
+                              title="Click or drag on Source Video to position Speaker A"
+                            >
+                              Move Speaker A
+                            </button>
+                            <button
+                              type="button"
+                              className="seg-item"
+                              style={{ height: 20, fontSize: 10.5, padding: '0 7px' }}
+                              data-active={selectedSpeakerTarget === 'B'}
+                              onClick={() => setSelectedSpeakerTarget('B')}
+                              title="Click or drag on Source Video to position Speaker B"
+                            >
+                              Move Speaker B
+                            </button>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            style={{ height: 20, fontSize: 10, padding: '0 6px' }}
+                            onClick={() => {
+                              const defY = nativeDims.width < nativeDims.height ? 0.39 : 0.44;
+                              updateActiveTimelineClip((c) => ({
+                                ...c,
+                                speakerAX: 0.26,
+                                speakerAY: defY,
+                                speakerBX: 0.74,
+                                speakerBY: defY,
+                                trackingOffsetX: 0,
+                              }));
+                            }}
+                            title="Reset Speaker A and Speaker B to default left/right positions"
+                          >
+                            Reset A & B
+                          </button>
+                        </div>
+                      ) : isSolvingObjectTrack ? (
                         <span className="badge-subtle">Tracking {objectTrackProgress}%</span>
-                      ) : activeClip?.backgroundFillStyle === 'split-screen' ? (
-                        <span className="badge-subtle">Dual Speaker Crop</span>
                       ) : activeClip?.subjectFocus?.label ? (
                         <span className="badge-subtle">{activeClip.subjectFocus.label}</span>
                       ) : null}
@@ -4413,23 +4525,43 @@ export const App: React.FC = () => {
                         borderRadius: 6,
                         overflow: 'hidden',
                         border: '1px solid var(--border-subtle)',
-                        cursor: 'crosshair',
+                        cursor: draggingSpeaker ? 'grabbing' : 'crosshair',
                       }}
                       onMouseDown={(e) => {
                         setIsDraggingCrop(true);
                         handlePointerOnSourceVideo(e, false);
                       }}
                       onMouseMove={(e) => {
+                        if (draggingSpeaker && sourceOverlayWrapRef.current) {
+                          const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
+                          const nx = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
+                          const ny = Math.max(0.05, Math.min(0.95, (e.clientY - rect.top) / rect.height));
+                          updateSpeakerPositionOnClip(draggingSpeaker, nx, ny);
+                          return;
+                        }
                         if (isDraggingCrop) handlePointerOnSourceVideo(e, false);
                       }}
                       onMouseUp={(e) => {
+                        if (draggingSpeaker) {
+                          setDraggingSpeaker(null);
+                          setIsDraggingCrop(false);
+                          return;
+                        }
                         if (isDraggingCrop) {
                           setIsDraggingCrop(false);
                           handlePointerOnSourceVideo(e, true);
                         }
                       }}
-                      onMouseLeave={() => setIsDraggingCrop(false)}
-                      title="Click any subject to lock 9:16 crop"
+                      onMouseLeave={() => {
+                        setDraggingSpeaker(null);
+                        setIsDraggingCrop(false);
+                      }}
+                      title={
+                        activeClip?.backgroundFillStyle === 'split-screen' ||
+                        activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+                          ? 'Drag Speaker A or Speaker B box freely anywhere on the video'
+                          : 'Click any subject to lock 9:16 crop'
+                      }
                     >
                       <video
                         ref={videoRef}
@@ -4520,79 +4652,158 @@ export const App: React.FC = () => {
                           );
                         })}
 
-                      {/* Dual Split-Screen Crop Overlays OR Single 9:16 Crop Guide */}
-                      {activeClip?.backgroundFillStyle === 'split-screen' ? (
+                      {/* Freely Draggable Speaker A & Speaker B Selectors OR Single 9:16 Crop Guide */}
+                      {activeClip?.backgroundFillStyle === 'split-screen' ||
+                      activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
                         (() => {
                           const isVert = nativeDims.width < nativeDims.height;
+                          const defaultY = isVert ? 0.39 : 0.44;
                           const fineX = activeClip?.trackingOffsetX || 0;
-                          const leftCenter = Math.max(0.15, Math.min(0.46, 0.26 + fineX));
-                          const rightCenter = Math.max(0.54, Math.min(0.85, 0.74 + fineX));
-                          const boxW = isVert ? 0.5 : 0.46;
-                          const boxH = isVert ? 0.25 : 0.72;
-                          const centerY = isVert ? 0.39 : 0.44;
-                          const topY = Math.max(0, Math.min(1 - boxH, centerY - boxH / 2));
-                          const leftX = Math.max(0, Math.min(1 - boxW, leftCenter - boxW / 2));
-                          const rightX = Math.max(0, Math.min(1 - boxW, rightCenter - boxW / 2));
+                          const spkAX = Math.max(
+                            0.06,
+                            Math.min(0.94, (activeClip?.speakerAX ?? 0.26) + fineX)
+                          );
+                          const spkAY = Math.max(
+                            0.06,
+                            Math.min(0.94, activeClip?.speakerAY ?? defaultY)
+                          );
+                          const spkBX = Math.max(
+                            0.06,
+                            Math.min(0.94, (activeClip?.speakerBX ?? 0.74) + fineX)
+                          );
+                          const spkBY = Math.max(
+                            0.06,
+                            Math.min(0.94, activeClip?.speakerBY ?? defaultY)
+                          );
+
+                          const boxW = isVert ? 0.46 : 0.44;
+                          const boxH = isVert ? 0.24 : 0.68;
+                          const leftBoxX = Math.max(0, Math.min(1 - boxW, spkAX - boxW / 2));
+                          const leftBoxY = Math.max(0, Math.min(1 - boxH, spkAY - boxH / 2));
+                          const rightBoxX = Math.max(0, Math.min(1 - boxW, spkBX - boxW / 2));
+                          const rightBoxY = Math.max(0, Math.min(1 - boxH, spkBY - boxH / 2));
+
+                          const isSelA = selectedSpeakerTarget === 'A' || draggingSpeaker === 'A';
+                          const isSelB = selectedSpeakerTarget === 'B' || draggingSpeaker === 'B';
 
                           return (
                             <>
+                              {/* Draggable Speaker A Selector Box */}
                               <div
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedSpeakerTarget('A');
+                                  setDraggingSpeaker('A');
+                                }}
                                 style={{
                                   position: 'absolute',
-                                  left: `${leftX * 100}%`,
-                                  top: `${topY * 100}%`,
+                                  left: `${leftBoxX * 100}%`,
+                                  top: `${leftBoxY * 100}%`,
                                   width: `${boxW * 100}%`,
                                   height: `${boxH * 100}%`,
-                                  border: '1.5px solid #fafafa',
-                                  background: 'rgba(255, 255, 255, 0.03)',
-                                  pointerEvents: 'none',
+                                  border: isSelA
+                                    ? '2px solid #fafafa'
+                                    : '1.5px dashed rgba(250, 250, 250, 0.75)',
+                                  background: isSelA
+                                    ? 'rgba(255, 255, 255, 0.08)'
+                                    : 'rgba(255, 255, 255, 0.03)',
+                                  cursor: draggingSpeaker === 'A' ? 'grabbing' : 'grab',
+                                  zIndex: isSelA ? 6 : 5,
+                                  userSelect: 'none',
                                 }}
+                                title="Drag freely to position Speaker A (Top Panel)"
                               >
                                 <div
                                   style={{
                                     position: 'absolute',
                                     top: 3,
                                     left: 3,
-                                    background: 'rgba(9, 9, 11, 0.85)',
-                                    border: '1px solid rgba(255,255,255,0.2)',
-                                    color: '#fafafa',
-                                    fontSize: 9,
+                                    background: isSelA ? '#fafafa' : 'rgba(9, 9, 11, 0.88)',
+                                    border: '1px solid rgba(255,255,255,0.25)',
+                                    color: isSelA ? '#09090b' : '#fafafa',
+                                    fontSize: 9.5,
+                                    fontWeight: 700,
                                     fontFamily: 'var(--font-mono)',
-                                    padding: '1px 5px',
+                                    padding: '1px 6px',
                                     borderRadius: 3,
+                                    pointerEvents: 'none',
                                   }}
                                 >
-                                  TOP · SPEAKER A
+                                  SPEAKER A · DRAG
                                 </div>
+                                <div
+                                  style={{
+                                    position: 'absolute',
+                                    left: '50%',
+                                    top: '50%',
+                                    transform: 'translate(-50%, -50%)',
+                                    width: 10,
+                                    height: 10,
+                                    borderRadius: '50%',
+                                    border: '1.5px solid #fafafa',
+                                    background: 'rgba(9, 9, 11, 0.75)',
+                                    pointerEvents: 'none',
+                                  }}
+                                />
                               </div>
+
+                              {/* Draggable Speaker B Selector Box */}
                               <div
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedSpeakerTarget('B');
+                                  setDraggingSpeaker('B');
+                                }}
                                 style={{
                                   position: 'absolute',
-                                  left: `${rightX * 100}%`,
-                                  top: `${topY * 100}%`,
+                                  left: `${rightBoxX * 100}%`,
+                                  top: `${rightBoxY * 100}%`,
                                   width: `${boxW * 100}%`,
                                   height: `${boxH * 100}%`,
-                                  border: '1.5px solid #a1a1aa',
-                                  background: 'rgba(255, 255, 255, 0.03)',
-                                  pointerEvents: 'none',
+                                  border: isSelB
+                                    ? '2px solid #fafafa'
+                                    : '1.5px dashed rgba(212, 212, 216, 0.75)',
+                                  background: isSelB
+                                    ? 'rgba(255, 255, 255, 0.08)'
+                                    : 'rgba(255, 255, 255, 0.03)',
+                                  cursor: draggingSpeaker === 'B' ? 'grabbing' : 'grab',
+                                  zIndex: isSelB ? 6 : 5,
+                                  userSelect: 'none',
                                 }}
+                                title="Drag freely to position Speaker B (Bottom Panel)"
                               >
                                 <div
                                   style={{
                                     position: 'absolute',
                                     top: 3,
                                     right: 3,
-                                    background: 'rgba(9, 9, 11, 0.85)',
-                                    border: '1px solid rgba(255,255,255,0.2)',
-                                    color: '#e4e4e7',
-                                    fontSize: 9,
+                                    background: isSelB ? '#fafafa' : 'rgba(9, 9, 11, 0.88)',
+                                    border: '1px solid rgba(255,255,255,0.25)',
+                                    color: isSelB ? '#09090b' : '#e4e4e7',
+                                    fontSize: 9.5,
+                                    fontWeight: 700,
                                     fontFamily: 'var(--font-mono)',
-                                    padding: '1px 5px',
+                                    padding: '1px 6px',
                                     borderRadius: 3,
+                                    pointerEvents: 'none',
                                   }}
                                 >
-                                  BOTTOM · SPEAKER B
+                                  SPEAKER B · DRAG
                                 </div>
+                                <div
+                                  style={{
+                                    position: 'absolute',
+                                    left: '50%',
+                                    top: '50%',
+                                    transform: 'translate(-50%, -50%)',
+                                    width: 10,
+                                    height: 10,
+                                    borderRadius: '50%',
+                                    border: '1.5px solid #e4e4e7',
+                                    background: 'rgba(9, 9, 11, 0.75)',
+                                    pointerEvents: 'none',
+                                  }}
+                                />
                               </div>
                             </>
                           );

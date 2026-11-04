@@ -222,6 +222,10 @@ export interface GeneratedClip {
   trackingSmoothing: number;
   zoomScale: number;
   backgroundFillStyle?: BackgroundFillStyle;
+  speakerAX?: number; // Custom normalized 0..1 X center for Speaker A (default 0.26)
+  speakerAY?: number; // Custom normalized 0..1 Y center for Speaker A (default 0.39 vertical / 0.44 horizontal)
+  speakerBX?: number; // Custom normalized 0..1 X center for Speaker B (default 0.74)
+  speakerBY?: number; // Custom normalized 0..1 Y center for Speaker B (default 0.39 vertical / 0.44 horizontal)
   playbackSpeed?: number;
   captionText: string;
   captionStyle: CaptionStyleId;

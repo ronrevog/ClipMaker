@@ -813,10 +813,21 @@ export function applyTwoSpeakerEditMode(
   source: SourceVideoAsset,
   mode: 'split-screen' | 'auto-switch' | 'blurred' | 'black'
 ): GeneratedClip {
+  const isVerticalSource = (source.width || 1920) < (source.height || 1080);
+  const defaultY = isVerticalSource ? 0.39 : 0.44;
+  const spkAX = clip.speakerAX ?? 0.26;
+  const spkAY = clip.speakerAY ?? defaultY;
+  const spkBX = clip.speakerBX ?? 0.74;
+  const spkBY = clip.speakerBY ?? defaultY;
+
   if (mode === 'split-screen') {
     return {
       ...clip,
       backgroundFillStyle: 'split-screen',
+      speakerAX: spkAX,
+      speakerAY: spkAY,
+      speakerBX: spkBX,
+      speakerBY: spkBY,
       zoomScale: 1.0,
       subCuts: clip.subCuts.map((c) => ({ ...c, zoom: 1.0, cropBiasX: 0 })),
     };
@@ -837,26 +848,28 @@ export function applyTwoSpeakerEditMode(
     workingClip = snapCutsToAudioBeats(workingClip, source, targetInterval).updatedClip;
   }
 
-  const isVerticalSource = (source.width || 1920) < (source.height || 1080);
   const singleSpeakerZoom = isVerticalSource ? 1.92 : Math.max(1.18, workingClip.zoomScale);
-  const speakerAnchorY = isVerticalSource ? 0.41 : 0.46;
+  const speakerAnchorY = (spkAY + spkBY) / 2;
 
   const switchedSubCuts: SubCut[] = workingClip.subCuts.map((cut, idx) => {
     const isLeftSpeaker = idx % 2 === 0;
-    // Anchor is fixed at centerX = 0.50, so -0.24 locks onto Left Speaker (x=0.26) and +0.24 locks onto Right Speaker (x=0.74)
-    const bias = isLeftSpeaker ? -0.24 : 0.24;
+    const bias = isLeftSpeaker ? spkAX - 0.5 : spkBX - 0.5;
     const speakerTag = isLeftSpeaker ? 'Speaker A (Left)' : 'Speaker B (Right)';
 
     return {
       ...cut,
       zoom: singleSpeakerZoom,
-      cropBiasX: bias,
+      cropBiasX: Number(bias.toFixed(3)),
       label: `${speakerTag} [${formatShortTimestamp(cut.sourceStart)}–${formatShortTimestamp(cut.sourceEnd)}]`,
     };
   });
 
   return {
     ...workingClip,
+    speakerAX: spkAX,
+    speakerAY: spkAY,
+    speakerBX: spkBX,
+    speakerBY: spkBY,
     zoomScale: singleSpeakerZoom,
     backgroundFillStyle: 'blurred',
     trackingOffsetX: 0,
@@ -1030,14 +1043,18 @@ export function renderComposite9x16Frame(params: {
     const halfH = Math.floor(outH / 2);
     const panelAspect = outW / Math.max(1, halfH); // 9:8 aspect per speaker panel
 
-    // Lock Left Speaker (Top panel) to the left half (0.26) and Right Speaker (Bottom panel) to the right half (0.74)
-    // with optional Fine X Offset support so there is zero frame-to-frame jitter.
+    const defaultY = vw < vh ? 0.39 : Math.min(0.48, Math.max(0.34, cropY));
     const fineOffsetX = activeClip?.trackingOffsetX || 0;
-    const leftX = Math.max(0.15, Math.min(0.46, 0.26 + fineOffsetX));
-    const rightX = Math.max(0.54, Math.min(0.85, 0.74 + fineOffsetX));
-
-    // On vertical 2-speaker videos (like IMG_0606.MOV 720x1280), speakers sit in the upper-middle band (y ~ 0.39) above the table
-    const speakerCenterY = vw < vh ? 0.39 : Math.min(0.48, Math.max(0.34, cropY));
+    const leftX = Math.max(
+      0.06,
+      Math.min(0.94, (activeClip?.speakerAX ?? 0.26) + fineOffsetX)
+    );
+    const leftY = Math.max(0.06, Math.min(0.94, activeClip?.speakerAY ?? defaultY));
+    const rightX = Math.max(
+      0.06,
+      Math.min(0.94, (activeClip?.speakerBX ?? 0.74) + fineOffsetX)
+    );
+    const rightY = Math.max(0.06, Math.min(0.94, activeClip?.speakerBY ?? defaultY));
 
     const drawSpeakerPanel = (
       centerX: number,
@@ -1088,10 +1105,10 @@ export function renderComposite9x16Frame(params: {
       ctx.restore();
     };
 
-    // Top Panel: Speaker A (Left)
-    drawSpeakerPanel(leftX, speakerCenterY, 0, halfH, 'SPEAKER A');
-    // Bottom Panel: Speaker B (Right)
-    drawSpeakerPanel(rightX, speakerCenterY, halfH, outH - halfH, 'SPEAKER B');
+    // Top Panel: Speaker A
+    drawSpeakerPanel(leftX, leftY, 0, halfH, 'SPEAKER A');
+    // Bottom Panel: Speaker B
+    drawSpeakerPanel(rightX, rightY, halfH, outH - halfH, 'SPEAKER B');
 
     // Clean divider line between Top & Bottom speaker panels
     ctx.save();
