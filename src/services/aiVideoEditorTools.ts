@@ -202,7 +202,7 @@ export async function transcribeClipAudioWithAI(params: {
     const pct = Math.min(98, Math.round(((b + 1) / totalChunks) * 100));
 
     onStatus?.(
-      `🎙️ Transcribing Audio (${batchIndices[0].chunkIdx + 1}–${batchIndices[batchIndices.length - 1].chunkIdx + 1}/${totalChunks} • ${formatShortTimestamp(firstStart)}–${formatShortTimestamp(lastEnd)}) with Gemini 4 Argon...`
+      `Transcribing audio (${batchIndices[0].chunkIdx + 1}–${batchIndices[batchIndices.length - 1].chunkIdx + 1}/${totalChunks} · ${formatShortTimestamp(firstStart)}–${formatShortTimestamp(lastEnd)})`
     );
 
     const batchResults = await Promise.all(
