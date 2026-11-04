@@ -14,6 +14,7 @@ import {
 function getSupportedMp4MimeType(): string | null {
   if (typeof MediaRecorder === 'undefined') return null;
   const mp4Candidates = [
+    'video/mp4;codecs=avc1.640029,mp4a.40.2',
     'video/mp4;codecs=avc1.640028,mp4a.40.2',
     'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
     'video/mp4;codecs=avc1,mp4a.40.2',
@@ -36,7 +37,8 @@ function getSupportedMp4MimeType(): string | null {
 async function extractOfflineClipAudioBuffer(
   sourceUrl: string,
   cutsToRender: SubCut[],
-  defaultSpeed: number
+  defaultSpeed: number,
+  fps: number
 ): Promise<AudioBuffer | null> {
   try {
     const resp = await fetch(sourceUrl);
@@ -56,17 +58,15 @@ async function extractOfflineClipAudioBuffer(
     const sampleRate = decoded.sampleRate || 48000;
     const numChannels = Math.min(2, Math.max(1, decoded.numberOfChannels || 2));
 
-    // Calculate total output frames across all subCuts accounting for playback speed
+    // Match each cut's exact output frame count so audio and video durations are 100% sample-locked
     const cutRanges = cutsToRender.map((cut) => {
       const spd = Math.max(0.25, Math.min(4.0, cut.speed || defaultSpeed || 1.0));
+      const srcDur = Math.max(0.05, cut.sourceEnd - cut.sourceStart);
+      const cutFrames = Math.max(1, Math.round((srcDur / spd) * fps));
+      const exactOutSec = cutFrames / fps;
       const startSample = Math.max(0, Math.floor(cut.sourceStart * sampleRate));
-      const endSample = Math.min(
-        decoded.length,
-        Math.max(startSample + 1, Math.floor(cut.sourceEnd * sampleRate))
-      );
-      const srcLen = Math.max(0, endSample - startSample);
-      const outLen = Math.max(1, Math.floor(srcLen / spd));
-      return { startSample, endSample, srcLen, outLen, spd };
+      const outLen = Math.max(1, Math.round(exactOutSec * sampleRate));
+      return { startSample, outLen, spd };
     });
 
     const totalOutSamples = cutRanges.reduce((acc, r) => acc + r.outLen, 0);
@@ -81,21 +81,22 @@ async function extractOfflineClipAudioBuffer(
       let writeOffset = 0;
 
       for (const range of cutRanges) {
-        const { startSample, srcLen, outLen, spd } = range;
+        const { startSample, outLen, spd } = range;
         if (Math.abs(spd - 1.0) < 0.01) {
-          const slice = srcChannel.subarray(startSample, startSample + outLen);
+          const safeEnd = Math.min(srcChannel.length, startSample + outLen);
+          const slice = srcChannel.subarray(startSample, safeEnd);
           dstChannel.set(slice, writeOffset);
         } else {
           for (let i = 0; i < outLen; i++) {
             const srcIdx = Math.min(
-              decoded.length - 1,
+              srcChannel.length - 1,
               startSample + Math.floor(i * spd)
             );
             dstChannel[writeOffset + i] = srcChannel[srcIdx] || 0;
           }
         }
-        // Apply 3ms micro-fade at cut boundaries to prevent clicks
-        const fadeLen = Math.min(Math.floor(sampleRate * 0.003), Math.floor(outLen / 4));
+        // Apply 4ms micro-fade at cut boundaries to eliminate any click/pop between jump cuts
+        const fadeLen = Math.min(Math.floor(sampleRate * 0.004), Math.floor(outLen / 4));
         for (let f = 0; f < fadeLen; f++) {
           const gain = f / fadeLen;
           dstChannel[writeOffset + f] *= gain;
@@ -113,9 +114,14 @@ async function extractOfflineClipAudioBuffer(
 }
 
 /**
- * High-speed, 100% silent (discreet) offline renderer & MP4 exporter.
- * Uses WebCodecs (`VideoEncoder` + `AudioEncoder`) + `mp4-muxer` to render frames and audio
- * as fast as hardware allows WITHOUT playing sound through the user's speakers.
+ * Discreet (100% silent), frame-accurate 9:16 MP4 exporter.
+ *
+ * Why previous exports glitched or cut off early:
+ * 1. Seeking (`videoEl.currentTime = t`) on every single frame flushes the browser's H.264 GOP
+ *    decoder buffer on inter-frame videos, causing stale/half-decoded frames and skipped segments.
+ * 2. Instead, we seek ONCE to `cut.sourceStart`, wait until the decoder frame is ready (`readyState >= 2`),
+ *    and stream forward sequentially through each cut (`cut.sourceStart -> cut.sourceEnd`) with
+ *    `videoEl.muted = true` (zero speaker output!) while locking output frames to exact 30fps timestamps.
  */
 export async function exportClipTo9x16Video(
   source: SourceVideoAsset,
@@ -129,13 +135,15 @@ export async function exportClipTo9x16Video(
   const outWidth = 720;
   const outHeight = 1280;
   const fps = 30;
+  const frameDurationUs = Math.round(1_000_000 / fps);
+
   const canvas = document.createElement('canvas');
   canvas.width = outWidth;
   canvas.height = outHeight;
-  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true }) || canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('Could not initialize 9:16 export canvas');
 
-  // Offscreen hidden video element — ALWAYS muted so export is 100% discreet and silent!
+  // Offscreen hidden video element — strictly muted so zero audio ever plays through speakers
   const videoEl = document.createElement('video');
   videoEl.src = source.url;
   videoEl.muted = true;
@@ -144,8 +152,13 @@ export async function exportClipTo9x16Video(
   videoEl.preload = 'auto';
 
   await new Promise<void>((res, rej) => {
-    videoEl.onloadeddata = () => res();
+    const onReady = () => {
+      videoEl.removeEventListener('loadeddata', onReady);
+      res();
+    };
+    videoEl.addEventListener('loadeddata', onReady);
     videoEl.onerror = () => rej(new Error('Failed to load source video for export'));
+    videoEl.load();
   });
 
   const vw = videoEl.videoWidth || source.width || 1920;
@@ -238,332 +251,375 @@ export async function exportClipTo9x16Video(
     });
   };
 
-  const seekVideoTo = async (targetTime: number) => {
-    const clamped = Math.max(0, Math.min((videoEl.duration || source.duration) - 0.001, targetTime));
-    if (Math.abs(videoEl.currentTime - clamped) < 0.008) return;
-    await new Promise<void>((res) => {
-      let resolved = false;
-      const done = () => {
-        if (resolved) return;
-        resolved = true;
-        videoEl.removeEventListener('seeked', done);
-        res();
-      };
-      videoEl.addEventListener('seeked', done);
-      videoEl.currentTime = clamped;
-      setTimeout(done, 180);
-    });
+  /**
+   * Seeks `videoEl` cleanly to the start of a cut and waits until the frame is fully decoded (`readyState >= 2`).
+   * Never used mid-cut so the H.264 GOP buffer is never flushed during a cut.
+   */
+  const seekToCutStart = async (targetTime: number) => {
+    const maxDur = Math.max(0.1, (videoEl.duration || source.duration) - 0.01);
+    const clamped = Math.max(0, Math.min(maxDur, targetTime));
+    videoEl.pause();
+    if (Math.abs(videoEl.currentTime - clamped) > 0.02) {
+      await new Promise<void>((res) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          videoEl.removeEventListener('seeked', finish);
+          res();
+        };
+        videoEl.addEventListener('seeked', finish);
+        videoEl.currentTime = clamped;
+        setTimeout(finish, 2500);
+      });
+    }
+    // Wait until the decoded frame at `clamped` is ready to be drawn
+    let waitReady = 0;
+    while (videoEl.readyState < 2 && waitReady < 50) {
+      await new Promise<void>((r) => setTimeout(r, 20));
+      waitReady++;
+    }
   };
 
+  // Pre-calculate exact frame counts for each cut
+  const cutPlans = cutsToRender.map((cut) => {
+    const spd = Math.max(0.25, Math.min(4.0, cut.speed || defaultSpeed || 1.0));
+    const srcDur = Math.max(0.05, cut.sourceEnd - cut.sourceStart);
+    const cutFrames = Math.max(1, Math.round((srcDur / spd) * fps));
+    return { cut, spd, srcDur, cutFrames };
+  });
+  const totalClipFrames = Math.max(
+    1,
+    cutPlans.reduce((acc, p) => acc + p.cutFrames, 0)
+  );
+
   // ============================================================================
-  // PATH A (PRIMARY): HIGH-SPEED OFFLINE WEBCODECS + MP4-MUXER PIPELINE
+  // PATH A (PRIMARY): WEBCODECS + MP4-MUXER (100% Silent, Fast Sequential Stream)
   // ============================================================================
   if (typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
-    onProgress?.(2);
+    let encoderFailed = false;
+    try {
+      onProgress?.(2);
 
-    // 1. Extract and stitch audio buffer offline (100% silent, takes ~150ms)
-    const stitchedAudio = await extractOfflineClipAudioBuffer(
-      source.url,
-      cutsToRender,
-      defaultSpeed
-    );
+      // 1. Decode and stitch audio offline in memory (100% silent, sample-locked to cutPlans)
+      const stitchedAudio = await extractOfflineClipAudioBuffer(
+        source.url,
+        cutsToRender,
+        defaultSpeed,
+        fps
+      );
 
-    let audioCodecConfig: {
-      muxerCodec: 'aac' | 'opus';
-      encoderCodec: string;
-      sampleRate: number;
-      numberOfChannels: number;
-    } | null = null;
+      let audioCodecConfig: {
+        muxerCodec: 'aac' | 'opus';
+        encoderCodec: string;
+        sampleRate: number;
+        numberOfChannels: number;
+      } | null = null;
 
-    if (stitchedAudio && typeof AudioEncoder !== 'undefined' && typeof AudioData !== 'undefined') {
-      const sr = stitchedAudio.sampleRate;
-      const ch = stitchedAudio.numberOfChannels;
-      const aacCheck = await AudioEncoder.isConfigSupported({
-        codec: 'mp4a.40.2',
-        sampleRate: sr,
-        numberOfChannels: ch,
-        bitrate: 128_000,
-      }).catch(() => ({ supported: false }));
-
-      if (aacCheck.supported) {
-        audioCodecConfig = {
-          muxerCodec: 'aac',
-          encoderCodec: 'mp4a.40.2',
-          sampleRate: sr,
-          numberOfChannels: ch,
-        };
-      } else {
-        const opusCheck = await AudioEncoder.isConfigSupported({
-          codec: 'opus',
+      if (stitchedAudio && typeof AudioEncoder !== 'undefined' && typeof AudioData !== 'undefined') {
+        const sr = stitchedAudio.sampleRate;
+        const ch = stitchedAudio.numberOfChannels;
+        const aacCheck = await AudioEncoder.isConfigSupported({
+          codec: 'mp4a.40.2',
           sampleRate: sr,
           numberOfChannels: ch,
           bitrate: 128_000,
         }).catch(() => ({ supported: false }));
-        if (opusCheck.supported) {
+
+        if (aacCheck.supported) {
           audioCodecConfig = {
-            muxerCodec: 'opus',
-            encoderCodec: 'opus',
+            muxerCodec: 'aac',
+            encoderCodec: 'mp4a.40.2',
             sampleRate: sr,
             numberOfChannels: ch,
           };
+        } else {
+          const opusCheck = await AudioEncoder.isConfigSupported({
+            codec: 'opus',
+            sampleRate: sr,
+            numberOfChannels: ch,
+            bitrate: 128_000,
+          }).catch(() => ({ supported: false }));
+          if (opusCheck.supported) {
+            audioCodecConfig = {
+              muxerCodec: 'opus',
+              encoderCodec: 'opus',
+              sampleRate: sr,
+              numberOfChannels: ch,
+            };
+          }
         }
       }
-    }
 
-    // 2. Configure H.264 hardware VideoEncoder + MP4 Muxer
-    const target = new ArrayBufferTarget();
-    const mp4Muxer = new Muxer({
-      target,
-      video: {
-        codec: 'avc',
-        width: outWidth,
-        height: outHeight,
-        frameRate: fps,
-      },
-      audio: audioCodecConfig
-        ? {
-            codec: audioCodecConfig.muxerCodec,
-            numberOfChannels: audioCodecConfig.numberOfChannels,
-            sampleRate: audioCodecConfig.sampleRate,
-          }
-        : undefined,
-      fastStart: 'in-memory',
-    });
+      // 2. Configure H.264 Level 4.1 / 4.0 VideoEncoder + MP4 Muxer
+      // Note: Level 4.1 (avc1.640029 / avc1.4d0029 / avc1.420029) officially supports 720x1280 vertical height!
+      const codecCandidates = [
+        'avc1.640029',
+        'avc1.4d0029',
+        'avc1.420029',
+        'avc1.640028',
+        'avc1.4d0028',
+        'avc1.420028',
+        'avc1.42001f',
+      ];
+      let selectedVideoCodec = 'avc1.420029';
+      for (const c of codecCandidates) {
+        const sup = await VideoEncoder.isConfigSupported({
+          codec: c,
+          width: outWidth,
+          height: outHeight,
+          bitrate: 6_000_000,
+          framerate: fps,
+        }).catch(() => ({ supported: false }));
+        if (sup.supported) {
+          selectedVideoCodec = c;
+          break;
+        }
+      }
 
-    const videoEncoder = new VideoEncoder({
-      output: (chunk, meta) => {
-        mp4Muxer.addVideoChunk(chunk, meta);
-      },
-      error: (e) => console.warn('WebCodecs VideoEncoder error:', e),
-    });
+      const target = new ArrayBufferTarget();
+      const mp4Muxer = new Muxer({
+        target,
+        video: {
+          codec: 'avc',
+          width: outWidth,
+          height: outHeight,
+          frameRate: fps,
+        },
+        audio: audioCodecConfig
+          ? {
+              codec: audioCodecConfig.muxerCodec,
+              numberOfChannels: audioCodecConfig.numberOfChannels,
+              sampleRate: audioCodecConfig.sampleRate,
+            }
+          : undefined,
+        fastStart: 'in-memory',
+      });
 
-    // Pick best supported H.264 profile (High / Main / Baseline) with hardware acceleration
-    const codecCandidates = ['avc1.640028', 'avc1.4d0028', 'avc1.42001f', 'avc1.42E01E'];
-    let selectedVideoCodec = 'avc1.42001f';
-    for (const c of codecCandidates) {
-      const sup = await VideoEncoder.isConfigSupported({
-        codec: c,
+      const videoEncoder = new VideoEncoder({
+        output: (chunk, meta) => {
+          mp4Muxer.addVideoChunk(chunk, meta);
+        },
+        error: (e) => {
+          console.warn('WebCodecs VideoEncoder error:', e);
+          encoderFailed = true;
+        },
+      });
+
+      videoEncoder.configure({
+        codec: selectedVideoCodec,
         width: outWidth,
         height: outHeight,
         bitrate: 6_000_000,
         framerate: fps,
-      }).catch(() => ({ supported: false }));
-      if (sup.supported) {
-        selectedVideoCodec = c;
-        break;
-      }
-    }
+      });
 
-    videoEncoder.configure({
-      codec: selectedVideoCodec,
-      width: outWidth,
-      height: outHeight,
-      bitrate: 6_000_000,
-      framerate: fps,
-      hardwareAcceleration: 'prefer-hardware',
-    });
-
-    // 3. Encode full stitched audio track offline in memory (completes in ~100ms)
-    if (stitchedAudio && audioCodecConfig) {
-      try {
-        const audioEncoder = new AudioEncoder({
-          output: (chunk, meta) => {
-            mp4Muxer.addAudioChunk(chunk, meta);
-          },
-          error: (e) => console.warn('WebCodecs AudioEncoder error:', e),
-        });
-        audioEncoder.configure({
-          codec: audioCodecConfig.encoderCodec,
-          sampleRate: audioCodecConfig.sampleRate,
-          numberOfChannels: audioCodecConfig.numberOfChannels,
-          bitrate: 128_000,
-        });
-
-        const totalSamples = stitchedAudio.length;
-        const chCount = audioCodecConfig.numberOfChannels;
-        const sr = audioCodecConfig.sampleRate;
-        const chunkFrames = 4096;
-
-        for (let offset = 0; offset < totalSamples; offset += chunkFrames) {
-          const framesInChunk = Math.min(chunkFrames, totalSamples - offset);
-          const planarData = new Float32Array(framesInChunk * chCount);
-          for (let ch = 0; ch < chCount; ch++) {
-            const channelSlice = stitchedAudio
-              .getChannelData(ch)
-              .subarray(offset, offset + framesInChunk);
-            planarData.set(channelSlice, ch * framesInChunk);
-          }
-          const timestampUs = Math.round((offset / sr) * 1_000_000);
-          const audioData = new AudioData({
-            format: 'f32-planar',
-            sampleRate: sr,
-            numberOfFrames: framesInChunk,
-            numberOfChannels: chCount,
-            timestamp: timestampUs,
-            data: planarData,
+      // 3. Encode full stitched audio track offline
+      if (stitchedAudio && audioCodecConfig) {
+        try {
+          const audioEncoder = new AudioEncoder({
+            output: (chunk, meta) => {
+              mp4Muxer.addAudioChunk(chunk, meta);
+            },
+            error: (e) => console.warn('WebCodecs AudioEncoder error:', e),
           });
-          audioEncoder.encode(audioData);
-          audioData.close();
+          audioEncoder.configure({
+            codec: audioCodecConfig.encoderCodec,
+            sampleRate: audioCodecConfig.sampleRate,
+            numberOfChannels: audioCodecConfig.numberOfChannels,
+            bitrate: 128_000,
+          });
+
+          const totalSamples = stitchedAudio.length;
+          const chCount = audioCodecConfig.numberOfChannels;
+          const sr = audioCodecConfig.sampleRate;
+          const chunkFrames = 4096;
+
+          for (let offset = 0; offset < totalSamples; offset += chunkFrames) {
+            const framesInChunk = Math.min(chunkFrames, totalSamples - offset);
+            const planarData = new Float32Array(framesInChunk * chCount);
+            for (let ch = 0; ch < chCount; ch++) {
+              const channelSlice = stitchedAudio
+                .getChannelData(ch)
+                .subarray(offset, offset + framesInChunk);
+              planarData.set(channelSlice, ch * framesInChunk);
+            }
+            const timestampUs = Math.round((offset / sr) * 1_000_000);
+            const audioData = new AudioData({
+              format: 'f32-planar',
+              sampleRate: sr,
+              numberOfFrames: framesInChunk,
+              numberOfChannels: chCount,
+              timestamp: timestampUs,
+              data: planarData,
+            });
+            audioEncoder.encode(audioData);
+            audioData.close();
+          }
+
+          await audioEncoder.flush();
+          audioEncoder.close();
+        } catch (audioErr) {
+          console.warn('Offline audio encoding warning:', audioErr);
         }
-
-        await audioEncoder.flush();
-        audioEncoder.close();
-      } catch (audioErr) {
-        console.warn('Offline audio encoding warning:', audioErr);
       }
-    }
 
-    onProgress?.(8);
+      onProgress?.(6);
 
-    // 4. High-Speed Offline Video Frame Rendering & Encoding
-    // Build the exact frame schedule across all cuts
-    interface FrameTask {
-      sourceTime: number;
-      clipRelTime: number;
-      cut: SubCut;
-    }
-    const frameSchedule: FrameTask[] = [];
-    let timelineCursor = 0;
+      // 4. Sequential Forward Hardware Decoding per SubCut (Zero Mid-Cut Seeks, Zero Glitches, Full Duration)
+      let globalFrameIndex = 0;
 
-    for (const cut of cutsToRender) {
-      const spd = Math.max(0.25, Math.min(4.0, cut.speed || defaultSpeed || 1.0));
-      const srcDur = Math.max(0.05, cut.sourceEnd - cut.sourceStart);
-      const outDur = srcDur / spd;
-      const cutFrames = Math.max(1, Math.round(outDur * fps));
-
-      for (let f = 0; f < cutFrames; f++) {
-        const localOutSec = f / fps;
-        const sourceTime = Math.min(cut.sourceEnd, cut.sourceStart + localOutSec * spd);
-        const clipRelTime = timelineCursor + localOutSec;
-        frameSchedule.push({ sourceTime, clipRelTime, cut });
-      }
-      timelineCursor += outDur;
-    }
-
-    const totalFrames = Math.max(1, frameSchedule.length);
-    const frameDurationUs = Math.round(1_000_000 / fps);
-
-    // Benchmark first 4 seeks to decide between deterministic fast-seek vs 4x muted turbo-decode
-    await seekVideoTo(frameSchedule[0].sourceTime);
-    let seekTotalMs = 0;
-    const probeCount = Math.min(4, frameSchedule.length - 1);
-    for (let p = 1; p <= probeCount; p++) {
-      const t0 = performance.now();
-      await seekVideoTo(frameSchedule[p].sourceTime);
-      seekTotalMs += performance.now() - t0;
-    }
-    const avgSeekMs = probeCount > 0 ? seekTotalMs / probeCount : 8;
-
-    if (avgSeekMs <= 22) {
-      // Deterministic High-Speed Frame-Seek Pipeline (typically 60–180 fps, 2x–6x real-time)
-      for (let idx = 0; idx < totalFrames; idx++) {
-        const task = frameSchedule[idx];
-        await seekVideoTo(task.sourceTime);
-        draw9x16Frame(task.sourceTime, task.clipRelTime, task.cut);
-
-        const timestampUs = Math.round((idx * 1_000_000) / fps);
+      const encodeCurrentCanvasFrame = async () => {
+        if (encoderFailed || videoEncoder.state !== 'configured') return;
+        const timestampUs = Math.round((globalFrameIndex * 1_000_000) / fps);
         const vFrame = new VideoFrame(canvas, {
           timestamp: timestampUs,
           duration: frameDurationUs,
         });
-        videoEncoder.encode(vFrame, { keyFrame: idx % 30 === 0 });
+        videoEncoder.encode(vFrame, { keyFrame: globalFrameIndex % 30 === 0 });
         vFrame.close();
+        globalFrameIndex++;
 
-        // Keep hardware encoder queue healthy
-        if (videoEncoder.encodeQueueSize > 14) {
-          await new Promise<void>((r) => setTimeout(r, 4));
+        // Prevent GPU surface queue overflow on Windows MediaFoundation / macOS VideoToolbox
+        while (videoEncoder.encodeQueueSize > 4 && !encoderFailed) {
+          await new Promise<void>((r) => setTimeout(r, 5));
         }
 
-        if (idx % 4 === 0 || idx === totalFrames - 1) {
-          const pct = Math.min(98, 8 + Math.round(((idx + 1) / totalFrames) * 90));
+        if (globalFrameIndex % 3 === 0 || globalFrameIndex === totalClipFrames) {
+          const pct = Math.min(
+            98,
+            6 + Math.round((globalFrameIndex / totalClipFrames) * 92)
+          );
           onProgress?.(pct);
         }
-      }
-    } else {
-      // Long-GOP Video Container: Muted High-Speed Hardware Playback (up to 4x real-time, 100% silent)
-      let encodedFrameIndex = 0;
-      for (let i = 0; i < cutsToRender.length; i++) {
-        const cut = cutsToRender[i];
-        const spd = Math.max(0.25, Math.min(4.0, cut.speed || defaultSpeed || 1.0));
-        const srcDur = Math.max(0.05, cut.sourceEnd - cut.sourceStart);
-        const outDur = srcDur / spd;
-        const cutFrames = Math.max(1, Math.round(outDur * fps));
+      };
 
-        await seekVideoTo(cut.sourceStart);
-        // Play muted at high speed (up to 4x) so hardware decoder streams forward frames rapidly
-        const turboRate = Math.min(4.0, Math.max(1.5, spd * 3.0));
-        videoEl.muted = true;
-        videoEl.playbackRate = turboRate;
-        try {
-          await videoEl.play();
-        } catch {}
+      for (const plan of cutPlans) {
+        if (encoderFailed) break;
+        const { cut, spd, cutFrames } = plan;
 
-        for (let f = 0; f < cutFrames; f++) {
-          const targetSourceTime = Math.min(
-            cut.sourceEnd,
-            cut.sourceStart + (f / fps) * spd
-          );
-          const clipRelTime = cut.timelineStart + f / fps;
+        // Seek ONCE to the start of this cut and wait for decoded frame readiness
+        await seekToCutStart(cut.sourceStart);
 
-          // Wait briefly if hardware playback hasn't reached targetSourceTime yet
-          let waitLoops = 0;
-          while (
-            !videoEl.paused &&
-            !videoEl.ended &&
-            videoEl.currentTime < targetSourceTime - 0.015 &&
-            waitLoops < 25
-          ) {
-            await new Promise<void>((r) => setTimeout(r, 4));
-            waitLoops++;
-          }
-          if (Math.abs(videoEl.currentTime - targetSourceTime) > 0.18) {
-            await seekVideoTo(targetSourceTime);
-          }
+        // Draw and encode the initial frame of this cut immediately
+        let encodedInCut = 0;
+        draw9x16Frame(cut.sourceStart, cut.timelineStart, cut);
+        await encodeCurrentCanvasFrame();
+        encodedInCut = 1;
 
-          draw9x16Frame(videoEl.currentTime, clipRelTime, cut);
+        if (cutFrames > 1) {
+          // Stream forward sequentially at 1.6x muted speed so the H.264 decoder never drops a P/B frame
+          // and never flushes its reference buffer mid-cut!
+          const renderPlaybackRate = Math.min(2.0, Math.max(1.0, spd * 1.6));
+          videoEl.muted = true;
+          videoEl.volume = 0;
+          videoEl.playbackRate = renderPlaybackRate;
 
-          const timestampUs = Math.round((encodedFrameIndex * 1_000_000) / fps);
-          const vFrame = new VideoFrame(canvas, {
-            timestamp: timestampUs,
-            duration: frameDurationUs,
+          try {
+            await videoEl.play();
+          } catch {}
+
+          await new Promise<void>((resolveCut) => {
+            let busy = false;
+            const timer = setInterval(async () => {
+              if (busy) return;
+              busy = true;
+              try {
+                if (encoderFailed) {
+                  clearInterval(timer);
+                  resolveCut();
+                  return;
+                }
+
+                const curSourceTime = videoEl.currentTime;
+                const elapsedSrc = Math.max(0, curSourceTime - cut.sourceStart);
+                const elapsedOutSec = elapsedSrc / spd;
+                const targetFramesNow = Math.min(
+                  cutFrames,
+                  Math.floor(elapsedOutSec * fps) + 1
+                );
+
+                if (targetFramesNow > encodedInCut) {
+                  const relClipTime =
+                    cut.timelineStart + Math.min(cut.timelineEnd - cut.timelineStart, elapsedOutSec);
+                  draw9x16Frame(curSourceTime, relClipTime, cut);
+
+                  while (encodedInCut < targetFramesNow && !encoderFailed) {
+                    await encodeCurrentCanvasFrame();
+                    encodedInCut++;
+                  }
+                }
+
+                // Resume playback if browser paused it before reaching cut.sourceEnd
+                if (
+                  videoEl.paused &&
+                  !videoEl.ended &&
+                  curSourceTime < cut.sourceEnd - 0.03 &&
+                  encodedInCut < cutFrames
+                ) {
+                  videoEl.play().catch(() => {});
+                }
+
+                // Cut is complete when we have reached cut.sourceEnd or encoded all frames for this cut
+                if (
+                  encodedInCut >= cutFrames ||
+                  curSourceTime >= cut.sourceEnd - 0.015 ||
+                  videoEl.ended
+                ) {
+                  clearInterval(timer);
+                  resolveCut();
+                }
+              } finally {
+                busy = false;
+              }
+            }, 10);
           });
-          videoEncoder.encode(vFrame, { keyFrame: encodedFrameIndex % 30 === 0 });
-          vFrame.close();
-          encodedFrameIndex++;
 
-          if (videoEncoder.encodeQueueSize > 14) {
-            await new Promise<void>((r) => setTimeout(r, 4));
-          }
+          videoEl.pause();
 
-          if (encodedFrameIndex % 4 === 0) {
-            const pct = Math.min(
-              98,
-              8 + Math.round((encodedFrameIndex / totalFrames) * 90)
+          // Ensure exact frame count for this cut so audio/video stay 100% sample-locked
+          if (encodedInCut < cutFrames && !encoderFailed) {
+            draw9x16Frame(
+              Math.min(cut.sourceEnd, videoEl.currentTime),
+              cut.timelineEnd,
+              cut
             );
-            onProgress?.(pct);
+            while (encodedInCut < cutFrames && !encoderFailed) {
+              await encodeCurrentCanvasFrame();
+              encodedInCut++;
+            }
           }
         }
-        videoEl.pause();
       }
+
+      if (!encoderFailed) {
+        onProgress?.(99);
+        await videoEncoder.flush();
+        videoEncoder.close();
+        mp4Muxer.finalize();
+
+        const finalBlob = new Blob([mp4Muxer.target.buffer], { type: 'video/mp4' });
+        if (finalBlob.size > 1024) {
+          onProgress?.(100);
+          const downloadUrl = URL.createObjectURL(finalBlob);
+          const a = document.createElement('a');
+          a.href = downloadUrl;
+          const safeName = clip.name.replace(/[^a-z0-9_-]+/gi, '_');
+          a.download = `${safeName}_9x16.mp4`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(downloadUrl), 5000);
+          return;
+        }
+      } else {
+        try {
+          videoEncoder.close();
+        } catch {}
+      }
+    } catch (webCodecsErr) {
+      console.warn('WebCodecs export fallback triggered:', webCodecsErr);
     }
-
-    onProgress?.(99);
-    await videoEncoder.flush();
-    videoEncoder.close();
-    mp4Muxer.finalize();
-
-    const finalBlob = new Blob([mp4Muxer.target.buffer], { type: 'video/mp4' });
-    onProgress?.(100);
-    const downloadUrl = URL.createObjectURL(finalBlob);
-    const a = document.createElement('a');
-    a.href = downloadUrl;
-    const safeName = clip.name.replace(/[^a-z0-9_-]+/gi, '_');
-    a.download = `${safeName}_9x16.mp4`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(downloadUrl), 5000);
-    return;
   }
 
   // ============================================================================
@@ -610,7 +666,7 @@ export async function exportClipTo9x16Video(
     if (e.data && e.data.size > 0) chunks.push(e.data);
   };
 
-  await seekVideoTo(cutsToRender[0].sourceStart);
+  await seekToCutStart(cutsToRender[0].sourceStart);
   recorder.start(100);
 
   for (let i = 0; i < cutsToRender.length; i++) {
@@ -621,8 +677,7 @@ export async function exportClipTo9x16Video(
           recorder.pause();
         } catch {}
       }
-      videoEl.pause();
-      await seekVideoTo(cut.sourceStart);
+      await seekToCutStart(cut.sourceStart);
       if (recorder.state === 'paused') {
         try {
           recorder.resume();
@@ -630,10 +685,11 @@ export async function exportClipTo9x16Video(
       }
     }
 
+    videoEl.playbackRate = cut.speed || defaultSpeed || 1.0;
     await videoEl.play();
 
     await new Promise<void>((resolve) => {
-      const loop = () => {
+      const timer = setInterval(() => {
         const t = videoEl.currentTime;
         const clipRelTime = cut.timelineStart + Math.max(0, t - cut.sourceStart);
         const pct = Math.min(
@@ -643,13 +699,11 @@ export async function exportClipTo9x16Video(
         onProgress?.(pct);
         draw9x16Frame(t, clipRelTime, cut);
 
-        if (t >= cut.sourceEnd || videoEl.ended) {
+        if (t >= cut.sourceEnd - 0.015 || videoEl.ended) {
+          clearInterval(timer);
           resolve();
-          return;
         }
-        requestAnimationFrame(loop);
-      };
-      requestAnimationFrame(loop);
+      }, 16);
     });
   }
 
