@@ -3673,6 +3673,21 @@ export const App: React.FC = () => {
               Clone Style
             </button>
 
+            <button
+              className="btn"
+              style={{
+                borderColor: 'rgba(168, 85, 247, 0.65)',
+                background: 'rgba(168, 85, 247, 0.16)',
+                color: '#f3e8ff',
+              }}
+              onClick={() => setIsTranscriptEditorOpen(true)}
+              disabled={!activeSource}
+              title="Open window to edit video transcription and caption lines"
+            >
+              <FileText size={13} />
+              Edit Transcript
+            </button>
+
             <div className="studio-divider-v" />
 
             {/* Segmented AI Provider Selector */}
@@ -5882,6 +5897,12 @@ export const App: React.FC = () => {
                     <button
                       type="button"
                       className="btn btn-sm"
+                      style={{
+                        borderColor: 'rgba(168, 85, 247, 0.7)',
+                        background: 'rgba(168, 85, 247, 0.2)',
+                        color: '#f3e8ff',
+                        fontWeight: 600,
+                      }}
                       onClick={() => setIsTranscriptEditorOpen(true)}
                       title="Open window to edit full video transcription and caption lines"
                     >
