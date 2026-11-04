@@ -47,13 +47,17 @@ import {
 import {
   AIProviderId,
   AIProviderSettings,
+  AudioMasteringPresetId,
   BackgroundFillStyle,
   ClipCreationMode,
+  ColorGradeLutId,
   CopilotAttachment,
   CopilotChatMessage,
   CopilotRevisionSnapshot,
+  CutTransitionStyleId,
   EditingScheme,
   GeneratedClip,
+  LottieOverlayPresetId,
   SourceVideoAsset,
   SubCut,
   SubjectFocusConfig,
@@ -104,10 +108,17 @@ import {
   trackSubjectSignatureInVideoFrame,
 } from './services/subjectTracker';
 import { exportClipTo9x16Video } from './services/videoExporter';
+import {
+  detectActiveSpeakerTurnsWithLipSync,
+  ensureMediaPipeImageSegmenter,
+  inspectMp4ContainerWithMp4Box,
+  Mp4ContainerTelemetry,
+} from './services/sotaStudioEngines';
 import { AISettingsModal } from './components/AISettingsModal';
 import { ComplexAuthGate } from './components/ComplexAuthGate';
 import { ProjectsModal } from './components/ProjectsModal';
 import { TranscriptEditorModal } from './components/TranscriptEditorModal';
+import { WavesurferAudioTrack } from './components/WavesurferAudioTrack';
 import {
   ComplexAuthUser,
   getLastActiveProjectId,
@@ -362,6 +373,9 @@ export const App: React.FC = () => {
   const [isGeneratingClips, setIsGeneratingClips] = useState<boolean>(false);
   const [clipGenerationStage, setClipGenerationStage] = useState<string>('');
   const [clipGenerationProgress, setClipGenerationProgress] = useState<number>(0);
+  const [mp4ContainerTelemetry, setMp4ContainerTelemetry] =
+    useState<Mp4ContainerTelemetry | null>(null);
+  const [isRunningLipSyncSwitch, setIsRunningLipSyncSwitch] = useState<boolean>(false);
   const [editorialFocusInput, setEditorialFocusInput] = useState<string>('');
 
   // 7. Cut Copilot Chat State
@@ -1204,6 +1218,31 @@ export const App: React.FC = () => {
     [applyFocusToAllClips, nativeDims, updateActiveTimelineClip]
   );
 
+  // MediaPipe 478-Point FaceLandmarker Lip-Sync Active Speaker Auto-Switch
+  const handleRunLipSyncSpeakerAutoSwitch = useCallback(async () => {
+    if (!activeSource || !activeClip || isRunningLipSyncSwitch) return;
+    setIsRunningLipSyncSwitch(true);
+    setMarkerNotice('Scanning 478-pt lip landmarks for active speaker turns...');
+    try {
+      const res = await detectActiveSpeakerTurnsWithLipSync(
+        activeSource,
+        activeClip,
+        (msg: string) => {
+          setMarkerNotice(msg);
+        }
+      );
+      updateActiveTimelineClip(() => res.updatedClip);
+      setMarkerNotice(
+        `Lip-Sync Auto-Switch created ${res.switchesCount} speaker turns`
+      );
+    } catch (err: any) {
+      setMarkerNotice(`Lip-Sync fallback: ${err?.message || 'Could not scan'}`);
+    } finally {
+      setIsRunningLipSyncSwitch(false);
+      setTimeout(() => setMarkerNotice(null), 3000);
+    }
+  }, [activeSource, activeClip, isRunningLipSyncSwitch, updateActiveTimelineClip]);
+
   // Click or Drag directly on the Source Video to pick ANY object and track it across the clip!
   const handlePointerOnSourceVideo = (
     e: React.MouseEvent<HTMLDivElement>,
@@ -1897,6 +1936,12 @@ export const App: React.FC = () => {
       setCurrentProjectId(newProjId);
       setCurrentProjectName(cleanTitle);
       userFocusAnchorsRef.current = [];
+      setMp4ContainerTelemetry(null);
+
+      // Inspect MP4 container GOP keyframes & codec profile via MP4Box.js in background
+      inspectMp4ContainerWithMp4Box(file).then((info) => {
+        if (info) setMp4ContainerTelemetry(info);
+      });
 
       // Try uploading video to Vercel Blob in background if configured
       tryUploadVideoToVercelBlob(file.name, file).then((cloudUrl) => {
@@ -4572,6 +4617,14 @@ export const App: React.FC = () => {
                         <span className="badge-subtle">
                           {nativeDims.width}×{nativeDims.height}
                         </span>
+                        {mp4ContainerTelemetry && (
+                          <span
+                            className="badge-subtle"
+                            title="MP4Box.js Container & GOP Sample Inspection"
+                          >
+                            {mp4ContainerTelemetry.videoCodec} · {mp4ContainerTelemetry.audioCodec}
+                          </span>
+                        )}
                       </div>
 
                       {activeClip?.backgroundFillStyle === 'split-screen' ||
@@ -5844,6 +5897,17 @@ export const App: React.FC = () => {
                       Auto-Switch Speakers
                     </button>
 
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={isRunningLipSyncSwitch}
+                      onClick={handleRunLipSyncSpeakerAutoSwitch}
+                      title="MediaPipe 478-point Lip-Sync Mouth Aspect Ratio (MAR) active speaker turn detection"
+                    >
+                      <Wand2 size={11} />
+                      {isRunningLipSyncSwitch ? 'Lip-Sync Scan...' : 'Lip-Sync Switch'}
+                    </button>
+
                     <div className="studio-divider-v" />
 
                     <button
@@ -6036,6 +6100,83 @@ export const App: React.FC = () => {
                       })}
                     </div>
 
+                    {/* Radix Dropdown for Inter-Cut Transition & Color Grade LUT */}
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button type="button" className="btn btn-sm" title="Cut Transitions & Color Grade LUT">
+                          <Sliders size={11} />
+                          <span>
+                            FX:{' '}
+                            {activeClip?.transitionStyle && activeClip.transitionStyle !== 'none'
+                              ? activeClip.transitionStyle
+                              : activeClip?.colorGradeLut && activeClip.colorGradeLut !== 'none'
+                                ? activeClip.colorGradeLut
+                                : 'Clean'}
+                          </span>
+                          <ChevronDown size={11} />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5}>
+                          <div className="rx-dropdown-label">Cut Transition (V1)</div>
+                          {(
+                            [
+                              { id: 'none', label: 'Hard Cut (None)' },
+                              { id: 'zoom-punch', label: 'Zoom-Punch Cut' },
+                              { id: 'whip-pan', label: 'Whip-Pan Blur' },
+                              { id: 'flash-cut', label: 'Flash Frame Cut' },
+                              { id: 'chromatic-glitch', label: 'Chromatic Glitch' },
+                            ] as Array<{ id: CutTransitionStyleId; label: string }>
+                          ).map((tr) => {
+                            const isSel = (activeClip?.transitionStyle || 'none') === tr.id;
+                            return (
+                              <DropdownMenu.Item
+                                key={tr.id}
+                                className="rx-dropdown-item"
+                                onSelect={() => {
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    transitionStyle: tr.id,
+                                  }));
+                                }}
+                              >
+                                <span>{tr.label}</span>
+                                {isSel && <Check size={12} />}
+                              </DropdownMenu.Item>
+                            );
+                          })}
+                          <DropdownMenu.Separator className="rx-dropdown-separator" />
+                          <div className="rx-dropdown-label">Color Grade LUT</div>
+                          {(
+                            [
+                              { id: 'none', label: 'Natural (No LUT)' },
+                              { id: 'cinematic-teal-orange', label: 'Cinematic Teal & Orange' },
+                              { id: 'warm-podcast', label: 'Warm Studio Podcast' },
+                              { id: 'crisp-contrast', label: 'Crisp High Contrast' },
+                              { id: 'noir-bw', label: 'Monochrome Noir B&W' },
+                            ] as Array<{ id: ColorGradeLutId; label: string }>
+                          ).map((lut) => {
+                            const isSel = (activeClip?.colorGradeLut || 'none') === lut.id;
+                            return (
+                              <DropdownMenu.Item
+                                key={lut.id}
+                                className="rx-dropdown-item"
+                                onSelect={() => {
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    colorGradeLut: lut.id,
+                                  }));
+                                }}
+                              >
+                                <span>{lut.label}</span>
+                                {isSel && <Check size={12} />}
+                              </DropdownMenu.Item>
+                            );
+                          })}
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+
                     {/* Radix Dropdown for Playback Speed */}
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
@@ -6205,6 +6346,52 @@ export const App: React.FC = () => {
                     >
                       <Plus size={11} />
                       + Text Layer (V4)
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => {
+                        const newId = `lottie-${Date.now()}`;
+                        const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
+                        const endT = Number(
+                          Math.min(activeClip.duration, startT + Math.min(6, activeClip.duration)).toFixed(2)
+                        );
+                        const presets: LottieOverlayPresetId[] = [
+                          'viral-flame',
+                          'subscribe-pulse',
+                          'live-badge',
+                          'arrow-pointer',
+                        ];
+                        const chosenPreset =
+                          presets[(activeClip.overlayLayers?.length || 0) % presets.length];
+                        const newLayer: VideoOverlayLayer = {
+                          id: newId,
+                          name: `Lottie Sticker ${(activeClip.overlayLayers?.length || 0) + 1}`,
+                          kind: 'lottie-sticker',
+                          text: '',
+                          x: 0.78,
+                          y: 0.22,
+                          scale: 1.0,
+                          startTime: startT,
+                          endTime: Math.max(startT + 0.5, endT),
+                          bgColor: 'rgba(12, 12, 16, 0.88)',
+                          textColor: '#ffffff',
+                          visible: true,
+                          lottiePreset: chosenPreset,
+                        };
+                        updateActiveTimelineClip((c) => ({
+                          ...c,
+                          hideBannerLayer: false,
+                          overlayLayers: [...(c.overlayLayers || []), newLayer],
+                        }));
+                        setSelectedLayerTrack('v4-overlay');
+                        setSelectedOverlayLayerId(newId);
+                      }}
+                      title="Add an animated Lottie vector sticker layer on V4"
+                    >
+                      <Sparkles size={11} />
+                      + Lottie Sticker (V4)
                     </button>
 
                     <button
@@ -6906,50 +7093,63 @@ export const App: React.FC = () => {
                         updateTimelineDragAtClientX(e.clientX, 'playhead');
                       }}
                     >
-                      {activeClip.subCuts.map((cut) => {
-                        const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
-                        const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
-                        const totalBuckets = activeSource.waveformPeaks.length;
-                        const bStart = Math.max(
-                          0,
-                          Math.floor(
-                            (cut.sourceStart / Math.max(1, activeSource.duration)) * totalBuckets
-                          )
-                        );
-                        const bEnd = Math.max(
-                          bStart + 2,
-                          Math.ceil((cut.sourceEnd / Math.max(1, activeSource.duration)) * totalBuckets)
-                        );
-                        const slicePeaks = activeSource.waveformPeaks.slice(bStart, bEnd);
-                        return (
-                          <div
-                            key={`audio-${cut.id}`}
-                            style={{
-                              width: `${widthPct}%`,
-                              height: '100%',
-                              display: 'flex',
-                              alignItems: 'flex-end',
-                              gap: 1,
-                              padding: '0 2px',
-                              opacity: isMuted ? 0.3 : 1,
-                            }}
-                          >
-                            {slicePeaks.map((pk, pIdx) => (
-                              <div
-                                key={pIdx}
-                                style={{
-                                  flex: 1,
-                                  height: `${Math.max(12, Math.round(pk * 82))}%`,
-                                  background: isMuted
-                                    ? 'rgba(239, 68, 68, 0.35)'
-                                    : 'rgba(16, 185, 129, 0.48)',
-                                  pointerEvents: 'none',
-                                }}
-                              />
-                            ))}
-                          </div>
-                        );
-                      })}
+                      {activeClip.subCuts.length === 1 && activeSource.url ? (
+                        <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+                          <WavesurferAudioTrack
+                            audioUrl={activeSource.url}
+                            clipStartTime={activeClip.sourceStart}
+                            clipDuration={activeClip.duration}
+                            sourceDuration={activeSource.duration}
+                            clipPlayheadTime={clipPlayheadTime}
+                            isMuted={isMuted}
+                          />
+                        </div>
+                      ) : (
+                        activeClip.subCuts.map((cut) => {
+                          const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
+                          const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
+                          const totalBuckets = activeSource.waveformPeaks.length;
+                          const bStart = Math.max(
+                            0,
+                            Math.floor(
+                              (cut.sourceStart / Math.max(1, activeSource.duration)) * totalBuckets
+                            )
+                          );
+                          const bEnd = Math.max(
+                            bStart + 2,
+                            Math.ceil((cut.sourceEnd / Math.max(1, activeSource.duration)) * totalBuckets)
+                          );
+                          const slicePeaks = activeSource.waveformPeaks.slice(bStart, bEnd);
+                          return (
+                            <div
+                              key={`audio-${cut.id}`}
+                              style={{
+                                width: `${widthPct}%`,
+                                height: '100%',
+                                display: 'flex',
+                                alignItems: 'flex-end',
+                                gap: 1,
+                                padding: '0 2px',
+                                opacity: isMuted ? 0.3 : 1,
+                              }}
+                            >
+                              {slicePeaks.map((pk, pIdx) => (
+                                <div
+                                  key={pIdx}
+                                  style={{
+                                    flex: 1,
+                                    height: `${Math.max(12, Math.round(pk * 82))}%`,
+                                    background: isMuted
+                                      ? 'rgba(239, 68, 68, 0.35)'
+                                      : 'rgba(16, 185, 129, 0.48)',
+                                    pointerEvents: 'none',
+                                  }}
+                                />
+                              ))}
+                            </div>
+                          );
+                        })
+                      )}
 
                       {/* Playhead needle */}
                       <div
@@ -6993,12 +7193,13 @@ export const App: React.FC = () => {
                       if (activeCustomLayer) {
                         return (
                           <>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1, minWidth: 160 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1, minWidth: 140 }}>
                               <span>Text</span>
                               <input
                                 type="text"
                                 className="input-field"
                                 style={{ height: 24 }}
+                                placeholder="Optional text..."
                                 value={activeCustomLayer.text}
                                 onChange={(e) => {
                                   const val = e.target.value;
@@ -7010,6 +7211,29 @@ export const App: React.FC = () => {
                                   }));
                                 }}
                               />
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                              <span>Lottie</span>
+                              <select
+                                className="input-field"
+                                style={{ height: 24, width: 120, fontSize: 10.5 }}
+                                value={activeCustomLayer.lottiePreset || 'none'}
+                                onChange={(e) => {
+                                  const pr = e.target.value as LottieOverlayPresetId;
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    overlayLayers: (c.overlayLayers || []).map((ly) =>
+                                      ly.id === activeCustomLayer.id ? { ...ly, lottiePreset: pr } : ly
+                                    ),
+                                  }));
+                                }}
+                              >
+                                <option value="none">No Sticker</option>
+                                <option value="viral-flame">Viral Flame</option>
+                                <option value="subscribe-pulse">Subscribe Pulse</option>
+                                <option value="live-badge">Live Broadcast</option>
+                                <option value="arrow-pointer">Arrow Pointer</option>
+                              </select>
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                               <span>Scale</span>
@@ -7148,6 +7372,31 @@ export const App: React.FC = () => {
                               style={{ width: 64 }}
                             />
                           </div>
+                          <label
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 4,
+                              cursor: 'pointer',
+                              color: activeClip.overlayBannerBehindSubject ? '#fbbf24' : 'var(--text-secondary)',
+                            }}
+                            title="MediaPipe ImageSegmenter 3D Depth: places the V4 Title Banner behind the speaker's head"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={Boolean(activeClip.overlayBannerBehindSubject)}
+                              onChange={(e) => {
+                                const enabled = e.target.checked;
+                                if (enabled) ensureMediaPipeImageSegmenter();
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  overlayBannerBehindSubject: enabled,
+                                }));
+                              }}
+                              style={{ accentColor: '#f59e0b', width: 12, height: 12 }}
+                            />
+                            Behind Subject (3D Depth)
+                          </label>
                         </>
                       );
                     })()}
@@ -7264,6 +7513,29 @@ export const App: React.FC = () => {
                         style={{ width: 54 }}
                       />
                     </div>
+                    <label
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        cursor: 'pointer',
+                        color: activeClip.captionSpringPhysics ? '#c084fc' : 'var(--text-secondary)',
+                      }}
+                      title="Enable spring-physics 1.16x pop-in bounce on each spoken karaoke word"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={Boolean(activeClip.captionSpringPhysics)}
+                        onChange={(e) =>
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            captionSpringPhysics: e.target.checked,
+                          }))
+                        }
+                        style={{ accentColor: '#a855f7', width: 12, height: 12 }}
+                      />
+                      Spring Pop
+                    </label>
                     <button
                       type="button"
                       className="btn btn-sm"
@@ -7271,6 +7543,62 @@ export const App: React.FC = () => {
                     >
                       <FileText size={11} />
                       Edit Full Transcript
+                    </button>
+                  </div>
+                ) : selectedLayerTrack === 'a1-audio' ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 10,
+                      fontSize: 11,
+                      color: 'var(--text-secondary)',
+                      paddingTop: 2,
+                    }}
+                  >
+                    <span className="badge-subtle" style={{ color: '#34d399' }}>
+                      A1 Broadcast Audio Mastering & Loudness Inspector
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <span>Mastering Chain</span>
+                      <div className="seg-group">
+                        {(
+                          [
+                            { id: 'off', label: 'Raw Audio' },
+                            { id: 'podcast-clarity', label: 'Podcast Clarity (85Hz HPF)' },
+                            { id: 'broadcast-lufs', label: '-14 LUFS Broadcast' },
+                            { id: 'vocal-boost', label: 'Vocal Presence Boost' },
+                          ] as Array<{ id: AudioMasteringPresetId; label: string }>
+                        ).map((preset) => {
+                          const cur = activeClip.audioMasteringPreset || 'off';
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              className="seg-item"
+                              data-active={cur === preset.id}
+                              onClick={() =>
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  audioMasteringPreset: preset.id,
+                                }))
+                              }
+                            >
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setIsTranscriptEditorOpen(true)}
+                    >
+                      <FileText size={11} />
+                      Edit Transcript
                     </button>
                   </div>
                 ) : selectedLayerTrack === 'v2-speaker' ? (

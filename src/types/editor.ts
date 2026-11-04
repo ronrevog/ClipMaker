@@ -201,16 +201,24 @@ export interface CaptionSegment {
 
 export type BackgroundFillStyle = 'blurred' | 'black' | 'split-screen';
 
+export type AudioMasteringPresetId = 'off' | 'podcast-clarity' | 'broadcast-lufs' | 'vocal-boost';
+export type CutTransitionStyleId = 'none' | 'whip-pan' | 'zoom-punch' | 'flash-cut' | 'chromatic-glitch';
+export type ColorGradeLutId = 'none' | 'cinematic-teal-orange' | 'warm-podcast' | 'crisp-contrast' | 'noir-bw';
+export type LottieOverlayPresetId = 'none' | 'subscribe-pulse' | 'viral-flame' | 'live-badge' | 'arrow-pointer';
+
 export interface VideoOverlayLayer {
   id: string;
   name: string;
-  kind: 'text-banner' | 'call-to-action' | 'lower-third';
+  kind: 'text-banner' | 'call-to-action' | 'lower-third' | 'lottie-sticker';
   text: string;
   startTime: number;
   endTime: number;
   x: number;
   y: number;
   scale: number;
+  rotation?: number;
+  behindSubject?: boolean;
+  lottiePreset?: LottieOverlayPresetId;
   bgColor: string;
   textColor: string;
   visible: boolean;
@@ -251,6 +259,8 @@ export interface GeneratedClip {
   captionPositionY?: number; // 0.08 (top) .. 0.50 (middle) .. 0.78 (bottom)
   captionPositionX?: number; // 0.15 (left) .. 0.50 (center) .. 0.85 (right)
   captionFontScale?: number; // 0.5 .. 2.2 multiplier
+  captionRotation?: number; // degrees (-45 .. 45)
+  captionSpringPhysics?: boolean; // Spring pop-in animation on active spoken words
   captionTextColor?: string;
   captionHighlightColor?: string;
   captionBgColor?: string;
@@ -261,10 +271,15 @@ export interface GeneratedClip {
   overlayBannerPositionX?: number;
   overlayBannerPositionY?: number;
   overlayBannerScale?: number;
+  overlayBannerRotation?: number;
+  overlayBannerBehindSubject?: boolean; // MediaPipe SelfieSegmentation 3D behind-the-head text layer
   overlayBannerBgColor?: string;
   overlayBannerTextColor?: string;
   hideBannerLayer?: boolean;
   overlayLayers?: VideoOverlayLayer[];
+  audioMasteringPreset?: AudioMasteringPresetId;
+  transitionStyle?: CutTransitionStyleId;
+  colorGradeLut?: ColorGradeLutId;
   videoFilter?: VideoFilterConfig;
   safeZoneGuide: SafeZoneGuideId;
   subCuts: SubCut[];

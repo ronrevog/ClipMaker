@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Check,
+  Cpu,
   FileText,
   Mic,
   Play,
@@ -11,6 +12,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { runLocalWhisperWordTranscription } from '../services/sotaStudioEngines';
 import { CaptionSegment, GeneratedClip, SourceVideoAsset } from '../types/editor';
 
 interface TranscriptEditorModalProps {
@@ -73,6 +75,8 @@ export const TranscriptEditorModal: React.FC<TranscriptEditorModalProps> = ({
   const [findQuery, setFindQuery] = useState<string>('');
   const [replaceQuery, setReplaceQuery] = useState<string>('');
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [isLocalWhisperRunning, setIsLocalWhisperRunning] = useState<boolean>(false);
+  const [localWhisperLabel, setLocalWhisperLabel] = useState<string>('');
 
   // Sync draft state when modal opens or tab/clip changes
   useEffect(() => {
@@ -302,6 +306,39 @@ export const TranscriptEditorModal: React.FC<TranscriptEditorModalProps> = ({
     commitSegments(rebuilt, `Updated ${rebuilt.length} segments from script`);
   };
 
+  const handleRunLocalOnDeviceWhisper = async () => {
+    if (!activeSource?.url || isLocalWhisperRunning) return;
+    setIsLocalWhisperRunning(true);
+    setLocalWhisperLabel('Loading Whisper...');
+    try {
+      const startSec = activeTab === 'clip' && activeClip ? activeClip.sourceStart : 0;
+      const endSec =
+        activeTab === 'clip' && activeClip
+          ? activeClip.sourceEnd
+          : activeSource.duration || 60;
+      const segments = await runLocalWhisperWordTranscription(
+        activeSource.url,
+        startSec,
+        Math.max(1, endSec - startSec),
+        (msg: string) => {
+          setLocalWhisperLabel(msg);
+        }
+      );
+      if (segments.length > 0) {
+        commitSegments(segments, `Whisper transcribed ${segments.length} timed segments`);
+      } else {
+        setSavedNotice('No speech detected in audio range');
+        setTimeout(() => setSavedNotice(null), 2500);
+      }
+    } catch (err: any) {
+      setSavedNotice(`Whisper fallback: ${err?.message || 'Use Auto-Transcribe'}`);
+      setTimeout(() => setSavedNotice(null), 3000);
+    } finally {
+      setIsLocalWhisperRunning(false);
+      setLocalWhisperLabel('');
+    }
+  };
+
   return (
     <div
       style={{
@@ -466,7 +503,25 @@ export const TranscriptEditorModal: React.FC<TranscriptEditorModalProps> = ({
           </div>
 
           {/* Right: AI Transcribe & Add Segment */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={handleRunLocalOnDeviceWhisper}
+              disabled={isLocalWhisperRunning || !activeSource?.url}
+              style={{
+                borderColor: 'rgba(56, 189, 248, 0.45)',
+                background: 'rgba(56, 189, 248, 0.12)',
+                color: '#7dd3fc',
+              }}
+              title="Run on-device Transformers.js Whisper word-level transcription locally in browser (No API key needed)"
+            >
+              <Cpu size={11} />
+              {isLocalWhisperRunning
+                ? localWhisperLabel || 'Whisper Running...'
+                : 'On-Device Whisper (Local)'}
+            </button>
+
             <button
               type="button"
               className="btn btn-sm"

@@ -1,6 +1,7 @@
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
-import { GeneratedClip, SourceVideoAsset, SubCut } from '../types/editor';
+import { AudioMasteringPresetId, GeneratedClip, SourceVideoAsset, SubCut } from '../types/editor';
 import { renderComposite9x16Frame } from './aiVideoEditorTools';
+import { applyBroadcastAudioMasteringToBuffer } from './sotaStudioEngines';
 import {
   evaluateUserAnchorSplineAtTime,
   getTrackingStateAtTime,
@@ -38,7 +39,8 @@ async function extractOfflineClipAudioBuffer(
   sourceUrl: string,
   cutsToRender: SubCut[],
   defaultSpeed: number,
-  fps: number
+  fps: number,
+  masteringPreset: AudioMasteringPresetId = 'off'
 ): Promise<AudioBuffer | null> {
   try {
     const resp = await fetch(sourceUrl);
@@ -104,6 +106,10 @@ async function extractOfflineClipAudioBuffer(
         }
         writeOffset += outLen;
       }
+    }
+
+    if (masteringPreset && masteringPreset !== 'off') {
+      return await applyBroadcastAudioMasteringToBuffer(outBuffer, masteringPreset);
     }
 
     return outBuffer;
@@ -306,7 +312,8 @@ export async function exportClipTo9x16Video(
         source.url,
         cutsToRender,
         defaultSpeed,
-        fps
+        fps,
+        clip.audioMasteringPreset || 'off'
       );
 
       let audioCodecConfig: {

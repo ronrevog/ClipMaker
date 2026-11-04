@@ -9,7 +9,25 @@ import {
   SubCut,
 } from '../types/editor';
 import { formatShortTimestamp, recalculateClipTimeline } from './clipGenerator';
+import {
+  compositeForegroundSubjectMaskOverText,
+  evaluateCutTransitionTransform,
+  getColorGradeLutCanvasFilter,
+  renderLottieStickerOnCanvas,
+} from './sotaStudioEngines';
 import { computeDistortionFree9x16Crop, getTrackingStateAtTime } from './subjectTracker';
+
+let _behindSubjectSnapshotCanvas: HTMLCanvasElement | null = null;
+function getBehindSubjectSnapshotCanvas(w: number, h: number): HTMLCanvasElement {
+  if (!_behindSubjectSnapshotCanvas) {
+    _behindSubjectSnapshotCanvas = document.createElement('canvas');
+  }
+  if (_behindSubjectSnapshotCanvas.width !== w || _behindSubjectSnapshotCanvas.height !== h) {
+    _behindSubjectSnapshotCanvas.width = w;
+    _behindSubjectSnapshotCanvas.height = h;
+  }
+  return _behindSubjectSnapshotCanvas;
+}
 
 // Cache decoded AudioBuffer per source video ID so repeated silence/transcription operations are instant
 const decodedAudioBufferCache = new Map<string, AudioBuffer>();
@@ -1038,6 +1056,13 @@ export function renderComposite9x16Frame(params: {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, outW, outH);
 
+  // SOTA Cut Transition & Color Grade LUT evaluation
+  const trans = activeClip
+    ? evaluateCutTransitionTransform(activeClip, clipPlayheadTime)
+    : { offsetX: 0, extraScale: 1, flashAlpha: 0, chromaticShiftPx: 0 };
+  const lutFilterStr = getColorGradeLutCanvasFilter(activeClip?.colorGradeLut);
+  const effectiveClipZoom = Math.max(0.5, Math.min(3.2, zoom * (trans.extraScale || 1.0)));
+
   // MODE A: 2-Speaker Top/Bottom 9:16 Podcast Split-Screen
   if (backgroundFillStyle === 'split-screen') {
     const splitRatio = Math.max(0.25, Math.min(0.75, activeClip?.splitScreenRatio ?? 0.5));
@@ -1070,32 +1095,32 @@ export function renderComposite9x16Frame(params: {
     ) => {
       const panelAspect = outW / Math.max(1, destH);
       const widthFraction = vw < vh ? 0.50 : 0.46;
-      const baseZoom = Math.max(0.85, Math.min(2.4, zoom > 1.35 ? 1.0 : zoom));
+      const baseZoom = Math.max(0.85, Math.min(2.4, effectiveClipZoom > 1.35 ? 1.0 : effectiveClipZoom));
       const effectiveZoom = Math.max(0.45, Math.min(3.2, baseZoom * speakerScale));
       const sw = Math.max(64, Math.min(vw, (vw * widthFraction) / effectiveZoom));
       const sh = Math.max(64, Math.min(vh, sw / panelAspect));
       const sx = Math.max(0, Math.min(vw - sw, centerX * vw - sw / 2));
       const sy = Math.max(0, Math.min(vh - sh, centerY * vh - sh / 2));
       const vf = activeClip?.videoFilter;
-      const filterStr = vf
-        ? [
-            vf.brightness !== undefined ? `brightness(${vf.brightness})` : '',
-            vf.contrast !== undefined ? `contrast(${vf.contrast})` : '',
-            vf.saturation !== undefined ? `saturate(${vf.saturation})` : '',
-            vf.grayscale ? `grayscale(${vf.grayscale})` : '',
-            vf.sepia ? `sepia(${vf.sepia})` : '',
-            vf.hueRotate ? `hue-rotate(${vf.hueRotate}deg)` : '',
-          ]
-            .filter(Boolean)
-            .join(' ')
-        : '';
+      const filterStr = [
+        lutFilterStr,
+        vf?.brightness !== undefined ? `brightness(${vf.brightness})` : '',
+        vf?.contrast !== undefined ? `contrast(${vf.contrast})` : '',
+        vf?.saturation !== undefined ? `saturate(${vf.saturation})` : '',
+        vf?.grayscale ? `grayscale(${vf.grayscale})` : '',
+        vf?.sepia ? `sepia(${vf.sepia})` : '',
+        vf?.hueRotate ? `hue-rotate(${vf.hueRotate}deg)` : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+      const panelDx = Math.round((trans.offsetX || 0) * outW);
       if (filterStr) {
         ctx.save();
         ctx.filter = filterStr;
-        ctx.drawImage(videoEl, sx, sy, sw, sh, 0, destY, outW, destH);
+        ctx.drawImage(videoEl, sx, sy, sw, sh, panelDx, destY, outW, destH);
         ctx.restore();
       } else {
-        ctx.drawImage(videoEl, sx, sy, sw, sh, 0, destY, outW, destH);
+        ctx.drawImage(videoEl, sx, sy, sw, sh, panelDx, destY, outW, destH);
       }
 
       // Clean monochrome speaker label pill in corner
@@ -1125,28 +1150,28 @@ export function renderComposite9x16Frame(params: {
     ctx.restore();
   } else {
     // MODE B: Single-Frame 9:16 Crop OR Wide Letterbox with Blurred / Black Background Fill
-    const crop = computeDistortionFree9x16Crop(vw, vh, cropX, cropY, zoom);
+    const crop = computeDistortionFree9x16Crop(vw, vh, cropX, cropY, effectiveClipZoom);
     const cropAspect = crop.sw / Math.max(1, crop.sh);
     const canvasAspect = outW / outH;
 
-    let dx = 0;
+    let dx = Math.round((trans.offsetX || 0) * outW);
     let dy = 0;
     let dw = outW;
     let dh = outH;
 
     // When zoomed out (< 1.0x), fit the frame with Blurred 9:16 Background Fill or Black Bars
-    if (cropAspect > canvasAspect + 0.01 || zoom < 0.99) {
+    if (cropAspect > canvasAspect + 0.01 || effectiveClipZoom < 0.99) {
       if (cropAspect > canvasAspect + 0.01) {
         dw = outW;
         dh = Math.round(outWidthToHeight(outW, cropAspect));
-        dx = 0;
+        dx = Math.round((trans.offsetX || 0) * outW);
         dy = Math.round((outH - dh) / 2);
       } else {
         // Source is already 9:16 vertical and user zoomed out (< 1.0x): scale down over blurred background
-        const scaleFactor = Math.max(0.56, Math.min(1.0, zoom));
+        const scaleFactor = Math.max(0.56, Math.min(1.0, effectiveClipZoom));
         dw = Math.round(outW * scaleFactor);
         dh = Math.round(outH * scaleFactor);
-        dx = Math.round((outW - dw) / 2);
+        dx = Math.round((outW - dw) / 2 + (trans.offsetX || 0) * outW);
         dy = Math.round((outH - dh) / 2);
       }
 
@@ -1171,18 +1196,17 @@ export function renderComposite9x16Frame(params: {
     }
 
     const vf = activeClip?.videoFilter;
-    const filterStr = vf
-      ? [
-          vf.brightness !== undefined ? `brightness(${vf.brightness})` : '',
-          vf.contrast !== undefined ? `contrast(${vf.contrast})` : '',
-          vf.saturation !== undefined ? `saturate(${vf.saturation})` : '',
-          vf.grayscale ? `grayscale(${vf.grayscale})` : '',
-          vf.sepia ? `sepia(${vf.sepia})` : '',
-          vf.hueRotate ? `hue-rotate(${vf.hueRotate}deg)` : '',
-        ]
-          .filter(Boolean)
-          .join(' ')
-      : '';
+    const filterStr = [
+      lutFilterStr,
+      vf?.brightness !== undefined ? `brightness(${vf.brightness})` : '',
+      vf?.contrast !== undefined ? `contrast(${vf.contrast})` : '',
+      vf?.saturation !== undefined ? `saturate(${vf.saturation})` : '',
+      vf?.grayscale ? `grayscale(${vf.grayscale})` : '',
+      vf?.sepia ? `sepia(${vf.sepia})` : '',
+      vf?.hueRotate ? `hue-rotate(${vf.hueRotate}deg)` : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
     if (filterStr) {
       ctx.save();
       ctx.filter = filterStr;
@@ -1190,6 +1214,45 @@ export function renderComposite9x16Frame(params: {
       ctx.restore();
     } else {
       ctx.drawImage(videoEl, crop.sx, crop.sy, crop.sw, crop.sh, dx, dy, dw, dh);
+    }
+
+    if (trans.chromaticShiftPx && trans.chromaticShiftPx > 0.5) {
+      ctx.save();
+      ctx.globalAlpha = 0.28;
+      ctx.globalCompositeOperation = 'screen';
+      ctx.drawImage(
+        videoEl,
+        crop.sx,
+        crop.sy,
+        crop.sw,
+        crop.sh,
+        dx + trans.chromaticShiftPx,
+        dy,
+        dw,
+        dh
+      );
+      ctx.restore();
+    }
+  }
+
+  if (trans.flashAlpha && trans.flashAlpha > 0.01) {
+    ctx.save();
+    ctx.fillStyle = `rgba(255, 255, 255, ${Math.min(0.85, trans.flashAlpha)})`;
+    ctx.fillRect(0, 0, outW, outH);
+    ctx.restore();
+  }
+
+  // Snapshot clean video frame before drawing V4 Banner when 3D Behind-Subject Depth is enabled
+  let snapCanvas: HTMLCanvasElement | null = null;
+  if (
+    activeClip?.overlayBannerBehindSubject &&
+    activeClip?.overlayBannerText?.trim() &&
+    !activeClip?.hideBannerLayer
+  ) {
+    snapCanvas = getBehindSubjectSnapshotCanvas(outW, outH);
+    const snapCtx = snapCanvas.getContext('2d');
+    if (snapCtx) {
+      snapCtx.drawImage(ctx.canvas, 0, 0, outW, outH);
     }
   }
 
@@ -1220,22 +1283,39 @@ export function renderComposite9x16Frame(params: {
     ctx.fillStyle = activeClip.overlayBannerTextColor || '#ffffff';
     ctx.fillText(bText, bannerX, bannerY, outW * 0.9);
     ctx.restore();
+
+    // MediaPipe ImageSegmenter 3D Depth Matting: composite subject silhouette over the V4 Title Banner
+    if (snapCanvas && activeClip.overlayBannerBehindSubject) {
+      compositeForegroundSubjectMaskOverText(ctx, snapCanvas, outW, outH);
+    }
   }
 
-  // Draw Custom Video Overlay Layers (Text / Lower-Third / Callout Layers on Timeline)
+  // Draw Custom Video Overlay Layers (Text / Lower-Third / Callout / Lottie Vector Layers on Timeline)
   if (activeClip?.overlayLayers && activeClip.overlayLayers.length > 0) {
     for (const layer of activeClip.overlayLayers) {
       if (
         !layer.visible ||
-        !layer.text.trim() ||
         clipPlayheadTime < layer.startTime - 0.05 ||
         clipPlayheadTime > layer.endTime + 0.05
       ) {
         continue;
       }
-      const lScale = (outW / 360) * Math.max(0.4, Math.min(2.8, layer.scale || 1.0));
       const lx = outW * Math.max(0.1, Math.min(0.9, layer.x ?? 0.5));
       const ly = outH * Math.max(0.06, Math.min(0.94, layer.y ?? 0.18));
+
+      if (layer.lottiePreset && layer.lottiePreset !== 'none') {
+        renderLottieStickerOnCanvas(
+          ctx,
+          layer.lottiePreset,
+          lx,
+          ly,
+          (outW / 360) * Math.max(0.5, Math.min(2.5, layer.scale || 1.0)),
+          clipPlayheadTime
+        );
+      }
+
+      if (!layer.text.trim()) continue;
+      const lScale = (outW / 360) * Math.max(0.4, Math.min(2.8, layer.scale || 1.0));
       const lFontSize = Math.round(17 * lScale);
       ctx.save();
       ctx.font = `700 ${lFontSize}px Inter, sans-serif`;
@@ -1485,8 +1565,14 @@ export function renderWordLevelCaptionOverlay(
         ctx.restore();
       }
 
-      // Graffiti / Bold street drop-shadow + thick outline
+      // Graffiti / Bold street drop-shadow + thick outline + optional Spring-Physics Word Pop-In
       ctx.save();
+      if (mw.isActive && clip.captionSpringPhysics) {
+        const wordCenterX = cursorX + mw.width / 2;
+        ctx.translate(wordCenterX, lineY);
+        ctx.scale(1.16, 1.16);
+        ctx.translate(-wordCenterX, -lineY - 2 * scale);
+      }
       if (fontChoice === 'graffiti' || fontChoice === 'marker' || fontChoice === 'bangers') {
         ctx.shadowColor = mw.isActive ? 'rgba(255, 42, 133, 0.85)' : 'rgba(0, 0, 0, 0.95)';
         ctx.shadowBlur = Math.round(6 * scale);
