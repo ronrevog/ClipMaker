@@ -307,7 +307,9 @@ export const App: React.FC = () => {
   const [leftPanelWidth, setLeftPanelWidth] = useState<number>(300);
   const [rightPanelWidth, setRightPanelWidth] = useState<number>(315);
   const [timelineHeight, setTimelineHeight] = useState<number>(265);
-  const [resizingPane, setResizingPane] = useState<'left' | 'right' | 'timeline' | null>(null);
+  const [monitorSplitRatio, setMonitorSplitRatio] = useState<number>(0.5);
+  const [resizingPane, setResizingPane] = useState<'left' | 'right' | 'timeline' | 'monitors' | null>(null);
+  const dualMonitorStageRef = useRef<HTMLDivElement | null>(null);
   const [selectedLayerTrack, setSelectedLayerTrack] = useState<
     'v4-overlay' | 'v3-captions' | 'v2-speaker' | 'v1-video' | 'a1-audio'
   >('v1-video');
@@ -330,6 +332,12 @@ export const App: React.FC = () => {
         setRightPanelWidth(Math.max(240, Math.min(560, window.innerWidth - e.clientX)));
       } else if (resizingPane === 'timeline') {
         setTimelineHeight(Math.max(175, Math.min(520, window.innerHeight - e.clientY)));
+      } else if (resizingPane === 'monitors' && dualMonitorStageRef.current) {
+        const rect = dualMonitorStageRef.current.getBoundingClientRect();
+        if (rect.width > 100) {
+          const ratio = (e.clientX - rect.left) / rect.width;
+          setMonitorSplitRatio(Math.max(0.28, Math.min(0.72, ratio)));
+        }
       }
     };
     const onUp = () => setResizingPane(null);
@@ -4493,48 +4501,62 @@ export const App: React.FC = () => {
               </div>
             ) : (
               <>
-                {/* Dual Monitor Stage */}
+                {/* Dual Monitor Stage: Centered Dedicated Input Window & Output Window */}
                 <div
+                  ref={dualMonitorStageRef}
                   style={{
                     flex: 1,
-                    display: 'flex',
-                    alignItems: 'center',
+                    display: 'grid',
+                    gridTemplateColumns: `calc(${(monitorSplitRatio * 100).toFixed(1)}% - 5px) 10px calc(${((1 - monitorSplitRatio) * 100).toFixed(1)}% - 5px)`,
+                    alignItems: 'stretch',
                     justifyContent: 'center',
-                    gap: 20,
-                    padding: '10px 16px',
+                    padding: '10px 14px',
                     minHeight: 0,
-                    background: '#060608',
+                    background: '#050507',
                     overflow: 'hidden',
                   }}
                 >
-                  {/* Source Monitor */}
+                  {/* WINDOW 1: INPUT / SOURCE MONITOR WINDOW */}
                   <div
                     style={{
-                      flex: 1.35,
+                      width: '100%',
                       height: '100%',
                       display: 'flex',
                       flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
+                      background: '#09090d',
+                      border: '1px solid var(--border-strong)',
+                      borderRadius: 8,
+                      overflow: 'hidden',
                       minWidth: 0,
                       minHeight: 0,
+                      boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
                     }}
                   >
+                    {/* Input Window Header Bar */}
                     <div
                       style={{
                         width: '100%',
+                        minHeight: 32,
+                        padding: '4px 10px',
+                        background: 'var(--bg-panel-header)',
+                        borderBottom: '1px solid var(--border-subtle)',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
-                        marginBottom: 4,
-                        padding: '0 2px',
                         gap: 6,
                         flexWrap: 'wrap',
+                        flexShrink: 0,
                       }}
                     >
-                      <span className="section-label">
-                        Source · {nativeDims.width}×{nativeDims.height}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span className="section-label" style={{ color: 'var(--text-main)' }}>
+                          Input Window · Source
+                        </span>
+                        <span className="badge-subtle">
+                          {nativeDims.width}×{nativeDims.height}
+                        </span>
+                      </div>
+
                       {activeClip?.backgroundFillStyle === 'split-screen' ||
                       activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -4545,7 +4567,7 @@ export const App: React.FC = () => {
                               style={{ height: 20, fontSize: 10.5, padding: '0 7px' }}
                               data-active={selectedSpeakerTarget === 'A'}
                               onClick={() => setSelectedSpeakerTarget('A')}
-                              title="Click or drag on Source Video to position Speaker A"
+                              title="Click or drag on Input Video to position Speaker A"
                             >
                               Move Speaker A
                             </button>
@@ -4555,13 +4577,13 @@ export const App: React.FC = () => {
                               style={{ height: 20, fontSize: 10.5, padding: '0 7px' }}
                               data-active={selectedSpeakerTarget === 'B'}
                               onClick={() => setSelectedSpeakerTarget('B')}
-                              title="Click or drag on Source Video to position Speaker B"
+                              title="Click or drag on Input Video to position Speaker B"
                             >
                               Move Speaker B
                             </button>
                           </div>
                           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                            <span style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>A Scale</span>
+                            <span style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>A</span>
                             <input
                               type="range"
                               min={0.5}
@@ -4572,12 +4594,12 @@ export const App: React.FC = () => {
                                 const val = parseFloat(e.target.value);
                                 updateActiveTimelineClip((c) => ({ ...c, speakerAScale: val }));
                               }}
-                              style={{ width: 42 }}
+                              style={{ width: 40 }}
                               title="Scale Speaker A crop window size"
                             />
                           </div>
                           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                            <span style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>B Scale</span>
+                            <span style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>B</span>
                             <input
                               type="range"
                               min={0.5}
@@ -4588,7 +4610,7 @@ export const App: React.FC = () => {
                                 const val = parseFloat(e.target.value);
                                 updateActiveTimelineClip((c) => ({ ...c, speakerBScale: val }));
                               }}
-                              style={{ width: 42 }}
+                              style={{ width: 40 }}
                               title="Scale Speaker B crop window size"
                             />
                           </div>
@@ -4622,23 +4644,39 @@ export const App: React.FC = () => {
                       ) : null}
                     </div>
 
+                    {/* Centered Input Video Viewport */}
                     <div
-                      ref={sourceOverlayWrapRef}
                       style={{
-                        position: 'relative',
-                        aspectRatio: `${nativeDims.width} / ${nativeDims.height}`,
-                        maxWidth: '100%',
-                        maxHeight: 'calc(100% - 22px)',
-                        background: '#000',
-                        borderRadius: 6,
+                        flex: 1,
+                        minHeight: 0,
+                        minWidth: 0,
+                        padding: 10,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        background: '#040406',
                         overflow: 'hidden',
-                        border: '1px solid var(--border-subtle)',
-                        cursor: scalingSpeaker
-                          ? 'nwse-resize'
-                          : draggingSpeaker
-                            ? 'grabbing'
-                            : 'crosshair',
                       }}
+                    >
+                      <div
+                        ref={sourceOverlayWrapRef}
+                        style={{
+                          position: 'relative',
+                          aspectRatio: `${nativeDims.width} / ${nativeDims.height}`,
+                          height: nativeDims.width <= nativeDims.height ? '100%' : 'auto',
+                          width: nativeDims.width > nativeDims.height ? '100%' : 'auto',
+                          maxWidth: '100%',
+                          maxHeight: '100%',
+                          background: '#000',
+                          borderRadius: 6,
+                          overflow: 'hidden',
+                          border: '1px solid var(--border-subtle)',
+                          cursor: scalingSpeaker
+                            ? 'nwse-resize'
+                            : draggingSpeaker
+                              ? 'grabbing'
+                              : 'crosshair',
+                        }}
                       onMouseDown={(e) => {
                         setIsDraggingCrop(true);
                         handlePointerOnSourceVideo(e, false);
@@ -5027,54 +5065,102 @@ export const App: React.FC = () => {
                           </div>
                         </div>
                       )}
+                      </div>
                     </div>
                   </div>
 
-                  {/* 9:16 Output Monitor with Interactive Layer Dragging & Scaling */}
+                  {/* Center Draggable Splitter between Input Window and Output Window */}
+                  <div
+                    className={`studio-splitter-v ${resizingPane === 'monitors' ? 'is-dragging' : ''}`}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      borderRadius: 4,
+                    }}
+                    onMouseDown={() => setResizingPane('monitors')}
+                    onDoubleClick={() => setMonitorSplitRatio(0.5)}
+                    title="Drag to resize Input Window vs Output Window (double-click to center 50/50)"
+                  />
+
+                  {/* WINDOW 2: 9:16 OUTPUT MONITOR WINDOW */}
                   <div
                     style={{
+                      width: '100%',
                       height: '100%',
                       display: 'flex',
                       flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexShrink: 0,
+                      background: '#09090d',
+                      border: '1px solid var(--border-strong)',
+                      borderRadius: 8,
+                      overflow: 'hidden',
+                      minWidth: 0,
+                      minHeight: 0,
+                      boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
                     }}
                   >
+                    {/* Output Window Header Bar */}
                     <div
                       style={{
                         width: '100%',
+                        minHeight: 32,
+                        padding: '4px 10px',
+                        background: 'var(--bg-panel-header)',
+                        borderBottom: '1px solid var(--border-subtle)',
                         display: 'flex',
                         justifyContent: 'space-between',
                         alignItems: 'center',
-                        marginBottom: 4,
-                        padding: '0 2px',
                         gap: 6,
+                        flexWrap: 'wrap',
+                        flexShrink: 0,
                       }}
                     >
-                      <span className="section-label">9:16 Output</span>
-                      <span className="badge-subtle" title="Drag or scale layers directly on the 9:16 monitor">
-                        {activeClip?.backgroundFillStyle === 'split-screen'
-                          ? `Split ${Math.round((activeClip?.splitScreenRatio ?? 0.5) * 100)}/${Math.round((1 - (activeClip?.splitScreenRatio ?? 0.5)) * 100)}`
-                          : activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
-                            ? 'Auto-Switch'
-                            : '1080×1920'}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span className="section-label" style={{ color: 'var(--text-main)' }}>
+                          Output Window · 9:16
+                        </span>
+                        <span className="badge-subtle">1080×1920</span>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span className="badge-subtle" title="Drag or scale layers directly on the 9:16 Output Monitor">
+                          {activeClip?.backgroundFillStyle === 'split-screen'
+                            ? `Split ${Math.round((activeClip?.splitScreenRatio ?? 0.5) * 100)}/${Math.round((1 - (activeClip?.splitScreenRatio ?? 0.5)) * 100)}`
+                            : activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+                              ? 'Auto-Switch'
+                              : 'Single 9:16'}
+                        </span>
+                      </div>
                     </div>
 
+                    {/* Centered 9:16 Output Video Viewport */}
                     <div
-                      ref={outputOverlayWrapRef}
                       style={{
-                        position: 'relative',
-                        height: 'calc(100% - 22px)',
-                        width: 'auto',
-                        aspectRatio: '9 / 16',
-                        borderRadius: 6,
+                        flex: 1,
+                        minHeight: 0,
+                        minWidth: 0,
+                        padding: 10,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        background: '#040406',
                         overflow: 'hidden',
-                        border: '1px solid var(--border-strong)',
-                        background: '#000',
-                        userSelect: 'none',
                       }}
+                    >
+                      <div
+                        ref={outputOverlayWrapRef}
+                        style={{
+                          position: 'relative',
+                          height: '100%',
+                          maxHeight: '100%',
+                          maxWidth: '100%',
+                          width: 'auto',
+                          aspectRatio: '9 / 16',
+                          borderRadius: 6,
+                          overflow: 'hidden',
+                          border: '1px solid var(--border-strong)',
+                          background: '#000',
+                          userSelect: 'none',
+                        }}
                       onMouseMove={(e) => {
                         if ((!draggingOutputLayer && !scalingOutputLayer) || !outputOverlayWrapRef.current || !activeClip)
                           return;
@@ -5419,6 +5505,7 @@ export const App: React.FC = () => {
                             />
                           </div>
                         )}
+                      </div>
                     </div>
                   </div>
                 </div>
