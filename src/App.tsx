@@ -1581,6 +1581,13 @@ export const App: React.FC = () => {
       if (e.code === 'Space') {
         e.preventDefault();
         handleTogglePlay(false);
+      } else if (e.code === 'KeyM' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        setIsMuted((prev) => {
+          const next = !prev;
+          if (videoRef.current) videoRef.current.muted = next;
+          return next;
+        });
       } else if (e.code === 'KeyC') {
         e.preventDefault();
         setIsRazorMode((prev) => !prev);
@@ -4259,9 +4266,31 @@ export const App: React.FC = () => {
               </div>
 
               {activeSource && activeClip && (
-                <span className="timecode-pill">
-                  {formatSMPTETimecode(clipPlayheadTime)} / {formatSMPTETimecode(activeClip.duration)}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    type="button"
+                    className={`btn ${isMuted ? 'btn-danger' : 'btn-active'}`}
+                    style={{
+                      height: 26,
+                      padding: '0 10px',
+                      fontSize: 11.5,
+                      fontWeight: 600,
+                      gap: 6,
+                    }}
+                    onClick={() => {
+                      const nextMute = !isMuted;
+                      setIsMuted(nextMute);
+                      if (videoRef.current) videoRef.current.muted = nextMute;
+                    }}
+                    title={isMuted ? 'Click to turn sound ON' : 'Click to mute sound'}
+                  >
+                    {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                    {isMuted ? 'Sound Off' : 'Sound On'}
+                  </button>
+                  <span className="timecode-pill">
+                    {formatSMPTETimecode(clipPlayheadTime)} / {formatSMPTETimecode(activeClip.duration)}
+                  </span>
+                </div>
               )}
             </div>
 
@@ -5207,26 +5236,40 @@ export const App: React.FC = () => {
                     gap: 8,
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <button
-                      className="btn btn-primary btn-sm"
+                      className="btn btn-primary"
+                      style={{
+                        height: 30,
+                        padding: '0 14px',
+                        fontSize: 12,
+                        fontWeight: 600,
+                      }}
                       onClick={() => handleTogglePlay(false)}
                     >
-                      {isPlaying && !isLoopingInOut ? <Pause size={12} /> : <Play size={12} />}
+                      {isPlaying && !isLoopingInOut ? <Pause size={14} /> : <Play size={14} />}
                       {isPlaying && !isLoopingInOut ? 'Pause' : 'Play'}
                     </button>
 
                     <button
-                      className="btn btn-sm btn-icon"
-                      style={{ width: 24, height: 24 }}
+                      type="button"
+                      className={`btn ${isMuted ? 'btn-danger' : 'btn-active'}`}
+                      style={{
+                        height: 30,
+                        padding: '0 12px',
+                        fontSize: 12,
+                        fontWeight: 600,
+                        gap: 6,
+                      }}
                       onClick={() => {
                         const nextMute = !isMuted;
                         setIsMuted(nextMute);
                         if (videoRef.current) videoRef.current.muted = nextMute;
                       }}
-                      title="Mute / Unmute"
+                      title={isMuted ? 'Click to turn sound ON' : 'Click to mute sound'}
                     >
-                      {isMuted ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                      {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                      {isMuted ? 'Sound Off (Muted)' : 'Sound On'}
                     </button>
 
                     <div className="studio-divider-v" />
