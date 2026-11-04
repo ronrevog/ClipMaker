@@ -73,10 +73,7 @@ export async function extractTimelineAudioWavBase64(
   const actualRate = Math.round(srcRate / ratio);
   const channelData = audioBuffer.getChannelData(0);
 
-  const effectiveStart =
-    clip.duration > maxDurationSec + 5 && startClipTime < clip.duration - 4
-      ? Math.max(0, startClipTime)
-      : 0;
+  const effectiveStart = Math.max(0, Math.min(Math.max(0, clip.duration - 0.5), startClipTime));
   const effectiveEnd = Math.min(clip.duration, effectiveStart + maxDurationSec);
 
   const downsampledChunks: Float32Array[] = [];
@@ -154,8 +151,9 @@ export async function extractTimelineAudioWavBase64(
 }
 
 /**
- * Transcribes the real spoken audio of `clip` using Gemini 4 Argon Multimodal Audio (`/api/ai-copilot` with `mode: 'transcribe_audio'`),
- * returning true word-level karaoke `CaptionSegment[]` synced to the speakers' voices!
+ * Transcribes the ENTIRE spoken audio of `clip` from 0s to `clip.duration` by chunking into
+ * 40-second WAV windows and streaming each chunk's word-level karaoke captions onto the timeline
+ * in real time via `onPartialCaptions`!
  */
 export async function transcribeClipAudioWithAI(params: {
   clip: GeneratedClip;
@@ -164,100 +162,159 @@ export async function transcribeClipAudioWithAI(params: {
   aiSettings: AIProviderSettings;
   clipPlayheadTime: number;
   onStatus?: (msg: string) => void;
+  onPartialCaptions?: (captionsSoFar: CaptionSegment[], pct: number) => void;
 }): Promise<{
   captions: CaptionSegment[];
   providerUsed: string;
   error?: string;
 }> {
-  const { clip, source, videoBlob, aiSettings, clipPlayheadTime, onStatus } = params;
-  onStatus?.('🎙️ Decoding timeline audio track (8kHz PCM WAV)...');
+  const { clip, source, videoBlob, aiSettings, onStatus, onPartialCaptions } = params;
+  onStatus?.('🎙️ Decoding full timeline audio track (8kHz PCM WAV)...');
 
-  const extracted = await extractTimelineAudioWavBase64(
-    clip,
-    source,
-    videoBlob,
-    clipPlayheadTime,
-    45
-  );
-
-  if (!extracted.wavBase64) {
-    return {
-      captions: [],
-      providerUsed: 'None',
-      error: 'Could not extract audio track from video.',
-    };
+  const chunkDuration = 40;
+  const totalDur = Math.max(1, clip.duration);
+  const chunkStarts: number[] = [];
+  for (let t = 0; t < totalDur - 0.8; t += chunkDuration) {
+    chunkStarts.push(Number(t.toFixed(2)));
   }
+  if (chunkStarts.length === 0) chunkStarts.push(0);
 
-  onStatus?.(
-    `🧠 Sending ${extracted.extractedDuration.toFixed(0)}s of audio (${formatShortTimestamp(extracted.startClipTime)}–${formatShortTimestamp(extracted.startClipTime + extracted.extractedDuration)}) to Gemini 4 Argon for word-level transcription...`
-  );
-
+  const totalChunks = chunkStarts.length;
   const provider = aiSettings.activeProvider;
-  const resp = await fetch('/api/ai-copilot', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      provider,
-      model: aiSettings.models[provider],
-      apiKeyOverride: aiSettings.apiKeys[provider],
-      mode: 'transcribe_audio',
-      userPrompt: 'Transcribe the exact spoken dialogue into 3-5 word karaoke caption segments.',
-      audioBase64: extracted.wavBase64,
-      audioMimeType: 'audio/wav',
-      audioStartOffset: extracted.startClipTime,
-      audioDuration: extracted.extractedDuration,
-      currentPlayhead: clipPlayheadTime,
-      schemeName: clip.schemeName,
-    }),
-  });
+  let allCaptions: CaptionSegment[] = [];
+  let lastProviderUsed = 'gemini-4-argon [Live Audio]';
 
-  if (!resp.ok) {
-    return {
-      captions: [],
-      providerUsed: 'Error',
-      error: `Transcription request failed (${resp.status})`,
-    };
+  // Process chunks in batches of 2 in parallel so multi-minute videos transcribe 2x faster
+  // while streaming captions onto the video player after every batch!
+  const batchSize = 2;
+  for (let b = 0; b < totalChunks; b += batchSize) {
+    const batchIndices = chunkStarts
+      .slice(b, b + batchSize)
+      .map((startSec, offset) => ({ startSec, chunkIdx: b + offset }));
+
+    const firstStart = batchIndices[0].startSec;
+    const lastEnd = Math.min(
+      totalDur,
+      batchIndices[batchIndices.length - 1].startSec + chunkDuration
+    );
+    const pct = Math.min(98, Math.round(((b + 1) / totalChunks) * 100));
+
+    onStatus?.(
+      `🎙️ Transcribing Audio (${ batchIndices[0].chunkIdx + 1 }/${totalChunks} • ${formatShortTimestamp(firstStart)}–${formatShortTimestamp(lastEnd)}) with Gemini 4 Argon...`
+    );
+
+    const batchResults = await Promise.all(
+      batchIndices.map(async ({ startSec, chunkIdx }) => {
+        const extracted = await extractTimelineAudioWavBase64(
+          clip,
+          source,
+          videoBlob,
+          startSec,
+          chunkDuration
+        );
+        if (!extracted.wavBase64 || extracted.extractedDuration < 0.4) {
+          return { cards: [] as CaptionSegment[], modelUsed: '' };
+        }
+
+        try {
+          const resp = await fetch('/api/ai-copilot', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              provider,
+              model: aiSettings.models[provider],
+              apiKeyOverride: aiSettings.apiKeys[provider],
+              mode: 'transcribe_audio',
+              userPrompt:
+                'Transcribe the exact spoken dialogue into 3-5 word karaoke caption segments.',
+              audioBase64: extracted.wavBase64,
+              audioMimeType: 'audio/wav',
+              audioStartOffset: extracted.startClipTime,
+              audioDuration: extracted.extractedDuration,
+              currentPlayhead: extracted.startClipTime,
+              schemeName: clip.schemeName,
+            }),
+          });
+
+          if (!resp.ok) return { cards: [] as CaptionSegment[], modelUsed: '' };
+          const data = await resp.json();
+          const rawSegs: Array<{ start: number; end: number; text: string }> =
+            data.transcribedSegments ||
+            data.operations?.find((o: any) => o.type === 'generate_word_captions')
+              ?.captionSegments ||
+            [];
+
+          if (!Array.isArray(rawSegs) || rawSegs.length === 0) {
+            return { cards: [] as CaptionSegment[], modelUsed: data.modelUsed || '' };
+          }
+
+          // Double-check timestamp alignment to `extracted.startClipTime`
+          const firstSegStart = Number(rawSegs[0]?.start) || 0;
+          const addOffset =
+            extracted.startClipTime > 1.0 && firstSegStart < extracted.startClipTime - 1.0
+              ? extracted.startClipTime
+              : 0;
+
+          const cards = buildWordLevelCaptionsFromText(
+            rawSegs.map((s, idx) => ({
+              id: `ai-transcribed-${chunkIdx}-${idx}-${Date.now()}`,
+              start: Number(((Number(s.start) || 0) + addOffset).toFixed(2)),
+              end: Number(((Number(s.end) || 1.8) + addOffset).toFixed(2)),
+              text: String(s.text || '').trim(),
+            })),
+            clip.duration,
+            4,
+            extracted.startClipTime
+          );
+
+          return {
+            cards,
+            modelUsed: data.modelUsed ? `${data.modelUsed} [Live Audio]` : '',
+          };
+        } catch (err) {
+          console.warn(`Chunk ${chunkIdx + 1} transcription error:`, err);
+          return { cards: [] as CaptionSegment[], modelUsed: '' };
+        }
+      })
+    );
+
+    for (const r of batchResults) {
+      if (r.modelUsed) lastProviderUsed = r.modelUsed;
+      if (r.cards.length > 0) {
+        allCaptions.push(...r.cards);
+      }
+    }
+
+    if (allCaptions.length > 0) {
+      allCaptions.sort((a, b) => a.start - b.start);
+      // Prevent any overlapping cards across chunk boundaries
+      for (let i = 0; i < allCaptions.length - 1; i++) {
+        if (allCaptions[i].end > allCaptions[i + 1].start - 0.02) {
+          allCaptions[i].end = Math.max(
+            allCaptions[i].start + 0.25,
+            Number((allCaptions[i + 1].start - 0.02).toFixed(2))
+          );
+        }
+      }
+      const completedPct = Math.min(
+        100,
+        Math.round(((b + batchIndices.length) / totalChunks) * 100)
+      );
+      onPartialCaptions?.([...allCaptions], completedPct);
+    }
   }
 
-  const data = await resp.json();
-  const rawSegs: Array<{ start: number; end: number; text: string }> =
-    data.transcribedSegments ||
-    data.operations?.find((o: any) => o.type === 'generate_word_captions')?.captionSegments ||
-    [];
-
-  if (!Array.isArray(rawSegs) || rawSegs.length === 0) {
+  if (allCaptions.length === 0) {
     return {
       captions: [],
-      providerUsed: data.providerUsed || 'Gemini',
-      error: 'No clear speech segments detected in this audio window.',
+      providerUsed: lastProviderUsed,
+      error: 'No clear speech segments detected in the video audio track.',
     };
   }
-
-  // Convert into crisp 3-5 word karaoke cards with exact word-level timings
-  const wordCaptions = buildWordLevelCaptionsFromText(
-    rawSegs.map((s, idx) => ({
-      id: `ai-transcribed-${idx}-${Date.now()}`,
-      start: Number(s.start) || extracted.startClipTime,
-      end: Number(s.end) || extracted.startClipTime + 2.0,
-      text: String(s.text || '').trim(),
-    })),
-    clip.duration,
-    4,
-    extracted.startClipTime
-  );
-
-  // Merge with any existing captions outside the newly transcribed window
-  const winStart = extracted.startClipTime;
-  const winEnd = extracted.startClipTime + extracted.extractedDuration;
-  const preservedExisting = (clip.captions || []).filter(
-    (c) => c.end <= winStart + 0.2 || c.start >= winEnd - 0.2
-  );
-
-  const combined = [...preservedExisting, ...wordCaptions].sort((a, b) => a.start - b.start);
 
   return {
-    captions: combined,
-    providerUsed: `${data.modelUsed || 'gemini-4-argon'} [Live Audio]`,
+    captions: allCaptions,
+    providerUsed: lastProviderUsed,
   };
 }
 
@@ -605,6 +662,16 @@ export function buildWordLevelCaptionsFromText(
           words,
         });
         cursorT += cardSpan;
+      }
+    }
+
+    finalCards.sort((a, b) => a.start - b.start);
+    for (let i = 0; i < finalCards.length - 1; i++) {
+      if (finalCards[i].end > finalCards[i + 1].start - 0.02) {
+        finalCards[i].end = Math.max(
+          finalCards[i].start + 0.25,
+          Number((finalCards[i + 1].start - 0.02).toFixed(2))
+        );
       }
     }
 

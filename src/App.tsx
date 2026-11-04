@@ -295,6 +295,7 @@ export const App: React.FC = () => {
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState<boolean>(false);
+  const [transcriptionProgress, setTranscriptionProgress] = useState<number>(0);
 
   // 7. Cut Copilot Chat State
   const [chatInput, setChatInput] = useState<string>('');
@@ -1904,11 +1905,12 @@ export const App: React.FC = () => {
     }
   };
 
-  // Run Real AI Speech-to-Text Transcription on the Active Clip's Audio Track
+  // Run Real AI Speech-to-Text Transcription on the Active Clip's Full Audio Track (Chunked across full duration)
   const handleRunAITranscription = useCallback(async () => {
     if (!activeClip || !activeSource || isTranscribingAudio) return;
     setIsTranscribingAudio(true);
-    setMarkerNotice('🎙️ Extracting audio & transcribing speech with Gemini 4 Argon...');
+    setTranscriptionProgress(5);
+    setMarkerNotice('🎙️ Extracting audio & transcribing full video speech with Gemini 4 Argon...');
 
     try {
       const res = await transcribeClipAudioWithAI({
@@ -1918,6 +1920,14 @@ export const App: React.FC = () => {
         aiSettings,
         clipPlayheadTime,
         onStatus: (msg) => setMarkerNotice(msg),
+        onPartialCaptions: (captionsSoFar, pct) => {
+          setTranscriptionProgress(pct);
+          updateActiveTimelineClip((c) => ({
+            ...c,
+            captions: captionsSoFar,
+            captionText: captionsSoFar[0]?.text || c.captionText,
+          }));
+        },
       });
 
       if (res.captions.length > 0) {
@@ -1931,18 +1941,21 @@ export const App: React.FC = () => {
           .map((c) => `"${c.text}"`)
           .join(' → ');
         setMarkerNotice(
-          `✅ Transcribed ${res.captions.length} word-level karaoke cards (${res.providerUsed})!`
+          `✅ Transcribed ${res.captions.length} word-level karaoke cards across full timeline (${res.providerUsed})!`
         );
         setChatMessages((prev) => [
           ...prev,
           {
             id: `transcribed-${Date.now()}`,
             role: 'assistant',
-            content: `Transcribed real speech from your video into ${res.captions.length} word-by-word karaoke caption cards: ${previewLines}${res.captions.length > 4 ? ' ...' : ''}`,
+            content: `Transcribed real speech across your entire ${activeClip.duration.toFixed(0)}s timeline into ${res.captions.length} word-by-word karaoke caption cards: ${previewLines}${res.captions.length > 4 ? ' ...' : ''}`,
             timestamp: new Date().toISOString(),
             providerBadge: res.providerUsed,
             liveApiUsed: true,
-            operationBadges: [`🎤 ${res.captions.length} Word Karaoke Cards`, 'Real Audio STT'],
+            operationBadges: [
+              `🎤 ${res.captions.length} Word Karaoke Cards`,
+              `Full ${activeClip.duration.toFixed(0)}s Audio STT`,
+            ],
           },
         ]);
       } else {
@@ -1952,6 +1965,7 @@ export const App: React.FC = () => {
       setMarkerNotice(`⚠️ Audio transcription failed: ${err?.message || 'Error'}`);
     } finally {
       setIsTranscribingAudio(false);
+      setTranscriptionProgress(0);
       setTimeout(() => setMarkerNotice(null), 4200);
     }
   }, [
@@ -4698,7 +4712,7 @@ export const App: React.FC = () => {
                     title="Extracts real audio from your timeline and transcribes verbatim word-by-word karaoke captions with Gemini 4 Argon"
                   >
                     {isTranscribingAudio
-                      ? '🎙️ Transcribing Audio...'
+                      ? `🎙️ Transcribing (${transcriptionProgress}%)...`
                       : '🎤 AI Transcribe Karaoke Captions'}
                   </button>
 

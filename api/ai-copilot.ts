@@ -290,17 +290,17 @@ export async function handleCopilotRequest(
     if (geminiKey) {
       const startOffset = Number(body.audioStartOffset) || 0;
       const audioDur = Number(body.audioDuration) || 30;
-      const transcribePrompt = `Listen carefully to this attached WAV audio track (${audioDur.toFixed(1)} seconds long, starting at timeline offset ${startOffset.toFixed(2)}s).
-Transcribe the EXACT spoken dialogue verbatim into punchy 9:16 social karaoke caption cards of 3 to 5 words each.
+      const transcribePrompt = `Listen carefully to this attached WAV audio track (${audioDur.toFixed(1)} seconds long).
+Transcribe the EXACT spoken dialogue verbatim from the beginning (0.0s) to the end (${audioDur.toFixed(1)}s) of this audio clip into punchy 9:16 social karaoke caption cards of 3 to 5 words each.
 Rules:
 1. Do NOT invent generic placeholder text. Transcribe ONLY the real words actually spoken in the audio.
-2. Each segment MUST have 3 to 5 words and last between 0.9 and 2.6 seconds.
-3. Timestamps ("start" and "end") MUST be in seconds relative to ${startOffset.toFixed(2)}s (so the first spoken phrase starts around ${startOffset.toFixed(2)} and ends up to ${(startOffset + audioDur).toFixed(2)}).
+2. Each segment MUST have 3 to 5 words and last between 0.9 and 2.5 seconds.
+3. Timestamps ("start" and "end") MUST be in seconds relative to the start of THIS attached audio clip (between 0.0 and ${audioDur.toFixed(1)}).
 4. Respond ONLY with valid JSON matching:
 {
   "reply": "Transcribed verbatim speech into word-level karaoke captions.",
   "segments": [
-    { "start": ${startOffset.toFixed(2)}, "end": ${(startOffset + 1.8).toFixed(2)}, "text": "exact spoken words here" }
+    { "start": 0.2, "end": 1.8, "text": "exact spoken words here" }
   ]
 }`;
 
@@ -350,21 +350,29 @@ Rules:
                 ? parsed.captionSegments
                 : [];
             if (rawSegs.length > 0) {
+              // Normalize segment timestamps to global timeline offset
+              const firstStart = Number(rawSegs[0]?.start) || 0;
+              const needsOffset = startOffset > 1.0 && firstStart < startOffset - 1.0;
+              const alignedSegs = rawSegs.map((s: any) => ({
+                start: Number(((Number(s.start) || 0) + (needsOffset ? startOffset : 0)).toFixed(2)),
+                end: Number(((Number(s.end) || 1.5) + (needsOffset ? startOffset : 0)).toFixed(2)),
+                text: String(s.text || '').trim(),
+              }));
               return {
                 providerUsed: 'Google Gemini Audio',
                 modelUsed: candModel,
                 liveApiUsed: true,
                 reply:
                   parsed.reply ||
-                  `Transcribed ${rawSegs.length} verbatim karaoke caption cards from audio.`,
+                  `Transcribed ${alignedSegs.length} verbatim karaoke caption cards from audio.`,
                 operations: [
                   {
                     type: 'generate_word_captions',
-                    captionSegments: rawSegs,
-                    summary: `Transcribed ${rawSegs.length} Karaoke Cards`,
+                    captionSegments: alignedSegs,
+                    summary: `Transcribed ${alignedSegs.length} Karaoke Cards`,
                   },
                 ],
-                transcribedSegments: rawSegs,
+                transcribedSegments: alignedSegs,
               };
             }
           }
