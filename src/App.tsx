@@ -1592,6 +1592,104 @@ export const App: React.FC = () => {
     outMarker,
   ]);
 
+  // Clear the currently loaded video and reset the workspace
+  const handleClearVideo = useCallback(
+    (e?: React.MouseEvent) => {
+      if (e) e.stopPropagation();
+      if (!activeSource) {
+        setMarkerNotice('No video is currently loaded.');
+        setTimeout(() => setMarkerNotice(null), 2200);
+        return;
+      }
+      if (videoRef.current) {
+        videoRef.current.pause();
+        videoRef.current.removeAttribute('src');
+        videoRef.current.load();
+      }
+      if (activeSource.url && activeSource.url.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(activeSource.url);
+        } catch {
+          // ignore revoke error
+        }
+      }
+      setIsPlaying(false);
+      setIsLoopingInOut(false);
+      uploadedVideoBlobRef.current = null;
+      userFocusAnchorsRef.current = [];
+      setActiveSource(null);
+      setFullVideoClip(null);
+      setGeneratedClips([]);
+      setActiveClipId(null);
+      setTimelineMode('full-source');
+      activeCutIdxRef.current = 0;
+      setSelectedCutIndex(0);
+      setPlayheadTime(0);
+      setClipPlayheadTime(0);
+      setInMarker(null);
+      setOutMarker(null);
+      if (sourceFileInputRef.current) {
+        sourceFileInputRef.current.value = '';
+      }
+      setMarkerNotice('🗑️ Cleared uploaded video and reset timeline.');
+      setTimeout(() => setMarkerNotice(null), 3000);
+    },
+    [activeSource]
+  );
+
+  // Delete all generated/custom clips while keeping the uploaded source video on the timeline
+  const handleClearAllClips = useCallback(
+    (e?: React.MouseEvent) => {
+      if (e) e.stopPropagation();
+      if (generatedClips.length === 0) {
+        setMarkerNotice('No generated clips to delete.');
+        setTimeout(() => setMarkerNotice(null), 2200);
+        return;
+      }
+      const removedCount = generatedClips.length;
+      setGeneratedClips([]);
+      setActiveClipId(null);
+      setTimelineMode('full-source');
+      setIsLoopingInOut(false);
+      activeCutIdxRef.current = 0;
+      setSelectedCutIndex(0);
+      setClipPlayheadTime(0);
+      setPlayheadTime(0);
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0;
+      }
+      setMarkerNotice(`🗑️ Deleted all ${removedCount} clips — Full Uploaded Video is active on the timeline.`);
+      setTimeout(() => setMarkerNotice(null), 3000);
+    },
+    [generatedClips.length]
+  );
+
+  // Delete a single clip from the Ranked Clips & Compilations list
+  const handleDeleteSingleClip = useCallback(
+    (clipId: string, e?: React.MouseEvent) => {
+      if (e) e.stopPropagation();
+      setGeneratedClips((prev) => {
+        const remaining = prev.filter((c) => c.id !== clipId);
+        if (activeClipId === clipId) {
+          if (remaining.length > 0) {
+            setActiveClipId(remaining[0].id);
+            setTimelineMode('elected-clip');
+          } else {
+            setActiveClipId(null);
+            setTimelineMode('full-source');
+          }
+          activeCutIdxRef.current = 0;
+          setSelectedCutIndex(0);
+          setClipPlayheadTime(0);
+        }
+        return remaining;
+      });
+      setMarkerNotice('🗑️ Clip deleted.');
+      setTimeout(() => setMarkerNotice(null), 2200);
+    },
+    [activeClipId]
+  );
+
   // Upload & Analyze Real Video — Loads the Full Uploaded Video onto the timeline with NO automatic clipping!
   const handleUploadVideoFile = async (file: File) => {
     if (videoRef.current) videoRef.current.pause();
@@ -3328,6 +3426,60 @@ export const App: React.FC = () => {
             {activeSource ? 'Upload Video' : 'Upload Video'}
           </button>
 
+          {/* Always-visible Clear Video button */}
+          <button
+            className="btn"
+            onClick={handleClearVideo}
+            disabled={!activeSource || isAnalyzing}
+            style={{
+              borderColor: activeSource
+                ? 'rgba(239, 68, 68, 0.5)'
+                : 'var(--border-subtle)',
+              background: activeSource
+                ? 'rgba(239, 68, 68, 0.15)'
+                : 'rgba(30, 41, 59, 0.45)',
+              color: activeSource ? '#fca5a5' : 'var(--text-muted)',
+              opacity: activeSource ? 1 : 0.65,
+              fontWeight: 600,
+            }}
+            title={
+              activeSource
+                ? `Clear uploaded video "${activeSource.name}" and reset workspace`
+                : 'No video currently loaded'
+            }
+          >
+            <Trash2 size={13} color={activeSource ? '#f87171' : '#64748b'} />
+            Clear Video
+          </button>
+
+          {/* Always-visible Delete Clips button */}
+          <button
+            className="btn"
+            onClick={handleClearAllClips}
+            disabled={generatedClips.length === 0 || isGeneratingClips}
+            style={{
+              borderColor:
+                generatedClips.length > 0
+                  ? 'rgba(245, 158, 11, 0.5)'
+                  : 'var(--border-subtle)',
+              background:
+                generatedClips.length > 0
+                  ? 'rgba(245, 158, 11, 0.15)'
+                  : 'rgba(30, 41, 59, 0.45)',
+              color: generatedClips.length > 0 ? '#fde68a' : 'var(--text-muted)',
+              opacity: generatedClips.length > 0 ? 1 : 0.65,
+              fontWeight: 600,
+            }}
+            title={
+              generatedClips.length > 0
+                ? `Delete all ${generatedClips.length} generated/custom clips (keeps uploaded video on timeline)`
+                : 'No generated clips to delete'
+            }
+          >
+            <Trash2 size={13} color={generatedClips.length > 0 ? '#fbbf24' : '#64748b'} />
+            Delete Clips{generatedClips.length > 0 ? ` (${generatedClips.length})` : ''}
+          </button>
+
           <button
             className="btn btn-purple"
             onClick={() => referenceFileInputRef.current?.click()}
@@ -3938,19 +4090,88 @@ export const App: React.FC = () => {
             )}
           </div>
 
-          {/* Source Video & Generated 9:16 Clips List */}
-          <div className="studio-panel-header">
+          {/* Source Video & Generated 9:16 Clips List — Sticky Header with Always-Visible Clear Video & Delete Clips */}
+          <div
+            className="studio-panel-header"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 6,
+              flexWrap: 'wrap',
+            }}
+          >
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Film size={14} color="#60a5fa" />
               2. Source Video &amp; Ranked Results ({generatedClips.length})
             </span>
-            <span style={{ fontSize: 10.5, color: 'var(--text-secondary)', fontWeight: 400 }}>
-              {timelineMode === 'full-source'
-                ? 'Full Video Active'
-                : currentClipMode === 'condensed-edit'
-                  ? 'Compilations'
-                  : 'Viral Clips'}
-            </span>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={handleClearVideo}
+                disabled={!activeSource || isAnalyzing}
+                style={{
+                  padding: '2px 7px',
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                  borderRadius: 4,
+                  borderColor: activeSource
+                    ? 'rgba(239, 68, 68, 0.5)'
+                    : 'var(--border-subtle)',
+                  background: activeSource
+                    ? 'rgba(239, 68, 68, 0.16)'
+                    : 'rgba(30, 41, 59, 0.45)',
+                  color: activeSource ? '#fca5a5' : 'var(--text-muted)',
+                  opacity: activeSource ? 1 : 0.6,
+                }}
+                title={
+                  activeSource
+                    ? 'Clear uploaded video and reset timeline'
+                    : 'No video currently loaded'
+                }
+              >
+                <Trash2 size={11} color={activeSource ? '#f87171' : '#64748b'} />
+                Clear Video
+              </button>
+
+              <button
+                type="button"
+                className="btn"
+                onClick={handleClearAllClips}
+                disabled={generatedClips.length === 0 || isGeneratingClips}
+                style={{
+                  padding: '2px 7px',
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                  borderRadius: 4,
+                  borderColor:
+                    generatedClips.length > 0
+                      ? 'rgba(245, 158, 11, 0.5)'
+                      : 'var(--border-subtle)',
+                  background:
+                    generatedClips.length > 0
+                      ? 'rgba(245, 158, 11, 0.16)'
+                      : 'rgba(30, 41, 59, 0.45)',
+                  color:
+                    generatedClips.length > 0 ? '#fde68a' : 'var(--text-muted)',
+                  opacity: generatedClips.length > 0 ? 1 : 0.6,
+                }}
+                title={
+                  generatedClips.length > 0
+                    ? `Delete all ${generatedClips.length} clips (keeps uploaded video)`
+                    : 'No clips to delete'
+                }
+              >
+                <Trash2
+                  size={11}
+                  color={generatedClips.length > 0 ? '#fbbf24' : '#64748b'}
+                />
+                Delete Clips
+                {generatedClips.length > 0 ? ` (${generatedClips.length})` : ''}
+              </button>
+            </div>
           </div>
 
           <div
@@ -4019,21 +4240,49 @@ export const App: React.FC = () => {
                       <Video size={14} color="#34d399" />
                       Full Uploaded Video ({(fullVideoClip?.duration ?? activeSource.duration).toFixed(1)}s)
                     </span>
-                    <span
-                      style={{
-                        fontSize: 9.5,
-                        fontWeight: 700,
-                        padding: '2px 6px',
-                        borderRadius: 4,
-                        background:
-                          timelineMode === 'full-source'
-                            ? '#10b981'
-                            : 'rgba(16, 185, 129, 0.18)',
-                        color: timelineMode === 'full-source' ? '#052e16' : '#6ee7b7',
-                      }}
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: 5 }}
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      {timelineMode === 'full-source' ? 'ON TIMELINE' : 'LOAD FULL VIDEO'}
-                    </span>
+                      <span
+                        onClick={selectFullVideoOnTimeline}
+                        style={{
+                          fontSize: 9.5,
+                          fontWeight: 700,
+                          padding: '2px 6px',
+                          borderRadius: 4,
+                          background:
+                            timelineMode === 'full-source'
+                              ? '#10b981'
+                              : 'rgba(16, 185, 129, 0.18)',
+                          color: timelineMode === 'full-source' ? '#052e16' : '#6ee7b7',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {timelineMode === 'full-source' ? 'ON TIMELINE' : 'LOAD FULL VIDEO'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleClearVideo}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 3,
+                          padding: '2px 6px',
+                          fontSize: 9.5,
+                          fontWeight: 700,
+                          borderRadius: 4,
+                          border: '1px solid rgba(239, 68, 68, 0.45)',
+                          background: 'rgba(239, 68, 68, 0.16)',
+                          color: '#fca5a5',
+                          cursor: 'pointer',
+                        }}
+                        title="Clear uploaded video"
+                      >
+                        <Trash2 size={10} />
+                        Clear
+                      </button>
+                    </div>
                   </div>
                   <div
                     style={{
@@ -4088,9 +4337,12 @@ export const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Divider Label */}
+                {/* Divider Label with Delete All Clips button */}
                 <div
                   style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
                     fontSize: 10.5,
                     fontWeight: 600,
                     color: 'var(--text-secondary)',
@@ -4100,7 +4352,31 @@ export const App: React.FC = () => {
                     paddingLeft: 2,
                   }}
                 >
-                  Ranked Clips &amp; Compilations ({generatedClips.length})
+                  <span>Ranked Clips &amp; Compilations ({generatedClips.length})</span>
+                  {generatedClips.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleClearAllClips}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        padding: '2px 7px',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        borderRadius: 4,
+                        border: '1px solid rgba(245, 158, 11, 0.45)',
+                        background: 'rgba(245, 158, 11, 0.14)',
+                        color: '#fcd34d',
+                        cursor: 'pointer',
+                        textTransform: 'none',
+                      }}
+                      title="Delete all generated and custom clips"
+                    >
+                      <Trash2 size={10} />
+                      Delete All Clips
+                    </button>
+                  )}
                 </div>
 
                 {generatedClips.length === 0 ? (
@@ -4187,6 +4463,24 @@ export const App: React.FC = () => {
                           >
                             {clip.viralScore}%
                           </span>
+                          <button
+                            type="button"
+                            onClick={(e) => handleDeleteSingleClip(clip.id, e)}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              padding: '2px 5px',
+                              borderRadius: 4,
+                              border: '1px solid rgba(239, 68, 68, 0.4)',
+                              background: 'rgba(239, 68, 68, 0.14)',
+                              color: '#fca5a5',
+                              cursor: 'pointer',
+                            }}
+                            title={`Delete "${clip.name}"`}
+                          >
+                            <Trash2 size={11} />
+                          </button>
                         </div>
                       </div>
                       <div
