@@ -231,7 +231,7 @@ export async function analyzeUploadedVideo(
 
   onProgress?.('Decoding real audio track & RMS energy...', 15);
   const { peaks, audioPeakTimestamps, highEnergyWindows, audioSampleBase64 } =
-    await extractAudioTelemetry(file, duration);
+    await extractAudioTelemetry(file, duration, Math.min(4800, Math.max(480, Math.ceil(duration * 8))));
 
   const sampleCanvas = document.createElement('canvas');
   const sampleW = 240;

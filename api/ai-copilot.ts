@@ -8,11 +8,16 @@ export interface CopilotRequestPayload {
   provider: 'gemini' | 'claude' | 'openai';
   model?: string;
   apiKeyOverride?: string;
+  mode?: 'chat' | 'transcribe_audio';
   userPrompt: string;
   hasVideoLoaded?: boolean;
   sourceVideoName?: string;
   sourceDuration?: number;
   currentFrameDataUrl?: string; // Live JPEG frame captured from the video player at the current playhead
+  audioBase64?: string; // Real extracted 8kHz mono WAV audio slice from the active clip/timeline
+  audioMimeType?: string;
+  audioStartOffset?: number;
+  audioDuration?: number;
   attachments?: Array<{
     name: string;
     mimeType: string;
@@ -136,6 +141,7 @@ export interface CopilotResponsePayload {
   liveApiUsed: boolean;
   reply: string;
   operations: CopilotOperation[];
+  transcribedSegments?: Array<{ start: number; end: number; text: string }>;
 }
 
 const SYSTEM_PROMPT = `You are "ClipMaker Studio Agent", an expert multimodal 9:16 social video editor and studio controller powered by Gemini 4 Argon.
@@ -276,6 +282,99 @@ export async function handleCopilotRequest(
         : 'gpt-4o';
   const model = body.model || defaultModel;
 
+  // Dedicated Real-Audio Speech-to-Text Transcription Mode (powered by Gemini Multimodal Audio)
+  if (body.mode === 'transcribe_audio' && body.audioBase64) {
+    const geminiKey =
+      resolveProviderApiKey('gemini', provider === 'gemini' ? body.apiKeyOverride : undefined) ||
+      apiKey;
+    if (geminiKey) {
+      const startOffset = Number(body.audioStartOffset) || 0;
+      const audioDur = Number(body.audioDuration) || 30;
+      const transcribePrompt = `Listen carefully to this attached WAV audio track (${audioDur.toFixed(1)} seconds long, starting at timeline offset ${startOffset.toFixed(2)}s).
+Transcribe the EXACT spoken dialogue verbatim into punchy 9:16 social karaoke caption cards of 3 to 5 words each.
+Rules:
+1. Do NOT invent generic placeholder text. Transcribe ONLY the real words actually spoken in the audio.
+2. Each segment MUST have 3 to 5 words and last between 0.9 and 2.6 seconds.
+3. Timestamps ("start" and "end") MUST be in seconds relative to ${startOffset.toFixed(2)}s (so the first spoken phrase starts around ${startOffset.toFixed(2)} and ends up to ${(startOffset + audioDur).toFixed(2)}).
+4. Respond ONLY with valid JSON matching:
+{
+  "reply": "Transcribed verbatim speech into word-level karaoke captions.",
+  "segments": [
+    { "start": ${startOffset.toFixed(2)}, "end": ${(startOffset + 1.8).toFixed(2)}, "text": "exact spoken words here" }
+  ]
+}`;
+
+      const candidateModels = Array.from(
+        new Set([
+          provider === 'gemini' ? model : 'gemini-4-argon',
+          'gemini-4-argon',
+          'gemini-2.5-flash',
+        ])
+      );
+
+      for (const candModel of candidateModels) {
+        try {
+          const resp = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${candModel}:generateContent?key=${encodeURIComponent(geminiKey)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [
+                  {
+                    role: 'user',
+                    parts: [
+                      { text: transcribePrompt },
+                      {
+                        inlineData: {
+                          mimeType: body.audioMimeType || 'audio/wav',
+                          data: body.audioBase64,
+                        },
+                      },
+                    ],
+                  },
+                ],
+                generationConfig: {
+                  temperature: 0.1,
+                  responseMimeType: 'application/json',
+                },
+              }),
+            }
+          );
+          if (resp.ok) {
+            const data: any = await resp.json();
+            const parsed = JSON.parse(extractGeminiJsonText(data));
+            const rawSegs = Array.isArray(parsed.segments)
+              ? parsed.segments
+              : Array.isArray(parsed.captionSegments)
+                ? parsed.captionSegments
+                : [];
+            if (rawSegs.length > 0) {
+              return {
+                providerUsed: 'Google Gemini Audio',
+                modelUsed: candModel,
+                liveApiUsed: true,
+                reply:
+                  parsed.reply ||
+                  `Transcribed ${rawSegs.length} verbatim karaoke caption cards from audio.`,
+                operations: [
+                  {
+                    type: 'generate_word_captions',
+                    captionSegments: rawSegs,
+                    summary: `Transcribed ${rawSegs.length} Karaoke Cards`,
+                  },
+                ],
+                transcribedSegments: rawSegs,
+              };
+            }
+          }
+        } catch (err) {
+          console.warn(`Audio transcription with ${candModel} failed:`, err);
+        }
+      }
+    }
+  }
+
   const contextMessage = JSON.stringify({
     userInstruction: body.userPrompt,
     studioState: {
@@ -315,6 +414,18 @@ export async function handleCopilotRequest(
             inlineData: {
               mimeType: mimeMatch ? mimeMatch[1] : 'image/jpeg',
               data: b64,
+            },
+          });
+        }
+
+        if (body.audioBase64) {
+          userParts.push({
+            text: `[EXTRACTED WAV AUDIO FROM ACTIVE TIMELINE CLIP (Start Offset: ${(body.audioStartOffset ?? 0).toFixed(1)}s, Duration: ${(body.audioDuration ?? 25).toFixed(1)}s) — If the user asks to transcribe or add captions, transcribe the exact spoken words from this audio into "captionSegments" [{start, end, text}] with 3-5 words per card!]:`,
+          });
+          userParts.push({
+            inlineData: {
+              mimeType: body.audioMimeType || 'audio/wav',
+              data: body.audioBase64,
             },
           });
         }

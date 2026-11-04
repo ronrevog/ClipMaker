@@ -50,9 +50,11 @@ import {
 import {
   applyTwoSpeakerEditMode,
   buildWordLevelCaptionsFromText,
+  extractTimelineAudioWavBase64,
   renderComposite9x16Frame,
   snapCutsToAudioBeats,
   stripSilenceFromClip,
+  transcribeClipAudioWithAI,
 } from './services/aiVideoEditorTools';
 import {
   loadAISettings,
@@ -292,6 +294,7 @@ export const App: React.FC = () => {
   const [isCloningRef, setIsCloningRef] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<number>(0);
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState<boolean>(false);
 
   // 7. Cut Copilot Chat State
   const [chatInput, setChatInput] = useState<string>('');
@@ -1901,6 +1904,65 @@ export const App: React.FC = () => {
     }
   };
 
+  // Run Real AI Speech-to-Text Transcription on the Active Clip's Audio Track
+  const handleRunAITranscription = useCallback(async () => {
+    if (!activeClip || !activeSource || isTranscribingAudio) return;
+    setIsTranscribingAudio(true);
+    setMarkerNotice('🎙️ Extracting audio & transcribing speech with Gemini 4 Argon...');
+
+    try {
+      const res = await transcribeClipAudioWithAI({
+        clip: activeClip,
+        source: activeSource,
+        videoBlob: uploadedVideoBlobRef.current,
+        aiSettings,
+        clipPlayheadTime,
+        onStatus: (msg) => setMarkerNotice(msg),
+      });
+
+      if (res.captions.length > 0) {
+        updateActiveTimelineClip((c) => ({
+          ...c,
+          captions: res.captions,
+          captionText: res.captions[0]?.text || c.captionText,
+        }));
+        const previewLines = res.captions
+          .slice(0, 4)
+          .map((c) => `"${c.text}"`)
+          .join(' → ');
+        setMarkerNotice(
+          `✅ Transcribed ${res.captions.length} word-level karaoke cards (${res.providerUsed})!`
+        );
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `transcribed-${Date.now()}`,
+            role: 'assistant',
+            content: `Transcribed real speech from your video into ${res.captions.length} word-by-word karaoke caption cards: ${previewLines}${res.captions.length > 4 ? ' ...' : ''}`,
+            timestamp: new Date().toISOString(),
+            providerBadge: res.providerUsed,
+            liveApiUsed: true,
+            operationBadges: [`🎤 ${res.captions.length} Word Karaoke Cards`, 'Real Audio STT'],
+          },
+        ]);
+      } else {
+        setMarkerNotice(`⚠️ ${res.error || 'No speech detected in this audio segment.'}`);
+      }
+    } catch (err: any) {
+      setMarkerNotice(`⚠️ Audio transcription failed: ${err?.message || 'Error'}`);
+    } finally {
+      setIsTranscribingAudio(false);
+      setTimeout(() => setMarkerNotice(null), 4200);
+    }
+  }, [
+    activeClip,
+    activeSource,
+    isTranscribingAudio,
+    aiSettings,
+    clipPlayheadTime,
+    updateActiveTimelineClip,
+  ]);
+
   // Send Studio Agent / Cut Iteration Feedback in Right Pane Chat
   const handleSendChat = async (
     promptText: string,
@@ -1948,6 +2010,28 @@ export const App: React.FC = () => {
         (p) => p.isUserAnchor
       ).length;
 
+      // If the user is asking for transcription/captions/karaoke, extract the real WAV audio slice so Gemini hears it!
+      let extractedAudio: {
+        wavBase64: string | null;
+        startClipTime: number;
+        extractedDuration: number;
+      } | null = null;
+      if (
+        activeClip &&
+        activeSource &&
+        /\b(caption|captions|subtitle|subtitles|transcribe|karaoke|word[\s-]by[\s-]word|what\s+are\s+they\s+saying)\b/i.test(
+          effectivePrompt
+        )
+      ) {
+        extractedAudio = await extractTimelineAudioWavBase64(
+          activeClip,
+          activeSource,
+          uploadedVideoBlobRef.current,
+          clipPlayheadTime,
+          45
+        );
+      }
+
       const resp = await fetch('/api/ai-copilot', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1960,6 +2044,10 @@ export const App: React.FC = () => {
           sourceVideoName: activeSource?.name,
           sourceDuration: activeSource?.duration,
           currentFrameDataUrl,
+          audioBase64: extractedAudio?.wavBase64 || undefined,
+          audioMimeType: extractedAudio?.wavBase64 ? 'audio/wav' : undefined,
+          audioStartOffset: extractedAudio?.startClipTime,
+          audioDuration: extractedAudio?.extractedDuration,
           attachments: attachmentsToSend.map((a) => ({
             name: a.name,
             mimeType: a.mimeType,
@@ -2438,23 +2526,27 @@ export const App: React.FC = () => {
                   op.captionSegments.map((s: any, idx: number) => ({
                     id: `ai-wcap-${idx}-${Date.now()}`,
                     start: Number(s.start) || 0,
-                    end: Number(s.end) || 2.5,
+                    end: Number(s.end) || 2.0,
                     text: String(s.text || ''),
                   })),
-                  next.duration
+                  next.duration,
+                  4,
+                  clipPlayheadTime
                 );
                 next.captionText = next.captions[0]?.text || next.captionText;
+              } else if (op.captionText) {
+                next.captions = buildWordLevelCaptionsFromText(
+                  op.captionText,
+                  next.duration,
+                  4,
+                  clipPlayheadTime
+                );
+                next.captionText = op.captionText;
               } else {
-                const seedText =
-                  op.captionText ||
-                  next.captionText ||
-                  (next.captions.length > 0
-                    ? next.captions.map((c) => c.text).join(' ')
-                    : `Watch this highlight from ${activeSource.name.replace(/\.[^/.]+$/, '')} — wait for the reaction at the end!`);
-                next.captions = buildWordLevelCaptionsFromText(seedText, next.duration, 4);
-                if (!next.captionText && next.captions[0]) {
-                  next.captionText = next.captions[0].text;
-                }
+                // Trigger real audio transcription asynchronously!
+                setTimeout(() => {
+                  handleRunAITranscription();
+                }, 40);
               }
             } else if (op.type === 'set_playback_speed') {
               const spd = Math.max(0.5, Math.min(2.0, Number(op.speed) || 1.25));
@@ -4578,49 +4670,36 @@ export const App: React.FC = () => {
                     🎵 Beat-Sync Cuts
                   </button>
 
-                  {/* 3. Word-Level Karaoke Captions */}
+                  {/* 3. Word-Level Karaoke Captions (Real Gemini 4 Argon Audio Transcription) */}
                   <button
                     type="button"
                     className="btn"
-                    onClick={() => {
-                      if (!activeClip || !activeSource) return;
-                      updateActiveTimelineClip((clip) => {
-                        const seed =
-                          clip.captionText ||
-                          (clip.captions.length > 0
-                            ? clip.captions.map((c) => c.text).join(' ')
-                            : `Watch this moment from ${activeSource.name.replace(/\.[^/.]+$/, '')} — wait for the payoff!`);
-                        const wordCaps = buildWordLevelCaptionsFromText(seed, clip.duration, 4);
-                        setMarkerNotice(
-                          `🎤 Generated ${wordCaps.length} Word-Level Karaoke Caption cards!`
-                        );
-                        setTimeout(() => setMarkerNotice(null), 3000);
-                        return {
-                          ...clip,
-                          captions: wordCaps,
-                          captionText: clip.captionText || wordCaps[0]?.text || '',
-                        };
-                      });
-                    }}
+                    disabled={isTranscribingAudio}
+                    onClick={handleRunAITranscription}
                     style={{
                       padding: '3px 8px',
                       fontSize: 10.5,
-                      background:
-                        (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
+                      background: isTranscribingAudio
+                        ? 'rgba(59, 130, 246, 0.25)'
+                        : (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
                           ? 'rgba(250, 204, 21, 0.16)'
                           : undefined,
-                      borderColor:
-                        (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
+                      borderColor: isTranscribingAudio
+                        ? '#60a5fa'
+                        : (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
                           ? 'rgba(250, 204, 21, 0.48)'
                           : undefined,
-                      color:
-                        (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
+                      color: isTranscribingAudio
+                        ? '#93c5fd'
+                        : (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
                           ? '#fde047'
                           : undefined,
                     }}
-                    title="Generate word-by-word karaoke highlighted subtitles across the active clip"
+                    title="Extracts real audio from your timeline and transcribes verbatim word-by-word karaoke captions with Gemini 4 Argon"
                   >
-                    🎤 Word Karaoke Captions
+                    {isTranscribingAudio
+                      ? '🎙️ Transcribing Audio...'
+                      : '🎤 AI Transcribe Karaoke Captions'}
                   </button>
 
                   {/* 4. 2-Speaker Top/Bottom Podcast Split-Screen */}
