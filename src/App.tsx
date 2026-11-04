@@ -9,6 +9,8 @@ import {
   CornerDownLeft,
   Crosshair,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   Film,
   Flame,
@@ -18,7 +20,9 @@ import {
   Layers,
   Lock,
   LogOut,
+  Maximize2,
   Mic,
+  Move,
   Paperclip,
   Pause,
   Play,
@@ -30,6 +34,7 @@ import {
   Sliders,
   Sparkles,
   Trash2,
+  Type,
   Upload,
   UserCheck,
   Video,
@@ -54,6 +59,7 @@ import {
   SubjectFocusConfig,
   SubjectFocusStrategy,
   TrackedObjectPoint,
+  VideoOverlayLayer,
 } from './types/editor';
 import {
   applyTwoSpeakerEditMode,
@@ -294,7 +300,46 @@ export const App: React.FC = () => {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isDraggingCrop, setIsDraggingCrop] = useState<boolean>(false);
   const [draggingSpeaker, setDraggingSpeaker] = useState<'A' | 'B' | null>(null);
+  const [scalingSpeaker, setScalingSpeaker] = useState<'A' | 'B' | null>(null);
   const [selectedSpeakerTarget, setSelectedSpeakerTarget] = useState<'A' | 'B'>('A');
+
+  // Resizable Workspace Panel Windows & Multi-Track NLE Layer State
+  const [leftPanelWidth, setLeftPanelWidth] = useState<number>(300);
+  const [rightPanelWidth, setRightPanelWidth] = useState<number>(315);
+  const [timelineHeight, setTimelineHeight] = useState<number>(265);
+  const [resizingPane, setResizingPane] = useState<'left' | 'right' | 'timeline' | null>(null);
+  const [selectedLayerTrack, setSelectedLayerTrack] = useState<
+    'v4-overlay' | 'v3-captions' | 'v2-speaker' | 'v1-video' | 'a1-audio'
+  >('v1-video');
+  const [selectedOverlayLayerId, setSelectedOverlayLayerId] = useState<string | null>(null);
+  const [selectedCaptionId, setSelectedCaptionId] = useState<string | null>(null);
+  const [draggingOutputLayer, setDraggingOutputLayer] = useState<
+    'captions' | 'banner' | 'split-divider' | string | null
+  >(null);
+  const [scalingOutputLayer, setScalingOutputLayer] = useState<
+    'captions' | 'banner' | string | null
+  >(null);
+  const outputOverlayWrapRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!resizingPane) return;
+    const onMove = (e: MouseEvent) => {
+      if (resizingPane === 'left') {
+        setLeftPanelWidth(Math.max(220, Math.min(540, e.clientX)));
+      } else if (resizingPane === 'right') {
+        setRightPanelWidth(Math.max(240, Math.min(560, window.innerWidth - e.clientX)));
+      } else if (resizingPane === 'timeline') {
+        setTimelineHeight(Math.max(175, Math.min(520, window.innerHeight - e.clientY)));
+      }
+    };
+    const onUp = () => setResizingPane(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizingPane]);
 
   // 6. Progress & Busy States
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
@@ -505,12 +550,17 @@ export const App: React.FC = () => {
     activeClip?.backgroundFillStyle,
     activeClip?.speakerAX,
     activeClip?.speakerAY,
+    activeClip?.speakerAScale,
     activeClip?.speakerBX,
     activeClip?.speakerBY,
+    activeClip?.speakerBScale,
+    activeClip?.splitScreenRatio,
     activeClip?.subCuts,
     activeClip?.zoomScale,
     activeClip?.trackingOffsetX,
     activeClip?.subjectFocus,
+    activeClip?.captions,
+    activeClip?.captionText,
     activeClip?.captionFontFamily,
     activeClip?.captionStyle,
     activeClip?.captionPositionY,
@@ -521,6 +571,11 @@ export const App: React.FC = () => {
     activeClip?.captionBgOpacity,
     activeClip?.hideCaptions,
     activeClip?.overlayBannerText,
+    activeClip?.overlayBannerPositionX,
+    activeClip?.overlayBannerPositionY,
+    activeClip?.overlayBannerScale,
+    activeClip?.hideBannerLayer,
+    activeClip?.overlayLayers,
     activeClip?.videoFilter,
   ]);
 
@@ -3711,8 +3766,14 @@ export const App: React.FC = () => {
           </div>
         </header>
 
-        {/* Main 3-Column Workspace */}
-        <main className="studio-workspace">
+        {/* Main 3-Column Resizable Workspace */}
+        <main
+          className="studio-workspace"
+          style={{
+            gridTemplateColumns: `${leftPanelWidth}px 5px 1fr 5px ${rightPanelWidth}px`,
+            gap: 0,
+          }}
+        >
           {/* LEFT PANEL: Generator & Clips */}
           <aside className="studio-panel">
             <div className="studio-panel-header">
@@ -4282,6 +4343,18 @@ export const App: React.FC = () => {
             </div>
           </aside>
 
+          {/* Left Vertical Resize Splitter */}
+          <div
+            className="studio-splitter-v"
+            data-dragging={resizingPane === 'left'}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              setResizingPane('left');
+            }}
+            onDoubleClick={() => setLeftPanelWidth(300)}
+            title="Drag to resize Left Panel (double-click to reset)"
+          />
+
           {/* CENTER STAGE: Dual Monitor & Unified NLE Timeline */}
           <section className="studio-panel" style={{ display: 'flex', flexDirection: 'column' }}>
             <div className="studio-panel-header">
@@ -4464,7 +4537,7 @@ export const App: React.FC = () => {
                       </span>
                       {activeClip?.backgroundFillStyle === 'split-screen' ||
                       activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <div className="seg-group">
                             <button
                               type="button"
@@ -4487,6 +4560,38 @@ export const App: React.FC = () => {
                               Move Speaker B
                             </button>
                           </div>
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                            <span style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>A Scale</span>
+                            <input
+                              type="range"
+                              min={0.5}
+                              max={2.4}
+                              step={0.05}
+                              value={activeClip?.speakerAScale ?? 1.0}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                updateActiveTimelineClip((c) => ({ ...c, speakerAScale: val }));
+                              }}
+                              style={{ width: 42 }}
+                              title="Scale Speaker A crop window size"
+                            />
+                          </div>
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                            <span style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>B Scale</span>
+                            <input
+                              type="range"
+                              min={0.5}
+                              max={2.4}
+                              step={0.05}
+                              value={activeClip?.speakerBScale ?? 1.0}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                updateActiveTimelineClip((c) => ({ ...c, speakerBScale: val }));
+                              }}
+                              style={{ width: 42 }}
+                              title="Scale Speaker B crop window size"
+                            />
+                          </div>
                           <button
                             type="button"
                             className="btn btn-sm"
@@ -4497,12 +4602,15 @@ export const App: React.FC = () => {
                                 ...c,
                                 speakerAX: 0.26,
                                 speakerAY: defY,
+                                speakerAScale: 1.0,
                                 speakerBX: 0.74,
                                 speakerBY: defY,
+                                speakerBScale: 1.0,
+                                splitScreenRatio: 0.5,
                                 trackingOffsetX: 0,
                               }));
                             }}
-                            title="Reset Speaker A and Speaker B to default left/right positions"
+                            title="Reset Speaker A and Speaker B positions and scales"
                           >
                             Reset A & B
                           </button>
@@ -4525,13 +4633,38 @@ export const App: React.FC = () => {
                         borderRadius: 6,
                         overflow: 'hidden',
                         border: '1px solid var(--border-subtle)',
-                        cursor: draggingSpeaker ? 'grabbing' : 'crosshair',
+                        cursor: scalingSpeaker
+                          ? 'nwse-resize'
+                          : draggingSpeaker
+                            ? 'grabbing'
+                            : 'crosshair',
                       }}
                       onMouseDown={(e) => {
                         setIsDraggingCrop(true);
                         handlePointerOnSourceVideo(e, false);
                       }}
                       onMouseMove={(e) => {
+                        if (scalingSpeaker && sourceOverlayWrapRef.current && activeClip) {
+                          const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
+                          const nx = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
+                          const isVert = nativeDims.width < nativeDims.height;
+                          const baseW = isVert ? 0.46 : 0.44;
+                          const centerX =
+                            scalingSpeaker === 'A'
+                              ? activeClip.speakerAX ?? 0.26
+                              : activeClip.speakerBX ?? 0.74;
+                          const halfSpan = Math.max(0.09, Math.min(0.45, Math.abs(nx - centerX)));
+                          const desiredBoxW = halfSpan * 2;
+                          const computedScale = Number(
+                            Math.max(0.5, Math.min(2.4, baseW / desiredBoxW)).toFixed(2)
+                          );
+                          updateActiveTimelineClip((c) =>
+                            scalingSpeaker === 'A'
+                              ? { ...c, speakerAScale: computedScale }
+                              : { ...c, speakerBScale: computedScale }
+                          );
+                          return;
+                        }
                         if (draggingSpeaker && sourceOverlayWrapRef.current) {
                           const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
                           const nx = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
@@ -4542,7 +4675,8 @@ export const App: React.FC = () => {
                         if (isDraggingCrop) handlePointerOnSourceVideo(e, false);
                       }}
                       onMouseUp={(e) => {
-                        if (draggingSpeaker) {
+                        if (scalingSpeaker || draggingSpeaker) {
+                          setScalingSpeaker(null);
                           setDraggingSpeaker(null);
                           setIsDraggingCrop(false);
                           return;
@@ -4553,13 +4687,14 @@ export const App: React.FC = () => {
                         }
                       }}
                       onMouseLeave={() => {
+                        setScalingSpeaker(null);
                         setDraggingSpeaker(null);
                         setIsDraggingCrop(false);
                       }}
                       title={
                         activeClip?.backgroundFillStyle === 'split-screen' ||
                         activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
-                          ? 'Drag Speaker A or Speaker B box freely anywhere on the video'
+                          ? 'Drag Speaker A or Speaker B box freely or drag its bottom-right corner handle to scale'
                           : 'Click any subject to lock 9:16 crop'
                       }
                     >
@@ -4652,7 +4787,7 @@ export const App: React.FC = () => {
                           );
                         })}
 
-                      {/* Freely Draggable Speaker A & Speaker B Selectors OR Single 9:16 Crop Guide */}
+                      {/* Freely Draggable & Scalable Speaker A & Speaker B Selectors OR Single 9:16 Crop Guide */}
                       {activeClip?.backgroundFillStyle === 'split-screen' ||
                       activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
                         (() => {
@@ -4667,6 +4802,8 @@ export const App: React.FC = () => {
                             0.06,
                             Math.min(0.94, activeClip?.speakerAY ?? defaultY)
                           );
+                          const scaleA = Math.max(0.5, Math.min(2.4, activeClip?.speakerAScale ?? 1.0));
+
                           const spkBX = Math.max(
                             0.06,
                             Math.min(0.94, (activeClip?.speakerBX ?? 0.74) + fineX)
@@ -4675,32 +4812,39 @@ export const App: React.FC = () => {
                             0.06,
                             Math.min(0.94, activeClip?.speakerBY ?? defaultY)
                           );
+                          const scaleB = Math.max(0.5, Math.min(2.4, activeClip?.speakerBScale ?? 1.0));
 
-                          const boxW = isVert ? 0.46 : 0.44;
-                          const boxH = isVert ? 0.24 : 0.68;
-                          const leftBoxX = Math.max(0, Math.min(1 - boxW, spkAX - boxW / 2));
-                          const leftBoxY = Math.max(0, Math.min(1 - boxH, spkAY - boxH / 2));
-                          const rightBoxX = Math.max(0, Math.min(1 - boxW, spkBX - boxW / 2));
-                          const rightBoxY = Math.max(0, Math.min(1 - boxH, spkBY - boxH / 2));
+                          const baseW = isVert ? 0.46 : 0.44;
+                          const baseH = isVert ? 0.24 : 0.68;
+                          const boxWA = Math.max(0.16, Math.min(0.9, baseW / scaleA));
+                          const boxHA = Math.max(0.12, Math.min(0.9, baseH / scaleA));
+                          const boxWB = Math.max(0.16, Math.min(0.9, baseW / scaleB));
+                          const boxHB = Math.max(0.12, Math.min(0.9, baseH / scaleB));
+
+                          const leftBoxX = Math.max(0, Math.min(1 - boxWA, spkAX - boxWA / 2));
+                          const leftBoxY = Math.max(0, Math.min(1 - boxHA, spkAY - boxHA / 2));
+                          const rightBoxX = Math.max(0, Math.min(1 - boxWB, spkBX - boxWB / 2));
+                          const rightBoxY = Math.max(0, Math.min(1 - boxHB, spkBY - boxHB / 2));
 
                           const isSelA = selectedSpeakerTarget === 'A' || draggingSpeaker === 'A';
                           const isSelB = selectedSpeakerTarget === 'B' || draggingSpeaker === 'B';
 
                           return (
                             <>
-                              {/* Draggable Speaker A Selector Box */}
+                              {/* Draggable & Scalable Speaker A Selector Box */}
                               <div
                                 onMouseDown={(e) => {
                                   e.stopPropagation();
                                   setSelectedSpeakerTarget('A');
                                   setDraggingSpeaker('A');
+                                  setSelectedLayerTrack('v2-speaker');
                                 }}
                                 style={{
                                   position: 'absolute',
                                   left: `${leftBoxX * 100}%`,
                                   top: `${leftBoxY * 100}%`,
-                                  width: `${boxW * 100}%`,
-                                  height: `${boxH * 100}%`,
+                                  width: `${boxWA * 100}%`,
+                                  height: `${boxHA * 100}%`,
                                   border: isSelA
                                     ? '2px solid #fafafa'
                                     : '1.5px dashed rgba(250, 250, 250, 0.75)',
@@ -4711,7 +4855,7 @@ export const App: React.FC = () => {
                                   zIndex: isSelA ? 6 : 5,
                                   userSelect: 'none',
                                 }}
-                                title="Drag freely to position Speaker A (Top Panel)"
+                                title="Drag to move Speaker A · Drag bottom-right corner handle to scale"
                               >
                                 <div
                                   style={{
@@ -4729,7 +4873,7 @@ export const App: React.FC = () => {
                                     pointerEvents: 'none',
                                   }}
                                 >
-                                  SPEAKER A · DRAG
+                                  SPEAKER A · {scaleA.toFixed(2)}x
                                 </div>
                                 <div
                                   style={{
@@ -4745,21 +4889,43 @@ export const App: React.FC = () => {
                                     pointerEvents: 'none',
                                   }}
                                 />
+                                {/* Bottom-Right Scale Handle for Speaker A */}
+                                <div
+                                  onMouseDown={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedSpeakerTarget('A');
+                                    setScalingSpeaker('A');
+                                    setSelectedLayerTrack('v2-speaker');
+                                  }}
+                                  style={{
+                                    position: 'absolute',
+                                    right: -4,
+                                    bottom: -4,
+                                    width: 11,
+                                    height: 11,
+                                    background: '#fafafa',
+                                    border: '1px solid #09090b',
+                                    borderRadius: 2,
+                                    cursor: 'nwse-resize',
+                                  }}
+                                  title="Drag corner to scale Speaker A crop box"
+                                />
                               </div>
 
-                              {/* Draggable Speaker B Selector Box */}
+                              {/* Draggable & Scalable Speaker B Selector Box */}
                               <div
                                 onMouseDown={(e) => {
                                   e.stopPropagation();
                                   setSelectedSpeakerTarget('B');
                                   setDraggingSpeaker('B');
+                                  setSelectedLayerTrack('v2-speaker');
                                 }}
                                 style={{
                                   position: 'absolute',
                                   left: `${rightBoxX * 100}%`,
                                   top: `${rightBoxY * 100}%`,
-                                  width: `${boxW * 100}%`,
-                                  height: `${boxH * 100}%`,
+                                  width: `${boxWB * 100}%`,
+                                  height: `${boxHB * 100}%`,
                                   border: isSelB
                                     ? '2px solid #fafafa'
                                     : '1.5px dashed rgba(212, 212, 216, 0.75)',
@@ -4770,7 +4936,7 @@ export const App: React.FC = () => {
                                   zIndex: isSelB ? 6 : 5,
                                   userSelect: 'none',
                                 }}
-                                title="Drag freely to position Speaker B (Bottom Panel)"
+                                title="Drag to move Speaker B · Drag bottom-right corner handle to scale"
                               >
                                 <div
                                   style={{
@@ -4788,7 +4954,7 @@ export const App: React.FC = () => {
                                     pointerEvents: 'none',
                                   }}
                                 >
-                                  SPEAKER B · DRAG
+                                  SPEAKER B · {scaleB.toFixed(2)}x
                                 </div>
                                 <div
                                   style={{
@@ -4803,6 +4969,27 @@ export const App: React.FC = () => {
                                     background: 'rgba(9, 9, 11, 0.75)',
                                     pointerEvents: 'none',
                                   }}
+                                />
+                                {/* Bottom-Right Scale Handle for Speaker B */}
+                                <div
+                                  onMouseDown={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedSpeakerTarget('B');
+                                    setScalingSpeaker('B');
+                                    setSelectedLayerTrack('v2-speaker');
+                                  }}
+                                  style={{
+                                    position: 'absolute',
+                                    right: -4,
+                                    bottom: -4,
+                                    width: 11,
+                                    height: 11,
+                                    background: '#fafafa',
+                                    border: '1px solid #09090b',
+                                    borderRadius: 2,
+                                    cursor: 'nwse-resize',
+                                  }}
+                                  title="Drag corner to scale Speaker B crop box"
                                 />
                               </div>
                             </>
@@ -4843,7 +5030,7 @@ export const App: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* 9:16 Output Monitor */}
+                  {/* 9:16 Output Monitor with Interactive Layer Dragging & Scaling */}
                   <div
                     style={{
                       height: '100%',
@@ -4862,31 +5049,377 @@ export const App: React.FC = () => {
                         alignItems: 'center',
                         marginBottom: 4,
                         padding: '0 2px',
+                        gap: 6,
                       }}
                     >
                       <span className="section-label">9:16 Output</span>
-                      <span className="badge-subtle">
+                      <span className="badge-subtle" title="Drag or scale layers directly on the 9:16 monitor">
                         {activeClip?.backgroundFillStyle === 'split-screen'
-                          ? 'Split-Screen'
+                          ? `Split ${Math.round((activeClip?.splitScreenRatio ?? 0.5) * 100)}/${Math.round((1 - (activeClip?.splitScreenRatio ?? 0.5)) * 100)}`
                           : activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
                             ? 'Auto-Switch'
                             : '1080×1920'}
                       </span>
                     </div>
 
-                    <canvas
-                      ref={preview9x16CanvasRef}
-                      width={540}
-                      height={960}
+                    <div
+                      ref={outputOverlayWrapRef}
                       style={{
+                        position: 'relative',
                         height: 'calc(100% - 22px)',
                         width: 'auto',
                         aspectRatio: '9 / 16',
-                        background: '#000',
                         borderRadius: 6,
+                        overflow: 'hidden',
                         border: '1px solid var(--border-strong)',
+                        background: '#000',
+                        userSelect: 'none',
                       }}
-                    />
+                      onMouseMove={(e) => {
+                        if ((!draggingOutputLayer && !scalingOutputLayer) || !outputOverlayWrapRef.current || !activeClip)
+                          return;
+                        const rect = outputOverlayWrapRef.current.getBoundingClientRect();
+                        if (rect.width <= 4 || rect.height <= 4) return;
+                        const normX = Math.max(0.08, Math.min(0.92, (e.clientX - rect.left) / rect.width));
+                        const normY = Math.max(0.06, Math.min(0.94, (e.clientY - rect.top) / rect.height));
+
+                        if (scalingOutputLayer) {
+                          if (scalingOutputLayer === 'captions') {
+                            const cx = activeClip.captionPositionX ?? 0.5;
+                            const dist = Math.abs(normX - cx);
+                            const newScale = Number(
+                              Math.max(0.55, Math.min(2.2, dist / 0.28)).toFixed(2)
+                            );
+                            updateActiveTimelineClip((c) => ({ ...c, captionFontScale: newScale }));
+                          } else if (scalingOutputLayer === 'banner') {
+                            const cx = activeClip.overlayBannerPositionX ?? 0.5;
+                            const dist = Math.abs(normX - cx);
+                            const newScale = Number(
+                              Math.max(0.55, Math.min(2.4, dist / 0.28)).toFixed(2)
+                            );
+                            updateActiveTimelineClip((c) => ({ ...c, overlayBannerScale: newScale }));
+                          } else {
+                            updateActiveTimelineClip((c) => ({
+                              ...c,
+                              overlayLayers: (c.overlayLayers || []).map((ly) => {
+                                if (ly.id !== scalingOutputLayer) return ly;
+                                const dist = Math.abs(normX - ly.x);
+                                const newScale = Number(
+                                  Math.max(0.5, Math.min(2.5, dist / 0.25)).toFixed(2)
+                                );
+                                return { ...ly, scale: newScale };
+                              }),
+                            }));
+                          }
+                          return;
+                        }
+
+                        if (draggingOutputLayer === 'split-divider') {
+                          const ratio = Number(Math.max(0.25, Math.min(0.75, normY)).toFixed(2));
+                          updateActiveTimelineClip((c) => ({ ...c, splitScreenRatio: ratio }));
+                        } else if (draggingOutputLayer === 'captions') {
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            captionPositionX: Number(normX.toFixed(3)),
+                            captionPositionY: Number(normY.toFixed(3)),
+                          }));
+                        } else if (draggingOutputLayer === 'banner') {
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            overlayBannerPositionX: Number(normX.toFixed(3)),
+                            overlayBannerPositionY: Number(normY.toFixed(3)),
+                          }));
+                        } else if (draggingOutputLayer) {
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            overlayLayers: (c.overlayLayers || []).map((ly) =>
+                              ly.id === draggingOutputLayer
+                                ? {
+                                    ...ly,
+                                    x: Number(normX.toFixed(3)),
+                                    y: Number(normY.toFixed(3)),
+                                  }
+                                : ly
+                            ),
+                          }));
+                        }
+                      }}
+                      onMouseUp={() => {
+                        setDraggingOutputLayer(null);
+                        setScalingOutputLayer(null);
+                      }}
+                      onMouseLeave={() => {
+                        setDraggingOutputLayer(null);
+                        setScalingOutputLayer(null);
+                      }}
+                    >
+                      <canvas
+                        ref={preview9x16CanvasRef}
+                        width={540}
+                        height={960}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          display: 'block',
+                        }}
+                      />
+
+                      {/* Interactive Split-Screen Divider Handle on 9:16 Output */}
+                      {activeClip?.backgroundFillStyle === 'split-screen' && (
+                        <div
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            setSelectedLayerTrack('v2-speaker');
+                            setDraggingOutputLayer('split-divider');
+                          }}
+                          title="Drag up/down to scale Top (Speaker A) vs Bottom (Speaker B) panel height"
+                          style={{
+                            position: 'absolute',
+                            left: 0,
+                            right: 0,
+                            top: `${(activeClip.splitScreenRatio ?? 0.5) * 100}%`,
+                            height: 12,
+                            transform: 'translateY(-50%)',
+                            cursor: 'ns-resize',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            zIndex: 18,
+                          }}
+                        >
+                          <div
+                            style={{
+                              padding: '1px 6px',
+                              borderRadius: 3,
+                              background: 'rgba(9, 9, 11, 0.85)',
+                              border: '1px solid rgba(255,255,255,0.35)',
+                              color: '#fafafa',
+                              fontSize: 8.5,
+                              fontFamily: 'var(--font-mono)',
+                              letterSpacing: '0.03em',
+                            }}
+                          >
+                            SPLIT {Math.round((activeClip.splitScreenRatio ?? 0.5) * 100)}%
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Interactive V4 Title Banner Box on 9:16 Output */}
+                      {activeClip &&
+                        !activeClip.hideBannerLayer &&
+                        activeClip.overlayBannerText &&
+                        activeClip.overlayBannerText.trim().length > 0 && (
+                          <div
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              setSelectedLayerTrack('v4-overlay');
+                              setSelectedOverlayLayerId('__banner__');
+                              setDraggingOutputLayer('banner');
+                            }}
+                            title="V4 Banner Layer — Drag to move, drag bottom-right corner to scale"
+                            style={{
+                              position: 'absolute',
+                              left: `${(activeClip.overlayBannerPositionX ?? 0.5) * 100}%`,
+                              top: `${(activeClip.overlayBannerPositionY ?? 0.14) * 100}%`,
+                              width: `${Math.min(92, Math.max(36, 56 * (activeClip.overlayBannerScale ?? 1.0)))}%`,
+                              height: `${Math.min(28, Math.max(9, 12 * (activeClip.overlayBannerScale ?? 1.0)))}%`,
+                              transform: 'translate(-50%, -50%)',
+                              border:
+                                selectedLayerTrack === 'v4-overlay' &&
+                                selectedOverlayLayerId === '__banner__'
+                                  ? '1.5px dashed #f59e0b'
+                                  : '1px dashed rgba(245, 158, 11, 0.45)',
+                              borderRadius: 4,
+                              cursor: 'move',
+                              zIndex: 20,
+                            }}
+                          >
+                            <span
+                              style={{
+                                position: 'absolute',
+                                top: -14,
+                                left: 0,
+                                background: 'rgba(245, 158, 11, 0.92)',
+                                color: '#09090b',
+                                fontSize: 8,
+                                fontWeight: 700,
+                                fontFamily: 'var(--font-mono)',
+                                padding: '0 4px',
+                                borderRadius: 2,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              V4 BANNER · {Math.round((activeClip.overlayBannerScale ?? 1) * 100)}%
+                            </span>
+                            <div
+                              onMouseDown={(e) => {
+                                e.stopPropagation();
+                                setSelectedLayerTrack('v4-overlay');
+                                setSelectedOverlayLayerId('__banner__');
+                                setScalingOutputLayer('banner');
+                              }}
+                              title="Drag corner to scale V4 Banner Layer"
+                              style={{
+                                position: 'absolute',
+                                right: -5,
+                                bottom: -5,
+                                width: 10,
+                                height: 10,
+                                background: '#f59e0b',
+                                border: '1.5px solid #09090b',
+                                borderRadius: 2,
+                                cursor: 'nwse-resize',
+                              }}
+                            />
+                          </div>
+                        )}
+
+                      {/* Interactive Custom V4 VideoOverlayLayer Items on 9:16 Output */}
+                      {activeClip &&
+                        !activeClip.hideBannerLayer &&
+                        (activeClip.overlayLayers || []).map((ly) => {
+                          if (!ly.visible || !ly.text.trim()) return null;
+                          if (
+                            clipPlayheadTime < ly.startTime - 0.05 ||
+                            clipPlayheadTime > ly.endTime + 0.05
+                          ) {
+                            return null;
+                          }
+                          const isSel =
+                            selectedLayerTrack === 'v4-overlay' && selectedOverlayLayerId === ly.id;
+                          return (
+                            <div
+                              key={ly.id}
+                              onMouseDown={(e) => {
+                                e.stopPropagation();
+                                setSelectedLayerTrack('v4-overlay');
+                                setSelectedOverlayLayerId(ly.id);
+                                setDraggingOutputLayer(ly.id);
+                              }}
+                              title={`V4 Layer "${ly.text}" — Drag to move, corner to scale`}
+                              style={{
+                                position: 'absolute',
+                                left: `${ly.x * 100}%`,
+                                top: `${ly.y * 100}%`,
+                                width: `${Math.min(92, Math.max(32, 50 * (ly.scale || 1)))}%`,
+                                height: `${Math.min(26, Math.max(8, 11 * (ly.scale || 1)))}%`,
+                                transform: 'translate(-50%, -50%)',
+                                border: isSel
+                                  ? '1.5px dashed #f59e0b'
+                                  : '1px dashed rgba(245, 158, 11, 0.45)',
+                                borderRadius: 4,
+                                cursor: 'move',
+                                zIndex: 21,
+                              }}
+                            >
+                              <span
+                                style={{
+                                  position: 'absolute',
+                                  top: -14,
+                                  left: 0,
+                                  background: 'rgba(245, 158, 11, 0.92)',
+                                  color: '#09090b',
+                                  fontSize: 8,
+                                  fontWeight: 700,
+                                  fontFamily: 'var(--font-mono)',
+                                  padding: '0 4px',
+                                  borderRadius: 2,
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                V4 TEXT · {Math.round((ly.scale || 1) * 100)}%
+                              </span>
+                              <div
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedLayerTrack('v4-overlay');
+                                  setSelectedOverlayLayerId(ly.id);
+                                  setScalingOutputLayer(ly.id);
+                                }}
+                                title="Drag corner to scale text layer"
+                                style={{
+                                  position: 'absolute',
+                                  right: -5,
+                                  bottom: -5,
+                                  width: 10,
+                                  height: 10,
+                                  background: '#f59e0b',
+                                  border: '1.5px solid #09090b',
+                                  borderRadius: 2,
+                                  cursor: 'nwse-resize',
+                                }}
+                              />
+                            </div>
+                          );
+                        })}
+
+                      {/* Interactive V3 Captions Layer Box on 9:16 Output */}
+                      {activeClip &&
+                        !activeClip.hideCaptions &&
+                        ((activeClip.captions && activeClip.captions.length > 0) ||
+                          (activeClip.captionText && activeClip.captionText.trim().length > 0)) && (
+                          <div
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              setSelectedLayerTrack('v3-captions');
+                              setDraggingOutputLayer('captions');
+                            }}
+                            title="V3 Captions Layer — Drag anywhere on 9:16 Output to reposition, drag corner to scale font size"
+                            style={{
+                              position: 'absolute',
+                              left: `${(activeClip.captionPositionX ?? 0.5) * 100}%`,
+                              top: `${(activeClip.captionPositionY ?? 0.77) * 100}%`,
+                              width: `${Math.min(94, Math.max(40, 58 * (activeClip.captionFontScale ?? 1.0)))}%`,
+                              height: `${Math.min(28, Math.max(9, 13 * (activeClip.captionFontScale ?? 1.0)))}%`,
+                              transform: 'translate(-50%, -50%)',
+                              border:
+                                selectedLayerTrack === 'v3-captions'
+                                  ? '1.5px dashed #a855f7'
+                                  : '1px dashed rgba(168, 85, 247, 0.45)',
+                              borderRadius: 4,
+                              cursor: 'move',
+                              zIndex: 19,
+                            }}
+                          >
+                            <span
+                              style={{
+                                position: 'absolute',
+                                top: -14,
+                                left: 0,
+                                background: 'rgba(168, 85, 247, 0.92)',
+                                color: '#fafafa',
+                                fontSize: 8,
+                                fontWeight: 700,
+                                fontFamily: 'var(--font-mono)',
+                                padding: '0 4px',
+                                borderRadius: 2,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              V3 CAPTIONS · {Math.round((activeClip.captionFontScale ?? 1) * 100)}%
+                            </span>
+                            <div
+                              onMouseDown={(e) => {
+                                e.stopPropagation();
+                                setSelectedLayerTrack('v3-captions');
+                                setScalingOutputLayer('captions');
+                              }}
+                              title="Drag corner to scale V3 Captions font size"
+                              style={{
+                                position: 'absolute',
+                                right: -5,
+                                bottom: -5,
+                                width: 10,
+                                height: 10,
+                                background: '#a855f7',
+                                border: '1.5px solid #09090b',
+                                borderRadius: 2,
+                                cursor: 'nwse-resize',
+                              }}
+                            />
+                          </div>
+                        )}
+                    </div>
                   </div>
                 </div>
 
@@ -5425,19 +5958,33 @@ export const App: React.FC = () => {
               </>
             )}
 
-            {/* Unified Bar 2: Transport, Razor, In/Out & Timeline Scrubber */}
+            {/* Horizontal Resizable Splitter between Video Monitors and Multi-Track Layer Dock */}
+            {activeSource && activeClip && (
+              <div
+                className={`studio-splitter-h ${resizingPane === 'timeline' ? 'is-dragging' : ''}`}
+                onMouseDown={() => setResizingPane('timeline')}
+                onDoubleClick={() => setTimelineHeight(265)}
+                title="Drag to resize Video Monitors vs Multi-Track Layer Timeline (double-click to reset)"
+              />
+            )}
+
+            {/* Multi-Track NLE Layer Dock: Transport, Video Layers (V4/V3/V2/V1/A1) & Active Layer Inspector */}
             {activeSource && activeClip && (
               <div
                 style={{
+                  height: timelineHeight,
+                  minHeight: 175,
+                  maxHeight: 520,
+                  flexShrink: 0,
                   padding: '8px 12px 10px',
                   background: 'var(--bg-panel)',
-                  borderTop: '1px solid var(--border-subtle)',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: 8,
+                  gap: 6,
+                  overflowY: 'auto',
                 }}
               >
-                {/* Transport & In/Out Controls */}
+                {/* Transport & Layer Actions Bar */}
                 <div
                   style={{
                     display: 'flex',
@@ -5447,18 +5994,18 @@ export const App: React.FC = () => {
                     gap: 8,
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <button
                       className="btn btn-primary"
                       style={{
-                        height: 30,
-                        padding: '0 14px',
+                        height: 28,
+                        padding: '0 12px',
                         fontSize: 12,
                         fontWeight: 600,
                       }}
                       onClick={() => handleTogglePlay(false)}
                     >
-                      {isPlaying && !isLoopingInOut ? <Pause size={14} /> : <Play size={14} />}
+                      {isPlaying && !isLoopingInOut ? <Pause size={13} /> : <Play size={13} />}
                       {isPlaying && !isLoopingInOut ? 'Pause' : 'Play'}
                     </button>
 
@@ -5466,8 +6013,8 @@ export const App: React.FC = () => {
                       type="button"
                       className={`btn ${isMuted ? 'btn-danger' : 'btn-active'}`}
                       style={{
-                        height: 30,
-                        padding: '0 12px',
+                        height: 28,
+                        padding: '0 11px',
                         fontSize: 12,
                         fontWeight: 600,
                         gap: 6,
@@ -5479,7 +6026,7 @@ export const App: React.FC = () => {
                       }}
                       title={isMuted ? 'Click to turn sound ON' : 'Click to mute sound'}
                     >
-                      {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                      {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
                       {isMuted ? 'Sound Off (Muted)' : 'Sound On'}
                     </button>
 
@@ -5500,7 +6047,83 @@ export const App: React.FC = () => {
                       className="btn btn-sm"
                       onClick={handleSplitAtPlayhead}
                     >
-                      Split
+                      Split Cut
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => {
+                        const newId = `ov-${Date.now()}`;
+                        const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
+                        const endT = Number(
+                          Math.min(activeClip.duration, startT + Math.min(6, activeClip.duration)).toFixed(2)
+                        );
+                        const newLayer: VideoOverlayLayer = {
+                          id: newId,
+                          name: `Text Layer ${(activeClip.overlayLayers?.length || 0) + 1}`,
+                          kind: 'text-banner',
+                          text: 'NEW OVERLAY TEXT',
+                          x: 0.5,
+                          y: 0.22,
+                          scale: 1.0,
+                          startTime: startT,
+                          endTime: Math.max(startT + 0.5, endT),
+                          bgColor: 'rgba(12, 12, 16, 0.88)',
+                          textColor: '#ffffff',
+                          visible: true,
+                        };
+                        updateActiveTimelineClip((c) => ({
+                          ...c,
+                          hideBannerLayer: false,
+                          overlayLayers: [...(c.overlayLayers || []), newLayer],
+                        }));
+                        setSelectedLayerTrack('v4-overlay');
+                        setSelectedOverlayLayerId(newId);
+                      }}
+                      title="Add a new movable & scalable V4 Text Overlay Layer at the playhead"
+                    >
+                      <Plus size={11} />
+                      + Text Layer (V4)
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => {
+                        const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
+                        const endT = Number(
+                          Math.min(activeClip.duration, startT + 3.0).toFixed(2)
+                        );
+                        const newCapId = `cap-manual-${Date.now()}`;
+                        updateActiveTimelineClip((c) => {
+                          const existing = c.captions || [];
+                          const nextSeg = {
+                            id: newCapId,
+                            start: startT,
+                            end: Math.max(startT + 0.4, endT),
+                            text: c.captionText || 'New caption layer',
+                            words: [
+                              {
+                                word: c.captionText || 'New caption layer',
+                                start: startT,
+                                end: Math.max(startT + 0.4, endT),
+                              },
+                            ],
+                          };
+                          return {
+                            ...c,
+                            hideCaptions: false,
+                            captions: [...existing, nextSeg],
+                          };
+                        });
+                        setSelectedLayerTrack('v3-captions');
+                        setSelectedCaptionId(newCapId);
+                      }}
+                      title="Add a timed V3 Caption block at the playhead"
+                    >
+                      <Type size={11} />
+                      + Caption (V3)
                     </button>
 
                     {activeClip.subCuts.length > 1 && inspectedCut && (
@@ -5579,241 +6202,1018 @@ export const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Timeline Scrubber Track */}
-                <div
-                  ref={timelineBarRef}
-                  style={{
-                    position: 'relative',
-                    height: 44,
-                    background: 'var(--bg-input)',
-                    border: isRazorMode
-                      ? '1px solid var(--accent-danger)'
-                      : '1px solid var(--border-subtle)',
-                    borderRadius: 5,
-                    cursor: isRazorMode ? 'crosshair' : 'pointer',
-                    overflow: 'hidden',
-                    display: 'flex',
-                    userSelect: 'none',
-                  }}
-                  onMouseDown={(e) => {
-                    if (!timelineBarRef.current || !activeClip) return;
-                    const rect = timelineBarRef.current.getBoundingClientRect();
-                    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                    const clickedClipTime = ratio * activeClip.duration;
-
-                    if (isRazorMode) {
-                      handleRazorSplitAtClipTime(clickedClipTime);
-                      return;
-                    }
-
-                    setDraggingHandle('playhead');
-                    updateTimelineDragAtClientX(e.clientX, 'playhead');
-                  }}
-                  onMouseMove={(e) => {
-                    if (timelineBarRef.current && activeClip) {
-                      const rect = timelineBarRef.current.getBoundingClientRect();
-                      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                      setRazorHoverClipTime(ratio * activeClip.duration);
-                    }
-                    if (!draggingHandle || isRazorMode) return;
-                    updateTimelineDragAtClientX(e.clientX, draggingHandle);
-                  }}
-                  onMouseUp={() => setDraggingHandle(null)}
-                  onMouseLeave={() => {
-                    setDraggingHandle(null);
-                    setRazorHoverClipTime(null);
-                  }}
-                >
-                  {activeClip.subCuts.map((cut, idx) => {
-                    const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
-                    const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
-                    const isCurrentCut =
-                      clipPlayheadTime >= cut.timelineStart - 0.02 &&
-                      clipPlayheadTime <= cut.timelineEnd + 0.02;
-                    const isSelectedCut = idx === selectedCutIndex;
-
-                    const totalBuckets = activeSource.waveformPeaks.length;
-                    const bStart = Math.max(
-                      0,
-                      Math.floor(
-                        (cut.sourceStart / Math.max(1, activeSource.duration)) * totalBuckets
-                      )
-                    );
-                    const bEnd = Math.max(
-                      bStart + 2,
-                      Math.ceil((cut.sourceEnd / Math.max(1, activeSource.duration)) * totalBuckets)
-                    );
-                    const slicePeaks = activeSource.waveformPeaks.slice(bStart, bEnd);
-
-                    return (
-                      <div
-                        key={cut.id}
+                {/* MULTI-TRACK NLE VIDEO LAYER STACK (V4 Overlays, V3 Captions, V2 Speaker B, V1 Video Cuts, A1 Audio) */}
+                <div className="nle-layer-stack">
+                  {/* LAYER V4: TEXT & GRAPHIC OVERLAYS */}
+                  <div
+                    className={`nle-layer-row ${selectedLayerTrack === 'v4-overlay' ? 'is-selected' : ''}`}
+                    style={{ height: 28 }}
+                    onClick={() => setSelectedLayerTrack('v4-overlay')}
+                  >
+                    <div className="nle-layer-header">
+                      <span className="nle-layer-title">
+                        <span style={{ color: '#f59e0b', fontFamily: 'var(--font-mono)' }}>V4</span>
+                        <span>Overlays</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-icon"
+                        style={{ width: 20, height: 20 }}
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (isRazorMode && timelineBarRef.current) {
-                            const rect = timelineBarRef.current.getBoundingClientRect();
-                            const ratio = Math.max(
-                              0,
-                              Math.min(1, (e.clientX - rect.left) / rect.width)
-                            );
-                            handleRazorSplitAtClipTime(ratio * activeClip.duration);
-                            return;
-                          }
-                          setSelectedCutIndex(idx);
-                          activeCutIdxRef.current = idx;
-                          updateTimelineDragAtClientX(e.clientX, 'playhead');
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            hideBannerLayer: !c.hideBannerLayer,
+                          }));
                         }}
-                        style={{
-                          width: `${widthPct}%`,
-                          height: '100%',
-                          position: 'relative',
-                          background: isSelectedCut
-                            ? 'rgba(59, 130, 246, 0.18)'
-                            : isCurrentCut
-                              ? 'rgba(255, 255, 255, 0.06)'
-                              : 'rgba(24, 24, 30, 0.9)',
-                          borderRight:
-                            idx < activeClip.subCuts.length - 1
-                              ? '1px solid var(--border-strong)'
-                              : 'none',
-                          boxShadow: isSelectedCut
-                            ? 'inset 0 0 0 1px rgba(59, 130, 246, 0.65)'
-                            : 'none',
-                          display: 'flex',
-                          alignItems: 'flex-end',
-                          padding: '0 2px',
-                          gap: 1,
-                          overflow: 'hidden',
-                        }}
+                        title={activeClip.hideBannerLayer ? 'Show V4 Overlay Layers' : 'Hide V4 Overlay Layers'}
                       >
+                        {activeClip.hideBannerLayer ? <EyeOff size={11} /> : <Eye size={11} />}
+                      </button>
+                    </div>
+                    <div
+                      className="nle-layer-track"
+                      onMouseDown={(e) => {
+                        setSelectedLayerTrack('v4-overlay');
+                        updateTimelineDragAtClientX(e.clientX, 'playhead');
+                      }}
+                    >
+                      {/* Title Banner Layer Block */}
+                      {activeClip.overlayBannerText && activeClip.overlayBannerText.trim().length > 0 && (
                         <div
+                          className={`nle-layer-block ${
+                            selectedLayerTrack === 'v4-overlay' && selectedOverlayLayerId === '__banner__'
+                              ? 'is-active'
+                              : ''
+                          }`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedLayerTrack('v4-overlay');
+                            setSelectedOverlayLayerId('__banner__');
+                          }}
                           style={{
-                            position: 'absolute',
-                            top: 3,
-                            left: 5,
-                            right: 4,
-                            fontSize: 9.5,
-                            fontFamily: 'var(--font-mono)',
-                            color: isSelectedCut ? 'var(--text-main)' : 'var(--text-secondary)',
-                            pointerEvents: 'none',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            zIndex: 2,
+                            left: '0%',
+                            width: '100%',
+                            background: activeClip.hideBannerLayer
+                              ? 'rgba(113, 113, 122, 0.16)'
+                              : 'rgba(245, 158, 11, 0.24)',
+                            border: '1px solid rgba(245, 158, 11, 0.65)',
+                            color: '#fde68a',
                           }}
                         >
-                          {timelineMode === 'full-source' && activeClip.subCuts.length === 1
-                            ? activeSource.name
-                            : cut.label}
+                          Banner: {activeClip.overlayBannerText} ({Math.round((activeClip.overlayBannerScale ?? 1) * 100)}%)
                         </div>
+                      )}
 
-                        {slicePeaks.map((pk, pIdx) => (
+                      {/* Custom Timed VideoOverlayLayers */}
+                      {(activeClip.overlayLayers || []).map((ly) => {
+                        const dur = Math.max(0.5, activeClip.duration);
+                        const leftPct = Math.max(0, Math.min(98, (ly.startTime / dur) * 100));
+                        const widthPct = Math.max(
+                          3,
+                          Math.min(100 - leftPct, ((ly.endTime - ly.startTime) / dur) * 100)
+                        );
+                        const isSel =
+                          selectedLayerTrack === 'v4-overlay' && selectedOverlayLayerId === ly.id;
+                        return (
                           <div
-                            key={pIdx}
+                            key={ly.id}
+                            className={`nle-layer-block ${isSel ? 'is-active' : ''}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedLayerTrack('v4-overlay');
+                              setSelectedOverlayLayerId(ly.id);
+                            }}
                             style={{
-                              flex: 1,
-                              height: `${Math.max(10, Math.round(pk * 62))}%`,
-                              background: isSelectedCut
-                                ? 'rgba(59, 130, 246, 0.4)'
-                                : 'rgba(161, 161, 170, 0.18)',
+                              left: `${leftPct}%`,
+                              width: `${widthPct}%`,
+                              background: ly.visible
+                                ? 'rgba(245, 158, 11, 0.32)'
+                                : 'rgba(113, 113, 122, 0.2)',
+                              border: '1px solid #f59e0b',
+                              color: '#fef3c7',
+                            }}
+                          >
+                            {ly.text} ({Math.round((ly.scale || 1) * 100)}%)
+                          </div>
+                        );
+                      })}
+
+                      {!activeClip.overlayBannerText?.trim() &&
+                        (!activeClip.overlayLayers || activeClip.overlayLayers.length === 0) && (
+                          <span
+                            style={{
+                              fontSize: 9.5,
+                              color: 'var(--text-muted)',
+                              paddingLeft: 8,
+                              alignSelf: 'center',
                               pointerEvents: 'none',
                             }}
-                          />
-                        ))}
-                      </div>
-                    );
-                  })}
+                          >
+                            Click "+ Text Layer (V4)" or inspect V4 to add title banners & text layers
+                          </span>
+                        )}
 
-                  {/* In / Out Shaded Region */}
-                  {inMarkerPct !== null && outMarkerPct !== null && outMarkerPct >= inMarkerPct && (
-                    <>
+                      {/* Playhead needle */}
                       <div
                         style={{
                           position: 'absolute',
-                          left: `${inMarkerPct}%`,
-                          width: `${Math.max(0.5, outMarkerPct - inMarkerPct)}%`,
+                          left: `${Math.max(0, Math.min(100, (clipPlayheadTime / Math.max(0.1, activeClip.duration)) * 100))}%`,
                           top: 0,
                           bottom: 0,
-                          background: 'rgba(250, 250, 250, 0.06)',
-                          borderTop: '1px solid rgba(250, 250, 250, 0.45)',
-                          borderBottom: '1px solid rgba(250, 250, 250, 0.45)',
+                          width: 2,
+                          background: '#fafafa',
                           pointerEvents: 'none',
-                          zIndex: 5,
+                          zIndex: 15,
                         }}
                       />
+                    </div>
+                  </div>
 
-                      <div
-                        onMouseDown={(e) => {
-                          if (isRazorMode) return;
-                          e.stopPropagation();
-                          setDraggingHandle('in');
-                        }}
-                        style={{
-                          position: 'absolute',
-                          left: `${inMarkerPct}%`,
-                          top: 0,
-                          bottom: 0,
-                          width: 10,
-                          transform: 'translateX(-50%)',
-                          cursor: 'ew-resize',
-                          zIndex: 12,
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                        }}
-                      >
-                        <div style={{ flex: 1, width: 2, background: '#e4e4e7' }} />
-                      </div>
-
-                      <div
-                        onMouseDown={(e) => {
-                          if (isRazorMode) return;
-                          e.stopPropagation();
-                          setDraggingHandle('out');
-                        }}
-                        style={{
-                          position: 'absolute',
-                          left: `${outMarkerPct}%`,
-                          top: 0,
-                          bottom: 0,
-                          width: 10,
-                          transform: 'translateX(-50%)',
-                          cursor: 'ew-resize',
-                          zIndex: 12,
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                        }}
-                      >
-                        <div style={{ flex: 1, width: 2, background: '#e4e4e7' }} />
-                      </div>
-                    </>
-                  )}
-
-                  {/* Playhead Needle */}
+                  {/* LAYER V3: CAPTIONS / SUBTITLES LAYER */}
                   <div
-                    style={{
-                      position: 'absolute',
-                      left: `${Math.max(
-                        0,
-                        Math.min(
-                          100,
-                          (clipPlayheadTime / Math.max(0.1, activeClip.duration)) * 100
-                        )
-                      )}%`,
-                      top: 0,
-                      bottom: 0,
-                      width: 2,
-                      background: '#fafafa',
-                      boxShadow: '0 0 6px rgba(255,255,255,0.8)',
-                      pointerEvents: 'none',
-                      zIndex: 15,
-                    }}
-                  />
+                    className={`nle-layer-row ${selectedLayerTrack === 'v3-captions' ? 'is-selected' : ''}`}
+                    style={{ height: 28 }}
+                    onClick={() => setSelectedLayerTrack('v3-captions')}
+                  >
+                    <div className="nle-layer-header">
+                      <span className="nle-layer-title">
+                        <span style={{ color: '#a855f7', fontFamily: 'var(--font-mono)' }}>V3</span>
+                        <span>Captions</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-icon"
+                        style={{ width: 20, height: 20 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            hideCaptions: !c.hideCaptions,
+                          }));
+                        }}
+                        title={activeClip.hideCaptions ? 'Show V3 Captions Layer' : 'Hide V3 Captions Layer'}
+                      >
+                        {activeClip.hideCaptions ? <EyeOff size={11} /> : <Eye size={11} />}
+                      </button>
+                    </div>
+                    <div
+                      className="nle-layer-track"
+                      onMouseDown={(e) => {
+                        setSelectedLayerTrack('v3-captions');
+                        updateTimelineDragAtClientX(e.clientX, 'playhead');
+                      }}
+                    >
+                      {activeClip.captions && activeClip.captions.length > 0 ? (
+                        activeClip.captions.map((seg) => {
+                          const dur = Math.max(0.5, activeClip.duration);
+                          const leftPct = Math.max(0, Math.min(99, (seg.start / dur) * 100));
+                          const widthPct = Math.max(
+                            1.5,
+                            Math.min(100 - leftPct, ((seg.end - seg.start) / dur) * 100)
+                          );
+                          const isSel =
+                            selectedLayerTrack === 'v3-captions' && selectedCaptionId === seg.id;
+                          return (
+                            <div
+                              key={seg.id}
+                              className={`nle-layer-block ${isSel ? 'is-active' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedLayerTrack('v3-captions');
+                                setSelectedCaptionId(seg.id);
+                                handleSeekClipTime(seg.start);
+                              }}
+                              style={{
+                                left: `${leftPct}%`,
+                                width: `${widthPct}%`,
+                                background: activeClip.hideCaptions
+                                  ? 'rgba(113, 113, 122, 0.16)'
+                                  : 'rgba(168, 85, 247, 0.28)',
+                                border: '1px solid rgba(168, 85, 247, 0.72)',
+                                color: '#f3e8ff',
+                              }}
+                              title={`${seg.start.toFixed(1)}s - ${seg.end.toFixed(1)}s: ${seg.text}`}
+                            >
+                              {seg.text}
+                            </div>
+                          );
+                        })
+                      ) : activeClip.captionText && activeClip.captionText.trim().length > 0 ? (
+                        <div
+                          className={`nle-layer-block ${selectedLayerTrack === 'v3-captions' ? 'is-active' : ''}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedLayerTrack('v3-captions');
+                          }}
+                          style={{
+                            left: '0%',
+                            width: '100%',
+                            background: activeClip.hideCaptions
+                              ? 'rgba(113, 113, 122, 0.16)'
+                              : 'rgba(168, 85, 247, 0.25)',
+                            border: '1px solid rgba(168, 85, 247, 0.65)',
+                            color: '#f3e8ff',
+                          }}
+                        >
+                          {activeClip.captionText}
+                        </div>
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: 9.5,
+                            color: 'var(--text-muted)',
+                            paddingLeft: 8,
+                            alignSelf: 'center',
+                            pointerEvents: 'none',
+                          }}
+                        >
+                          No captions on V3 — click "Transcribe Captions" or "+ Caption (V3)"
+                        </span>
+                      )}
+
+                      {/* Playhead needle */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          left: `${Math.max(0, Math.min(100, (clipPlayheadTime / Math.max(0.1, activeClip.duration)) * 100))}%`,
+                          top: 0,
+                          bottom: 0,
+                          width: 2,
+                          background: '#fafafa',
+                          pointerEvents: 'none',
+                          zIndex: 15,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* LAYER V2: SPEAKER B / SPLIT-SCREEN LAYER */}
+                  <div
+                    className={`nle-layer-row ${selectedLayerTrack === 'v2-speaker' ? 'is-selected' : ''}`}
+                    style={{ height: 26 }}
+                    onClick={() => setSelectedLayerTrack('v2-speaker')}
+                  >
+                    <div className="nle-layer-header">
+                      <span className="nle-layer-title">
+                        <span style={{ color: '#f97316', fontFamily: 'var(--font-mono)' }}>V2</span>
+                        <span>Speaker B</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-icon"
+                        style={{ width: 20, height: 20 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (activeClip.backgroundFillStyle === 'split-screen') {
+                            updateActiveTimelineClip((c) => ({
+                              ...c,
+                              backgroundFillStyle: 'blurred',
+                            }));
+                          } else {
+                            handleTwoSpeakerMode('split-screen');
+                          }
+                        }}
+                        title="Toggle 2-Speaker Split-Screen Layer"
+                      >
+                        <Layers size={11} />
+                      </button>
+                    </div>
+                    <div
+                      className="nle-layer-track"
+                      onMouseDown={(e) => {
+                        setSelectedLayerTrack('v2-speaker');
+                        updateTimelineDragAtClientX(e.clientX, 'playhead');
+                      }}
+                    >
+                      {activeClip.backgroundFillStyle === 'split-screen' ||
+                      activeClip.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
+                        <div
+                          className={`nle-layer-block ${selectedLayerTrack === 'v2-speaker' ? 'is-active' : ''}`}
+                          style={{
+                            left: '0%',
+                            width: '100%',
+                            background: 'rgba(249, 115, 22, 0.25)',
+                            border: '1px solid rgba(249, 115, 22, 0.7)',
+                            color: '#ffedd5',
+                          }}
+                        >
+                          {activeClip.backgroundFillStyle === 'split-screen'
+                            ? `2-Speaker Split-Screen · A ${(activeClip.speakerAScale ?? 1).toFixed(2)}x / B ${(activeClip.speakerBScale ?? 1).toFixed(2)}x · Split ${Math.round((activeClip.splitScreenRatio ?? 0.5) * 100)}%`
+                            : '2-Speaker Active Auto-Switch'}
+                        </div>
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: 9.5,
+                            color: 'var(--text-muted)',
+                            paddingLeft: 8,
+                            alignSelf: 'center',
+                            pointerEvents: 'none',
+                          }}
+                        >
+                          Single-camera mode — click V2 icon or "2-Speaker Split-Screen" to enable dual-camera layer
+                        </span>
+                      )}
+
+                      {/* Playhead needle */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          left: `${Math.max(0, Math.min(100, (clipPlayheadTime / Math.max(0.1, activeClip.duration)) * 100))}%`,
+                          top: 0,
+                          bottom: 0,
+                          width: 2,
+                          background: '#fafafa',
+                          pointerEvents: 'none',
+                          zIndex: 15,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* LAYER V1: PRIMARY VIDEO CUTS TRACK */}
+                  <div
+                    className={`nle-layer-row ${selectedLayerTrack === 'v1-video' ? 'is-selected' : ''}`}
+                    style={{ height: 36 }}
+                    onClick={() => setSelectedLayerTrack('v1-video')}
+                  >
+                    <div className="nle-layer-header">
+                      <span className="nle-layer-title">
+                        <span style={{ color: '#3b82f6', fontFamily: 'var(--font-mono)' }}>V1</span>
+                        <span>Video Cuts</span>
+                      </span>
+                      <span className="badge-subtle" style={{ fontSize: 9, padding: '0 4px' }}>
+                        {activeClip.subCuts.length}
+                      </span>
+                    </div>
+
+                    <div
+                      ref={timelineBarRef}
+                      className="nle-layer-track"
+                      style={{
+                        cursor: isRazorMode ? 'crosshair' : 'pointer',
+                      }}
+                      onMouseDown={(e) => {
+                        setSelectedLayerTrack('v1-video');
+                        if (!timelineBarRef.current || !activeClip) return;
+                        const rect = timelineBarRef.current.getBoundingClientRect();
+                        const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                        const clickedClipTime = ratio * activeClip.duration;
+
+                        if (isRazorMode) {
+                          handleRazorSplitAtClipTime(clickedClipTime);
+                          return;
+                        }
+
+                        setDraggingHandle('playhead');
+                        updateTimelineDragAtClientX(e.clientX, 'playhead');
+                      }}
+                      onMouseMove={(e) => {
+                        if (timelineBarRef.current && activeClip) {
+                          const rect = timelineBarRef.current.getBoundingClientRect();
+                          const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                          setRazorHoverClipTime(ratio * activeClip.duration);
+                        }
+                        if (!draggingHandle || isRazorMode) return;
+                        updateTimelineDragAtClientX(e.clientX, draggingHandle);
+                      }}
+                      onMouseUp={() => setDraggingHandle(null)}
+                      onMouseLeave={() => {
+                        setDraggingHandle(null);
+                        setRazorHoverClipTime(null);
+                      }}
+                    >
+                      {activeClip.subCuts.map((cut, idx) => {
+                        const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
+                        const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
+                        const isCurrentCut =
+                          clipPlayheadTime >= cut.timelineStart - 0.02 &&
+                          clipPlayheadTime <= cut.timelineEnd + 0.02;
+                        const isSelectedCut = idx === selectedCutIndex;
+
+                        return (
+                          <div
+                            key={cut.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedLayerTrack('v1-video');
+                              if (isRazorMode && timelineBarRef.current) {
+                                const rect = timelineBarRef.current.getBoundingClientRect();
+                                const ratio = Math.max(
+                                  0,
+                                  Math.min(1, (e.clientX - rect.left) / rect.width)
+                                );
+                                handleRazorSplitAtClipTime(ratio * activeClip.duration);
+                                return;
+                              }
+                              setSelectedCutIndex(idx);
+                              activeCutIdxRef.current = idx;
+                              updateTimelineDragAtClientX(e.clientX, 'playhead');
+                            }}
+                            style={{
+                              width: `${widthPct}%`,
+                              height: '100%',
+                              position: 'relative',
+                              background: isSelectedCut
+                                ? 'rgba(59, 130, 246, 0.26)'
+                                : isCurrentCut
+                                  ? 'rgba(59, 130, 246, 0.14)'
+                                  : 'rgba(24, 24, 30, 0.9)',
+                              borderRight:
+                                idx < activeClip.subCuts.length - 1
+                                  ? '1px solid var(--border-strong)'
+                                  : 'none',
+                              boxShadow: isSelectedCut
+                                ? 'inset 0 0 0 1px rgba(59, 130, 246, 0.75)'
+                                : 'none',
+                              display: 'flex',
+                              alignItems: 'center',
+                              padding: '0 6px',
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <span
+                              style={{
+                                fontSize: 9.5,
+                                fontFamily: 'var(--font-mono)',
+                                color: isSelectedCut ? '#fafafa' : 'var(--text-secondary)',
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                pointerEvents: 'none',
+                              }}
+                            >
+                              {timelineMode === 'full-source' && activeClip.subCuts.length === 1
+                                ? activeSource.name
+                                : `${cut.label} (${cutDur.toFixed(1)}s)`}
+                            </span>
+                          </div>
+                        );
+                      })}
+
+                      {/* In / Out Shaded Region */}
+                      {inMarkerPct !== null && outMarkerPct !== null && outMarkerPct >= inMarkerPct && (
+                        <>
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: `${inMarkerPct}%`,
+                              width: `${Math.max(0.5, outMarkerPct - inMarkerPct)}%`,
+                              top: 0,
+                              bottom: 0,
+                              background: 'rgba(250, 250, 250, 0.08)',
+                              borderTop: '1px solid rgba(250, 250, 250, 0.5)',
+                              borderBottom: '1px solid rgba(250, 250, 250, 0.5)',
+                              pointerEvents: 'none',
+                              zIndex: 5,
+                            }}
+                          />
+                          <div
+                            onMouseDown={(e) => {
+                              if (isRazorMode) return;
+                              e.stopPropagation();
+                              setDraggingHandle('in');
+                            }}
+                            style={{
+                              position: 'absolute',
+                              left: `${inMarkerPct}%`,
+                              top: 0,
+                              bottom: 0,
+                              width: 10,
+                              transform: 'translateX(-50%)',
+                              cursor: 'ew-resize',
+                              zIndex: 12,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                            }}
+                          >
+                            <div style={{ flex: 1, width: 2, background: '#e4e4e7' }} />
+                          </div>
+                          <div
+                            onMouseDown={(e) => {
+                              if (isRazorMode) return;
+                              e.stopPropagation();
+                              setDraggingHandle('out');
+                            }}
+                            style={{
+                              position: 'absolute',
+                              left: `${outMarkerPct}%`,
+                              top: 0,
+                              bottom: 0,
+                              width: 10,
+                              transform: 'translateX(-50%)',
+                              cursor: 'ew-resize',
+                              zIndex: 12,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                            }}
+                          >
+                            <div style={{ flex: 1, width: 2, background: '#e4e4e7' }} />
+                          </div>
+                        </>
+                      )}
+
+                      {/* Playhead Needle */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          left: `${Math.max(
+                            0,
+                            Math.min(
+                              100,
+                              (clipPlayheadTime / Math.max(0.1, activeClip.duration)) * 100
+                            )
+                          )}%`,
+                          top: 0,
+                          bottom: 0,
+                          width: 2,
+                          background: '#fafafa',
+                          boxShadow: '0 0 6px rgba(255,255,255,0.8)',
+                          pointerEvents: 'none',
+                          zIndex: 15,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* LAYER A1: SYNCHRONIZED AUDIO WAVEFORM LAYER */}
+                  <div
+                    className={`nle-layer-row ${selectedLayerTrack === 'a1-audio' ? 'is-selected' : ''}`}
+                    style={{ height: 28 }}
+                    onClick={() => setSelectedLayerTrack('a1-audio')}
+                  >
+                    <div className="nle-layer-header">
+                      <span className="nle-layer-title">
+                        <span style={{ color: '#10b981', fontFamily: 'var(--font-mono)' }}>A1</span>
+                        <span>Audio</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-icon"
+                        style={{
+                          width: 20,
+                          height: 20,
+                          color: isMuted ? '#f87171' : '#34d399',
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const nextMute = !isMuted;
+                          setIsMuted(nextMute);
+                          if (videoRef.current) videoRef.current.muted = nextMute;
+                        }}
+                        title={isMuted ? 'Unmute A1 Audio Layer' : 'Mute A1 Audio Layer'}
+                      >
+                        {isMuted ? <VolumeX size={11} /> : <Volume2 size={11} />}
+                      </button>
+                    </div>
+                    <div
+                      className="nle-layer-track"
+                      onMouseDown={(e) => {
+                        setSelectedLayerTrack('a1-audio');
+                        updateTimelineDragAtClientX(e.clientX, 'playhead');
+                      }}
+                    >
+                      {activeClip.subCuts.map((cut) => {
+                        const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
+                        const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
+                        const totalBuckets = activeSource.waveformPeaks.length;
+                        const bStart = Math.max(
+                          0,
+                          Math.floor(
+                            (cut.sourceStart / Math.max(1, activeSource.duration)) * totalBuckets
+                          )
+                        );
+                        const bEnd = Math.max(
+                          bStart + 2,
+                          Math.ceil((cut.sourceEnd / Math.max(1, activeSource.duration)) * totalBuckets)
+                        );
+                        const slicePeaks = activeSource.waveformPeaks.slice(bStart, bEnd);
+                        return (
+                          <div
+                            key={`audio-${cut.id}`}
+                            style={{
+                              width: `${widthPct}%`,
+                              height: '100%',
+                              display: 'flex',
+                              alignItems: 'flex-end',
+                              gap: 1,
+                              padding: '0 2px',
+                              opacity: isMuted ? 0.3 : 1,
+                            }}
+                          >
+                            {slicePeaks.map((pk, pIdx) => (
+                              <div
+                                key={pIdx}
+                                style={{
+                                  flex: 1,
+                                  height: `${Math.max(12, Math.round(pk * 82))}%`,
+                                  background: isMuted
+                                    ? 'rgba(239, 68, 68, 0.35)'
+                                    : 'rgba(16, 185, 129, 0.48)',
+                                  pointerEvents: 'none',
+                                }}
+                              />
+                            ))}
+                          </div>
+                        );
+                      })}
+
+                      {/* Playhead needle */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          left: `${Math.max(0, Math.min(100, (clipPlayheadTime / Math.max(0.1, activeClip.duration)) * 100))}%`,
+                          top: 0,
+                          bottom: 0,
+                          width: 2,
+                          background: '#fafafa',
+                          pointerEvents: 'none',
+                          zIndex: 15,
+                        }}
+                      />
+                    </div>
+                  </div>
                 </div>
 
-                {/* Timeline Inspector: Full-Source In/Out Sliders OR Selected Cut Trim Sliders + Caption */}
-                {timelineMode === 'full-source' && activeClip.subCuts.length === 1 ? (
+                {/* CONTEXT-AWARE ACTIVE LAYER INSPECTOR (V4 Overlays / V3 Captions / V2 Speaker B / V1 Video Cuts) */}
+                {selectedLayerTrack === 'v4-overlay' ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 10,
+                      fontSize: 11,
+                      color: 'var(--text-secondary)',
+                      paddingTop: 2,
+                    }}
+                  >
+                    <span className="badge-subtle" style={{ color: '#fbbf24' }}>
+                      V4 Overlay Layer Inspector
+                    </span>
+
+                    {(() => {
+                      const activeCustomLayer = (activeClip.overlayLayers || []).find(
+                        (l) => l.id === selectedOverlayLayerId
+                      );
+                      if (activeCustomLayer) {
+                        return (
+                          <>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1, minWidth: 160 }}>
+                              <span>Text</span>
+                              <input
+                                type="text"
+                                className="input-field"
+                                style={{ height: 24 }}
+                                value={activeCustomLayer.text}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    overlayLayers: (c.overlayLayers || []).map((ly) =>
+                                      ly.id === activeCustomLayer.id ? { ...ly, text: val } : ly
+                                    ),
+                                  }));
+                                }}
+                              />
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                              <span>Scale</span>
+                              <input
+                                type="range"
+                                min={0.5}
+                                max={2.5}
+                                step={0.05}
+                                value={activeCustomLayer.scale || 1.0}
+                                onChange={(e) => {
+                                  const sc = parseFloat(e.target.value);
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    overlayLayers: (c.overlayLayers || []).map((ly) =>
+                                      ly.id === activeCustomLayer.id ? { ...ly, scale: sc } : ly
+                                    ),
+                                  }));
+                                }}
+                                style={{ width: 64 }}
+                              />
+                              <span className="badge-subtle">
+                                {Math.round((activeCustomLayer.scale || 1) * 100)}%
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                              <span>Start</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={Math.max(0.2, activeCustomLayer.endTime - 0.3)}
+                                step={0.1}
+                                value={activeCustomLayer.startTime}
+                                onChange={(e) => {
+                                  const st = parseFloat(e.target.value);
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    overlayLayers: (c.overlayLayers || []).map((ly) =>
+                                      ly.id === activeCustomLayer.id ? { ...ly, startTime: st } : ly
+                                    ),
+                                  }));
+                                }}
+                                style={{ width: 56 }}
+                              />
+                              <span>End</span>
+                              <input
+                                type="range"
+                                min={Math.min(activeClip.duration, activeCustomLayer.startTime + 0.3)}
+                                max={activeClip.duration}
+                                step={0.1}
+                                value={activeCustomLayer.endTime}
+                                onChange={(e) => {
+                                  const et = parseFloat(e.target.value);
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    overlayLayers: (c.overlayLayers || []).map((ly) =>
+                                      ly.id === activeCustomLayer.id ? { ...ly, endTime: et } : ly
+                                    ),
+                                  }));
+                                }}
+                                style={{ width: 56 }}
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-danger"
+                              onClick={() => {
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  overlayLayers: (c.overlayLayers || []).filter(
+                                    (ly) => ly.id !== activeCustomLayer.id
+                                  ),
+                                }));
+                                setSelectedOverlayLayerId('__banner__');
+                              }}
+                            >
+                              <Trash2 size={11} />
+                              Delete Layer
+                            </button>
+                          </>
+                        );
+                      }
+
+                      return (
+                        <>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1, minWidth: 180 }}>
+                            <span>Title Banner</span>
+                            <input
+                              type="text"
+                              className="input-field"
+                              style={{ height: 24 }}
+                              placeholder="Type top hook banner text..."
+                              value={activeClip.overlayBannerText || ''}
+                              onChange={(e) =>
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  hideBannerLayer: false,
+                                  overlayBannerText: e.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                            <span>Banner Scale</span>
+                            <input
+                              type="range"
+                              min={0.55}
+                              max={2.4}
+                              step={0.05}
+                              value={activeClip.overlayBannerScale ?? 1.0}
+                              onChange={(e) =>
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  overlayBannerScale: parseFloat(e.target.value),
+                                }))
+                              }
+                              style={{ width: 68 }}
+                            />
+                            <span className="badge-subtle">
+                              {Math.round((activeClip.overlayBannerScale ?? 1) * 100)}%
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                            <span>Y Pos</span>
+                            <input
+                              type="range"
+                              min={0.08}
+                              max={0.9}
+                              step={0.01}
+                              value={activeClip.overlayBannerPositionY ?? 0.14}
+                              onChange={(e) =>
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  overlayBannerPositionY: parseFloat(e.target.value),
+                                }))
+                              }
+                              style={{ width: 64 }}
+                            />
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                ) : selectedLayerTrack === 'v3-captions' ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 10,
+                      fontSize: 11,
+                      color: 'var(--text-secondary)',
+                      paddingTop: 2,
+                    }}
+                  >
+                    <span className="badge-subtle" style={{ color: '#c084fc' }}>
+                      V3 Captions Layer Inspector
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1, minWidth: 180 }}>
+                      <span>Caption Text</span>
+                      <input
+                        type="text"
+                        className="input-field"
+                        style={{ height: 24 }}
+                        placeholder="Caption text..."
+                        value={
+                          (activeClip.captions || []).find((s) => s.id === selectedCaptionId)?.text ??
+                          activeClip.captionText
+                        }
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          updateActiveTimelineClip((c) => {
+                            if (selectedCaptionId && c.captions?.some((s) => s.id === selectedCaptionId)) {
+                              return {
+                                ...c,
+                                captions: c.captions.map((s) =>
+                                  s.id === selectedCaptionId
+                                    ? {
+                                        ...s,
+                                        text: val,
+                                        words: val
+                                          .split(/\s+/)
+                                          .filter(Boolean)
+                                          .map((w, idx, arr) => {
+                                            const segDur = Math.max(0.2, s.end - s.start);
+                                            const wDur = segDur / Math.max(1, arr.length);
+                                            return {
+                                              word: w,
+                                              start: s.start + idx * wDur,
+                                              end: s.start + (idx + 1) * wDur,
+                                            };
+                                          }),
+                                      }
+                                    : s
+                                ),
+                              };
+                            }
+                            return { ...c, captionText: val };
+                          });
+                        }}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span>Scale</span>
+                      <input
+                        type="range"
+                        min={0.55}
+                        max={2.2}
+                        step={0.05}
+                        value={activeClip.captionFontScale ?? 1.0}
+                        onChange={(e) =>
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            captionFontScale: parseFloat(e.target.value),
+                          }))
+                        }
+                        style={{ width: 68 }}
+                      />
+                      <span className="badge-subtle">
+                        {Math.round((activeClip.captionFontScale ?? 1) * 100)}%
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span>X</span>
+                      <input
+                        type="range"
+                        min={0.15}
+                        max={0.85}
+                        step={0.01}
+                        value={activeClip.captionPositionX ?? 0.5}
+                        onChange={(e) =>
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            captionPositionX: parseFloat(e.target.value),
+                          }))
+                        }
+                        style={{ width: 54 }}
+                      />
+                      <span>Y</span>
+                      <input
+                        type="range"
+                        min={0.1}
+                        max={0.9}
+                        step={0.01}
+                        value={activeClip.captionPositionY ?? 0.77}
+                        onChange={(e) =>
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            captionPositionY: parseFloat(e.target.value),
+                          }))
+                        }
+                        style={{ width: 54 }}
+                      />
+                    </div>
+                  </div>
+                ) : selectedLayerTrack === 'v2-speaker' ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 10,
+                      fontSize: 11,
+                      color: 'var(--text-secondary)',
+                      paddingTop: 2,
+                    }}
+                  >
+                    <span className="badge-subtle" style={{ color: '#fb923c' }}>
+                      V2 Speaker B / Split-Screen Layer Inspector
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span>Speaker A Scale</span>
+                      <input
+                        type="range"
+                        min={0.55}
+                        max={2.4}
+                        step={0.05}
+                        value={activeClip.speakerAScale ?? 1.0}
+                        onChange={(e) =>
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            speakerAScale: parseFloat(e.target.value),
+                          }))
+                        }
+                        style={{ width: 68 }}
+                      />
+                      <span className="badge-subtle">
+                        {(activeClip.speakerAScale ?? 1.0).toFixed(2)}x
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span>Speaker B Scale</span>
+                      <input
+                        type="range"
+                        min={0.55}
+                        max={2.4}
+                        step={0.05}
+                        value={activeClip.speakerBScale ?? 1.0}
+                        onChange={(e) =>
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            speakerBScale: parseFloat(e.target.value),
+                          }))
+                        }
+                        style={{ width: 68 }}
+                      />
+                      <span className="badge-subtle">
+                        {(activeClip.speakerBScale ?? 1.0).toFixed(2)}x
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span>Top/Bottom Split Ratio</span>
+                      <input
+                        type="range"
+                        min={0.25}
+                        max={0.75}
+                        step={0.01}
+                        value={activeClip.splitScreenRatio ?? 0.5}
+                        onChange={(e) =>
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            splitScreenRatio: parseFloat(e.target.value),
+                          }))
+                        }
+                        style={{ width: 68 }}
+                      />
+                      <span className="badge-subtle">
+                        {Math.round((activeClip.splitScreenRatio ?? 0.5) * 100)}% /{' '}
+                        {Math.round((1 - (activeClip.splitScreenRatio ?? 0.5)) * 100)}%
+                      </span>
+                    </div>
+                  </div>
+                ) : timelineMode === 'full-source' && activeClip.subCuts.length === 1 ? (
                   <div
                     style={{
                       display: 'grid',
@@ -5982,6 +7382,14 @@ export const App: React.FC = () => {
               </div>
             )}
           </section>
+
+          {/* Right Vertical Resizable Splitter */}
+          <div
+            className={`studio-splitter-v ${resizingPane === 'right' ? 'is-dragging' : ''}`}
+            onMouseDown={() => setResizingPane('right')}
+            onDoubleClick={() => setRightPanelWidth(315)}
+            title="Drag to resize Right Assistant Panel (double-click to reset)"
+          />
 
           {/* RIGHT PANEL: Assistant */}
           <aside

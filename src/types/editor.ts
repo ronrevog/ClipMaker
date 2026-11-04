@@ -201,6 +201,21 @@ export interface CaptionSegment {
 
 export type BackgroundFillStyle = 'blurred' | 'black' | 'split-screen';
 
+export interface VideoOverlayLayer {
+  id: string;
+  name: string;
+  kind: 'text-banner' | 'call-to-action' | 'lower-third';
+  text: string;
+  startTime: number;
+  endTime: number;
+  x: number;
+  y: number;
+  scale: number;
+  bgColor: string;
+  textColor: string;
+  visible: boolean;
+}
+
 export interface GeneratedClip {
   id: string;
   name: string;
@@ -224,8 +239,11 @@ export interface GeneratedClip {
   backgroundFillStyle?: BackgroundFillStyle;
   speakerAX?: number; // Custom normalized 0..1 X center for Speaker A (default 0.26)
   speakerAY?: number; // Custom normalized 0..1 Y center for Speaker A (default 0.39 vertical / 0.44 horizontal)
+  speakerAScale?: number; // Custom zoom/scale for Speaker A crop window (0.5 .. 2.5, default 1.0)
   speakerBX?: number; // Custom normalized 0..1 X center for Speaker B (default 0.74)
   speakerBY?: number; // Custom normalized 0..1 Y center for Speaker B (default 0.39 vertical / 0.44 horizontal)
+  speakerBScale?: number; // Custom zoom/scale for Speaker B crop window (0.5 .. 2.5, default 1.0)
+  splitScreenRatio?: number; // Top/Bottom panel split ratio (0.25 .. 0.75, default 0.5)
   playbackSpeed?: number;
   captionText: string;
   captionStyle: CaptionStyleId;
@@ -240,9 +258,13 @@ export interface GeneratedClip {
   captionUppercase?: boolean;
   hideCaptions?: boolean;
   overlayBannerText?: string;
+  overlayBannerPositionX?: number;
   overlayBannerPositionY?: number;
+  overlayBannerScale?: number;
   overlayBannerBgColor?: string;
   overlayBannerTextColor?: string;
+  hideBannerLayer?: boolean;
+  overlayLayers?: VideoOverlayLayer[];
   videoFilter?: VideoFilterConfig;
   safeZoneGuide: SafeZoneGuideId;
   subCuts: SubCut[];

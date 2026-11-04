@@ -1040,8 +1040,9 @@ export function renderComposite9x16Frame(params: {
 
   // MODE A: 2-Speaker Top/Bottom 9:16 Podcast Split-Screen
   if (backgroundFillStyle === 'split-screen') {
-    const halfH = Math.floor(outH / 2);
-    const panelAspect = outW / Math.max(1, halfH); // 9:8 aspect per speaker panel
+    const splitRatio = Math.max(0.25, Math.min(0.75, activeClip?.splitScreenRatio ?? 0.5));
+    const topH = Math.floor(outH * splitRatio);
+    const bottomH = outH - topH;
 
     const defaultY = vw < vh ? 0.39 : Math.min(0.48, Math.max(0.34, cropY));
     const fineOffsetX = activeClip?.trackingOffsetX || 0;
@@ -1050,22 +1051,27 @@ export function renderComposite9x16Frame(params: {
       Math.min(0.94, (activeClip?.speakerAX ?? 0.26) + fineOffsetX)
     );
     const leftY = Math.max(0.06, Math.min(0.94, activeClip?.speakerAY ?? defaultY));
+    const leftScale = Math.max(0.5, Math.min(2.5, activeClip?.speakerAScale ?? 1.0));
+
     const rightX = Math.max(
       0.06,
       Math.min(0.94, (activeClip?.speakerBX ?? 0.74) + fineOffsetX)
     );
     const rightY = Math.max(0.06, Math.min(0.94, activeClip?.speakerBY ?? defaultY));
+    const rightScale = Math.max(0.5, Math.min(2.5, activeClip?.speakerBScale ?? 1.0));
 
     const drawSpeakerPanel = (
       centerX: number,
       centerY: number,
+      speakerScale: number,
       destY: number,
       destH: number,
       badgeText: string
     ) => {
-      // Each speaker panel crops ~50% of the horizontal width so only ONE speaker fills each half
+      const panelAspect = outW / Math.max(1, destH);
       const widthFraction = vw < vh ? 0.50 : 0.46;
-      const effectiveZoom = Math.max(0.85, Math.min(2.4, zoom > 1.35 ? 1.0 : zoom));
+      const baseZoom = Math.max(0.85, Math.min(2.4, zoom > 1.35 ? 1.0 : zoom));
+      const effectiveZoom = Math.max(0.45, Math.min(3.2, baseZoom * speakerScale));
       const sw = Math.max(64, Math.min(vw, (vw * widthFraction) / effectiveZoom));
       const sh = Math.max(64, Math.min(vh, sw / panelAspect));
       const sx = Math.max(0, Math.min(vw - sw, centerX * vw - sw / 2));
@@ -1106,16 +1112,16 @@ export function renderComposite9x16Frame(params: {
     };
 
     // Top Panel: Speaker A
-    drawSpeakerPanel(leftX, leftY, 0, halfH, 'SPEAKER A');
+    drawSpeakerPanel(leftX, leftY, leftScale, 0, topH, 'SPEAKER A');
     // Bottom Panel: Speaker B
-    drawSpeakerPanel(rightX, rightY, halfH, outH - halfH, 'SPEAKER B');
+    drawSpeakerPanel(rightX, rightY, rightScale, topH, bottomH, 'SPEAKER B');
 
     // Clean divider line between Top & Bottom speaker panels
     ctx.save();
     ctx.fillStyle = '#09090b';
-    ctx.fillRect(0, halfH - 2, outW, 4);
+    ctx.fillRect(0, topH - 2, outW, 4);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
-    ctx.fillRect(0, halfH - 0.5, outW, 1);
+    ctx.fillRect(0, topH - 0.5, outW, 1);
     ctx.restore();
   } else {
     // MODE B: Single-Frame 9:16 Crop OR Wide Letterbox with Blurred / Black Background Fill
@@ -1187,9 +1193,10 @@ export function renderComposite9x16Frame(params: {
     }
   }
 
-  // Draw Optional Title / Hook Banner Overlay if configured by Studio Agent
-  if (activeClip?.overlayBannerText?.trim()) {
-    const scale = outW / 360;
+  // Draw Optional Title / Hook Banner Overlay Layer (V4) if configured
+  if (activeClip?.overlayBannerText?.trim() && !activeClip?.hideBannerLayer) {
+    const scale = (outW / 360) * Math.max(0.5, Math.min(2.5, activeClip.overlayBannerScale ?? 1.0));
+    const bannerX = outW * Math.max(0.15, Math.min(0.85, activeClip.overlayBannerPositionX ?? 0.5));
     const bannerY = outH * Math.max(0.06, Math.min(0.92, activeClip.overlayBannerPositionY ?? 0.10));
     const bannerFontSize = Math.round(18 * scale);
     ctx.save();
@@ -1197,13 +1204,13 @@ export function renderComposite9x16Frame(params: {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     const bText = activeClip.overlayBannerText.trim();
-    const tw = Math.min(outW * 0.88, ctx.measureText(bText).width);
+    const tw = Math.min(outW * 0.9, ctx.measureText(bText).width);
     const padX = Math.round(14 * scale);
     const padY = Math.round(8 * scale);
     ctx.fillStyle = activeClip.overlayBannerBgColor || 'rgba(220, 38, 38, 0.92)';
     ctx.beginPath();
     ctx.roundRect(
-      outW / 2 - tw / 2 - padX,
+      bannerX - tw / 2 - padX,
       bannerY - bannerFontSize / 2 - padY,
       tw + padX * 2,
       bannerFontSize + padY * 2,
@@ -1211,8 +1218,50 @@ export function renderComposite9x16Frame(params: {
     );
     ctx.fill();
     ctx.fillStyle = activeClip.overlayBannerTextColor || '#ffffff';
-    ctx.fillText(bText, outW / 2, bannerY, outW * 0.88);
+    ctx.fillText(bText, bannerX, bannerY, outW * 0.9);
     ctx.restore();
+  }
+
+  // Draw Custom Video Overlay Layers (Text / Lower-Third / Callout Layers on Timeline)
+  if (activeClip?.overlayLayers && activeClip.overlayLayers.length > 0) {
+    for (const layer of activeClip.overlayLayers) {
+      if (
+        !layer.visible ||
+        !layer.text.trim() ||
+        clipPlayheadTime < layer.startTime - 0.05 ||
+        clipPlayheadTime > layer.endTime + 0.05
+      ) {
+        continue;
+      }
+      const lScale = (outW / 360) * Math.max(0.4, Math.min(2.8, layer.scale || 1.0));
+      const lx = outW * Math.max(0.1, Math.min(0.9, layer.x ?? 0.5));
+      const ly = outH * Math.max(0.06, Math.min(0.94, layer.y ?? 0.18));
+      const lFontSize = Math.round(17 * lScale);
+      ctx.save();
+      ctx.font = `700 ${lFontSize}px Inter, sans-serif`;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      const txt = layer.text.trim();
+      const tw = Math.min(outW * 0.9, ctx.measureText(txt).width);
+      const px = Math.round(12 * lScale);
+      const py = Math.round(7 * lScale);
+      ctx.fillStyle = layer.bgColor || 'rgba(9, 9, 11, 0.88)';
+      ctx.beginPath();
+      ctx.roundRect(
+        lx - tw / 2 - px,
+        ly - lFontSize / 2 - py,
+        tw + px * 2,
+        lFontSize + py * 2,
+        Math.round(5 * lScale)
+      );
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = layer.textColor || '#fafafa';
+      ctx.fillText(txt, lx, ly, outW * 0.9);
+      ctx.restore();
+    }
   }
 
   // Draw Styled Social Captions + Word-Level Karaoke Highlighting
