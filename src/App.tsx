@@ -107,6 +107,7 @@ import { exportClipTo9x16Video } from './services/videoExporter';
 import { AISettingsModal } from './components/AISettingsModal';
 import { ComplexAuthGate } from './components/ComplexAuthGate';
 import { ProjectsModal } from './components/ProjectsModal';
+import { TranscriptEditorModal } from './components/TranscriptEditorModal';
 import {
   ComplexAuthUser,
   getLastActiveProjectId,
@@ -200,6 +201,7 @@ export const App: React.FC = () => {
   const [activeScheme, setActiveScheme] = useState<EditingScheme>(() => loadSavedSchemes()[0]);
   const [aiSettings, setAiSettings] = useState<AIProviderSettings>(() => loadAISettings());
   const [isAISettingsOpen, setIsAISettingsOpen] = useState(false);
+  const [isTranscriptEditorOpen, setIsTranscriptEditorOpen] = useState(false);
   const [schemeSavedNotice, setSchemeSavedNotice] = useState<string | null>(null);
 
   // Text input draft states so user can freely type clip duration (up to 180s / 3m), clip count, and ASL
@@ -5876,6 +5878,16 @@ export const App: React.FC = () => {
                         ? `Transcribing ${transcriptionProgress}%`
                         : 'Transcribe Captions'}
                     </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setIsTranscriptEditorOpen(true)}
+                      title="Open window to edit full video transcription and caption lines"
+                    >
+                      <FileText size={11} />
+                      Edit Transcript
+                    </button>
                   </div>
 
                   {/* Right: Caption Style Dropdown, 9:16 Fill Mode & Playback Speed */}
@@ -6211,6 +6223,16 @@ export const App: React.FC = () => {
                     >
                       <Type size={11} />
                       + Caption (V3)
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setIsTranscriptEditorOpen(true)}
+                      title="Open Transcript & Captions Editor Window"
+                    >
+                      <FileText size={11} />
+                      Edit Transcript
                     </button>
 
                     {activeClip.subCuts.length > 1 && inspectedCut && (
@@ -7221,6 +7243,14 @@ export const App: React.FC = () => {
                         style={{ width: 54 }}
                       />
                     </div>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setIsTranscriptEditorOpen(true)}
+                    >
+                      <FileText size={11} />
+                      Edit Full Transcript
+                    </button>
                   </div>
                 ) : selectedLayerTrack === 'v2-speaker' ? (
                   <div
@@ -7790,6 +7820,32 @@ export const App: React.FC = () => {
             setAiSettings(updated);
             saveAISettings(updated);
           }}
+        />
+
+        <TranscriptEditorModal
+          isOpen={isTranscriptEditorOpen}
+          activeClip={activeClip}
+          activeSource={activeSource}
+          clipPlayheadTime={clipPlayheadTime}
+          isTranscribing={isTranscribingAudio}
+          transcriptionProgress={transcriptionProgress}
+          onClose={() => setIsTranscriptEditorOpen(false)}
+          onUpdateClipCaptions={(captions, fallbackText) => {
+            updateActiveTimelineClip((c) => ({
+              ...c,
+              hideCaptions: false,
+              captions,
+              captionText: fallbackText ?? captions[0]?.text ?? c.captionText,
+            }));
+          }}
+          onUpdateSourceTranscript={(segments) => {
+            setActiveSource((prev) =>
+              prev ? { ...prev, transcriptSegments: segments } : prev
+            );
+          }}
+          onSeekClipTime={handleSeekClipTime}
+          onSeekSourceTime={handleSeekSourceTime}
+          onRunAITranscription={handleRunAITranscription}
         />
       </div>
     </Tooltip.Provider>
