@@ -13,6 +13,8 @@ import { computeDistortionFree9x16Crop, getTrackingStateAtTime } from './subject
 
 // Cache decoded AudioBuffer per source video ID so repeated silence/transcription operations are instant
 const decodedAudioBufferCache = new Map<string, AudioBuffer>();
+// Cache full source video transcript per source video ID so viral clips & compilation cutdowns reuse the transcript instantly
+const sourceTranscriptCache = new Map<string, CaptionSegment[]>();
 
 async function getDecodedAudioBuffer(
   source: SourceVideoAsset,
@@ -184,9 +186,9 @@ export async function transcribeClipAudioWithAI(params: {
   let allCaptions: CaptionSegment[] = [];
   let lastProviderUsed = 'gemini-4-argon [Live Audio]';
 
-  // Process chunks in batches of 2 in parallel so multi-minute videos transcribe 2x faster
+  // Process chunks in batches of 3 in parallel so multi-minute videos transcribe 3x faster
   // while streaming captions onto the video player after every batch!
-  const batchSize = 2;
+  const batchSize = 3;
   for (let b = 0; b < totalChunks; b += batchSize) {
     const batchIndices = chunkStarts
       .slice(b, b + batchSize)
@@ -200,7 +202,7 @@ export async function transcribeClipAudioWithAI(params: {
     const pct = Math.min(98, Math.round(((b + 1) / totalChunks) * 100));
 
     onStatus?.(
-      `🎙️ Transcribing Audio (${ batchIndices[0].chunkIdx + 1 }/${totalChunks} • ${formatShortTimestamp(firstStart)}–${formatShortTimestamp(lastEnd)}) with Gemini 4 Argon...`
+      `🎙️ Transcribing Audio (${batchIndices[0].chunkIdx + 1}–${batchIndices[batchIndices.length - 1].chunkIdx + 1}/${totalChunks} • ${formatShortTimestamp(firstStart)}–${formatShortTimestamp(lastEnd)}) with Gemini 4 Argon...`
     );
 
     const batchResults = await Promise.all(
@@ -304,6 +306,18 @@ export async function transcribeClipAudioWithAI(params: {
     }
   }
 
+  // If this clip is the Full Uploaded Video (`__full_source__`), cache its transcript on the source video
+  if (
+    allCaptions.length > 0 &&
+    (clip.id === '__full_source__' ||
+      (clip.subCuts.length === 1 &&
+        clip.subCuts[0].sourceStart <= 0.5 &&
+        Math.abs(clip.subCuts[0].sourceEnd - source.duration) <= 1.0))
+  ) {
+    sourceTranscriptCache.set(source.id, allCaptions);
+    source.transcriptSegments = allCaptions;
+  }
+
   if (allCaptions.length === 0) {
     return {
       captions: [],
@@ -316,6 +330,252 @@ export async function transcribeClipAudioWithAI(params: {
     captions: allCaptions,
     providerUsed: lastProviderUsed,
   };
+}
+
+/**
+ * Ensures the full uploaded source video (`0 .. source.duration`) has been transcribed into
+ * timestamped spoken dialogue segments (`source.transcriptSegments`).
+ * Reuses cached transcript if already transcribed during this session!
+ */
+export async function ensureFullSourceTranscript(params: {
+  source: SourceVideoAsset;
+  videoBlob: Blob | null;
+  aiSettings: AIProviderSettings;
+  existingFullVideoCaptions?: CaptionSegment[];
+  onStatus?: (msg: string, pct: number) => void;
+}): Promise<CaptionSegment[]> {
+  const { source, videoBlob, aiSettings, existingFullVideoCaptions, onStatus } = params;
+
+  if (source.transcriptSegments && source.transcriptSegments.length >= 3) {
+    sourceTranscriptCache.set(source.id, source.transcriptSegments);
+    return source.transcriptSegments;
+  }
+  const cached = sourceTranscriptCache.get(source.id);
+  if (cached && cached.length >= 3) {
+    source.transcriptSegments = cached;
+    return cached;
+  }
+  if (existingFullVideoCaptions && existingFullVideoCaptions.length >= 5) {
+    sourceTranscriptCache.set(source.id, existingFullVideoCaptions);
+    source.transcriptSegments = existingFullVideoCaptions;
+    return existingFullVideoCaptions;
+  }
+
+  // Construct a synthetic full-source clip spanning [0, source.duration] to transcribe the entire source audio
+  const fullSourceClip: GeneratedClip = {
+    id: '__full_source__',
+    name: source.name,
+    sourceVideoId: source.id,
+    schemeId: 'default',
+    schemeName: 'Transcript Indexer',
+    viralScore: 95,
+    hookReason: '',
+    sourceStart: 0,
+    sourceEnd: source.duration,
+    duration: source.duration,
+    trackingMode: 'face-speaker',
+    trackingOffsetX: 0,
+    trackingSmoothing: 0.8,
+    zoomScale: 1.0,
+    captionText: '',
+    captionStyle: 'hormozi-bold',
+    safeZoneGuide: 'tiktok',
+    subCuts: [
+      {
+        id: 'full-src-cut-1',
+        index: 1,
+        sourceStart: 0,
+        sourceEnd: source.duration,
+        timelineStart: 0,
+        timelineEnd: source.duration,
+        label: 'Full Source Audio',
+        zoom: 1.0,
+        cropBiasX: 0,
+      },
+    ],
+    captions: [],
+    manualKeyframes: [],
+  };
+
+  let latestPct = 5;
+  const res = await transcribeClipAudioWithAI({
+    clip: fullSourceClip,
+    source,
+    videoBlob,
+    aiSettings,
+    clipPlayheadTime: 0,
+    onStatus: (msg) => {
+      onStatus?.(`Stage 1/3 — ${msg}`, latestPct);
+    },
+    onPartialCaptions: (_partial, pct) => {
+      latestPct = pct;
+    },
+  });
+
+  if (res.captions.length > 0) {
+    sourceTranscriptCache.set(source.id, res.captions);
+    source.transcriptSegments = res.captions;
+  }
+  return res.captions;
+}
+
+/**
+ * Snaps a raw `[sourceStart, sourceEnd]` cut to clean spoken phrase boundaries in `sourceTranscript`
+ * so cuts never chop a speaker mid-word or mid-phrase.
+ */
+export function snapRangeToTranscriptBoundaries(
+  rawStart: number,
+  rawEnd: number,
+  sourceDuration: number,
+  sourceTranscript?: CaptionSegment[]
+): { start: number; end: number } {
+  const clampedStart = Math.max(0, Math.min(sourceDuration - 1.5, rawStart));
+  const clampedEnd = Math.max(clampedStart + 1.5, Math.min(sourceDuration, rawEnd));
+  if (!sourceTranscript || sourceTranscript.length === 0) {
+    return {
+      start: Number(clampedStart.toFixed(2)),
+      end: Number(clampedEnd.toFixed(2)),
+    };
+  }
+
+  let bestStart = clampedStart;
+  let bestEnd = clampedEnd;
+
+  // Find a transcript segment whose start is within ±1.8s of rawStart, or that spans across rawStart
+  const startMatch = sourceTranscript.find(
+    (seg) =>
+      (rawStart >= seg.start - 0.35 && rawStart <= seg.end + 0.15) ||
+      Math.abs(seg.start - rawStart) <= 1.4
+  );
+  if (startMatch) {
+    // Start slightly (0.08s) before the first word of that phrase so the opening consonant is never clipped
+    bestStart = Math.max(0, Number((startMatch.start - 0.08).toFixed(2)));
+  }
+
+  // Find a transcript segment whose end is within ±2.2s of rawEnd, or that spans across rawEnd
+  const endCandidates = sourceTranscript.filter(
+    (seg) =>
+      seg.end > bestStart + 1.5 &&
+      ((rawEnd >= seg.start - 0.15 && rawEnd <= seg.end + 0.4) ||
+        Math.abs(seg.end - rawEnd) <= 1.8)
+  );
+  if (endCandidates.length > 0) {
+    const endMatch = endCandidates[endCandidates.length - 1];
+    // Pad 0.12s after the final word so the speaker finishes the thought cleanly
+    bestEnd = Math.min(sourceDuration, Number((endMatch.end + 0.12).toFixed(2)));
+  }
+
+  if (bestEnd <= bestStart + 1.2) {
+    bestEnd = Math.min(sourceDuration, Number((bestStart + Math.max(2.0, clampedEnd - clampedStart)).toFixed(2)));
+  }
+
+  return { start: bestStart, end: bestEnd };
+}
+
+/**
+ * Slices and remaps the full source video's word-level `sourceTranscript` onto a clip's `subCuts`
+ * timeline (`0 .. clipDuration`), preserving exact word-by-word karaoke timings (`words`)!
+ */
+export function mapSourceTranscriptToClipTimeline(
+  sourceTranscript: CaptionSegment[] | undefined,
+  subCuts: SubCut[],
+  clipDuration: number
+): CaptionSegment[] {
+  if (!sourceTranscript || sourceTranscript.length === 0 || subCuts.length === 0) {
+    return [];
+  }
+
+  const mapped: CaptionSegment[] = [];
+
+  for (let cIdx = 0; cIdx < subCuts.length; cIdx++) {
+    const cut = subCuts[cIdx];
+    const cutSrcStart = cut.sourceStart;
+    const cutSrcEnd = cut.sourceEnd;
+    const cutTlStart = cut.timelineStart;
+    const cutTlEnd = cut.timelineEnd;
+
+    // Find all source transcript segments overlapping this subCut
+    const overlapping = sourceTranscript.filter(
+      (seg) => seg.end > cutSrcStart + 0.12 && seg.start < cutSrcEnd - 0.12
+    );
+
+    for (let sIdx = 0; sIdx < overlapping.length; sIdx++) {
+      const seg = overlapping[sIdx];
+      const segSrcStart = Math.max(cutSrcStart, seg.start);
+      const segSrcEnd = Math.min(cutSrcEnd, seg.end);
+      if (segSrcEnd <= segSrcStart + 0.12) continue;
+
+      const tlStart = Number(
+        Math.max(cutTlStart, Math.min(cutTlEnd - 0.15, cutTlStart + (segSrcStart - cutSrcStart))).toFixed(2)
+      );
+      const tlEnd = Number(
+        Math.max(tlStart + 0.2, Math.min(cutTlEnd, cutTlStart + (segSrcEnd - cutSrcStart))).toFixed(2)
+      );
+
+      let mappedWords: CaptionWordTiming[] | undefined;
+      if (Array.isArray(seg.words) && seg.words.length > 0) {
+        const overlappingWords = seg.words
+          .filter((w) => w.end > cutSrcStart + 0.04 && w.start < cutSrcEnd - 0.04)
+          .map((w) => {
+            const wStart = Number(
+              Math.max(tlStart, Math.min(tlEnd - 0.05, cutTlStart + (w.start - cutSrcStart))).toFixed(2)
+            );
+            const wEnd = Number(
+              Math.max(wStart + 0.05, Math.min(tlEnd, cutTlStart + (w.end - cutSrcStart))).toFixed(2)
+            );
+            return {
+              word: w.word,
+              start: wStart,
+              end: wEnd,
+            };
+          });
+        if (overlappingWords.length > 0) {
+          mappedWords = overlappingWords;
+        }
+      }
+
+      const text =
+        mappedWords && mappedWords.length > 0
+          ? mappedWords.map((w) => w.word).join(' ')
+          : seg.text;
+
+      if (!text.trim()) continue;
+
+      // If mappedWords weren't present on seg, synthesize word timings across [tlStart, tlEnd]
+      if (!mappedWords || mappedWords.length === 0) {
+        const rawWords = text.trim().split(/\s+/);
+        const span = Math.max(0.25, tlEnd - tlStart);
+        const step = span / rawWords.length;
+        mappedWords = rawWords.map((w, wIdx) => ({
+          word: w,
+          start: Number((tlStart + wIdx * step).toFixed(2)),
+          end: Number((tlStart + (wIdx + 1) * step).toFixed(2)),
+        }));
+      }
+
+      mapped.push({
+        id: `clip-cap-${cIdx}-${sIdx}-${Date.now()}`,
+        start: tlStart,
+        end: tlEnd,
+        text,
+        highlightWord: seg.highlightWord || mappedWords[mappedWords.length - 1]?.word,
+        words: mappedWords,
+      });
+    }
+  }
+
+  // Ensure monotonic non-overlapping timestamps across the clip timeline
+  mapped.sort((a, b) => a.start - b.start);
+  for (let i = 0; i < mapped.length - 1; i++) {
+    if (mapped[i].end > mapped[i + 1].start - 0.02) {
+      mapped[i].end = Math.max(
+        mapped[i].start + 0.18,
+        Number((mapped[i + 1].start - 0.02).toFixed(2))
+      );
+    }
+  }
+
+  return mapped.filter((m) => m.start < clipDuration);
 }
 
 /**

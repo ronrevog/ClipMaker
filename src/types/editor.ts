@@ -152,6 +152,8 @@ export interface SubCut {
   timelineStart: number;
   timelineEnd: number;
   label: string;
+  spokenQuote?: string;
+  narrativeRole?: string;
   zoom: number;
   cropBiasX: number;
   isBeatCut?: boolean;
@@ -184,6 +186,9 @@ export interface GeneratedClip {
   clipCreationMode?: ClipCreationMode;
   viralScore: number;
   hookReason: string;
+  commonThread?: string;
+  viralMechanics?: string[];
+  editorialReasoning?: string;
   sourceStart: number;
   sourceEnd: number;
   duration: number;
@@ -225,6 +230,7 @@ export interface SourceVideoAsset {
   perSecondTelemetry?: PerSecondTelemetry[];
   sampledFrames?: Array<{ time: number; dataUrl: string }>;
   audioSampleBase64?: string;
+  transcriptSegments?: CaptionSegment[];
   trackingSamples: TrackingSample[];
 }
 

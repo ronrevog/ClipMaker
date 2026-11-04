@@ -7,6 +7,10 @@ import {
   SourceVideoAsset,
   SubCut,
 } from '../types/editor';
+import {
+  mapSourceTranscriptToClipTimeline,
+  snapRangeToTranscriptBoundaries,
+} from './aiVideoEditorTools';
 
 const DEMO_HOOK_LINES = [
   'SUMMER ROADTRIP ENERGY',
@@ -200,7 +204,6 @@ function scoreViralWindow(
 /**
  * Mode 1 ('clip-segment' — Find Best Viral Clips):
  * Creates a clean, continuous viral clip from `start` to `end` WITHOUT chopping it into artificial 2-second pieces.
- * The user can still use the Razor tool (`C`) on the timeline if they want manual splits.
  */
 export function buildSubCutsForRange(
   start: number,
@@ -233,11 +236,6 @@ export function buildSubCutsForRange(
  * Mode 2 ('condensed-edit' — Create Compilation Cutdowns):
  * Ranks distinct high-energy/high-motion/speech shots across the video, strips out dead air / low-energy filler,
  * and stitches the best non-contiguous moments together into the determined target length (`targetDuration`).
- * Each compilation variation uses a distinct editorial structure:
- * - Variant 0: Hook-First Viral Cutdown (strongest hook shot first, then chronological highlights)
- * - Variant 1: Chronological Story Cutdown (best highlights from beginning -> middle -> climax)
- * - Variant 2: Fast Action & Motion Montage (highest visual motion + beat peaks)
- * - Variant 3+: Alternating Peak & Reaction Cutdowns
  */
 export function buildCondensedEditSubCuts(
   targetDuration: number,
@@ -256,10 +254,113 @@ export function buildCondensedEditSubCuts(
   const availableSpan = Math.max(2, effectiveEnd - effectiveStart);
   const desiredLen = Math.min(availableSpan, Math.max(3, targetDuration));
 
-  const shotLen = Math.max(1.2, Math.min(desiredLen / 2.2, scheme.targetAvgShotLength || 2.5));
-  const targetShotCount = Math.max(3, Math.min(40, Math.round(desiredLen / shotLen)));
+  // If the source video has a full transcript, build the compilation from complete spoken thought blocks!
+  const transcript = source.transcriptSegments || [];
+  if (transcript.length >= 6) {
+    // Group adjacent transcript cards into complete 5–12s thought blocks
+    interface ThoughtBlock {
+      start: number;
+      end: number;
+      duration: number;
+      text: string;
+      score: number;
+    }
+    const blocks: ThoughtBlock[] = [];
+    let curStart = transcript[0].start;
+    let curEnd = transcript[0].end;
+    let curTexts: string[] = [transcript[0].text];
 
-  // Build candidate highlight shots across [effectiveStart, effectiveEnd]
+    for (let i = 1; i < transcript.length; i++) {
+      const seg = transcript[i];
+      if (seg.start < effectiveStart || seg.end > effectiveEnd) continue;
+      const gap = seg.start - curEnd;
+      const span = seg.end - curStart;
+      if (gap <= 0.85 && span <= 11.0) {
+        curEnd = seg.end;
+        curTexts.push(seg.text);
+      } else {
+        const dur = Number((curEnd - curStart).toFixed(2));
+        if (dur >= 3.2) {
+          const stats = scoreViralWindow(source, curStart, curEnd, scheme);
+          blocks.push({
+            start: Number(curStart.toFixed(2)),
+            end: Number(curEnd.toFixed(2)),
+            duration: dur,
+            text: curTexts.join(' '),
+            score: stats.viralScore + (/[?!]/.test(curTexts.join(' ')) ? 5 : 0),
+          });
+        }
+        curStart = seg.start;
+        curEnd = seg.end;
+        curTexts = [seg.text];
+      }
+    }
+    const lastDur = Number((curEnd - curStart).toFixed(2));
+    if (lastDur >= 3.2) {
+      const stats = scoreViralWindow(source, curStart, curEnd, scheme);
+      blocks.push({
+        start: Number(curStart.toFixed(2)),
+        end: Number(curEnd.toFixed(2)),
+        duration: lastDur,
+        text: curTexts.join(' '),
+        score: stats.viralScore,
+      });
+    }
+
+    if (blocks.length >= 3) {
+      const sortedByScore = [...blocks].sort((a, b) => b.score - a.score);
+      const picked: ThoughtBlock[] = [];
+      let acc = 0;
+      const offset = clipIndex % Math.max(1, Math.min(3, sortedByScore.length));
+      for (let i = offset; i < sortedByScore.length && acc < desiredLen - 1.5; i++) {
+        const cand = sortedByScore[i];
+        const overlaps = picked.some(
+          (p) => Math.max(p.start, cand.start) < Math.min(p.end, cand.end) + 0.5
+        );
+        if (!overlaps) {
+          picked.push(cand);
+          acc += cand.duration;
+        }
+      }
+      if (picked.length >= 2) {
+        // Put highest-scoring quote first as Cold Open Hook, then chronological story order
+        const hookBlock = picked[0];
+        const restChrono = picked.slice(1).sort((a, b) => a.start - b.start);
+        const ordered = [hookBlock, ...restChrono];
+        let tlCursor = 0;
+        const transcriptSubCuts: SubCut[] = ordered.map((b, idx) => {
+          const tsRange = `${formatShortTimestamp(b.start)}–${formatShortTimestamp(b.end)}`;
+          const role =
+            idx === 0
+              ? 'Cold Open Hook'
+              : idx === ordered.length - 1
+                ? 'Climax Payoff'
+                : `Thread Quote #${idx + 1}`;
+          const cut: SubCut = {
+            id: `comp-tr-${clipIndex + 1}-${idx + 1}-${Date.now()}`,
+            index: idx + 1,
+            sourceStart: b.start,
+            sourceEnd: b.end,
+            timelineStart: Number(tlCursor.toFixed(2)),
+            timelineEnd: Number((tlCursor + b.duration).toFixed(2)),
+            label: `${role} [${tsRange}]`,
+            spokenQuote: b.text,
+            narrativeRole: role,
+            zoom: 1.0,
+            cropBiasX: 0,
+            isBeatCut: false,
+          };
+          tlCursor += b.duration;
+          return cut;
+        });
+        return recalculateClipTimeline(transcriptSubCuts).subCuts;
+      }
+    }
+  }
+
+  const shotLen = Math.max(3.5, Math.min(desiredLen / 2.2, Math.max(4.5, scheme.targetAvgShotLength || 5.0)));
+  const targetShotCount = Math.max(3, Math.min(16, Math.round(desiredLen / shotLen)));
+
   interface CandidateShot {
     start: number;
     end: number;
@@ -271,9 +372,8 @@ export function buildCondensedEditSubCuts(
   }
 
   const candidates: CandidateShot[] = [];
-  const step = Math.max(0.8, Math.min(2.0, (availableSpan - shotLen) / Math.max(8, targetShotCount * 3)));
+  const step = Math.max(1.5, Math.min(3.0, (availableSpan - shotLen) / Math.max(8, targetShotCount * 3)));
 
-  // Gather candidate anchor points from real audio peaks, scene cuts, and sliding steps
   const anchorPoints = new Set<number>();
   for (let t = effectiveStart; t <= effectiveEnd - shotLen; t += step) {
     anchorPoints.add(Number(t.toFixed(2)));
@@ -293,18 +393,15 @@ export function buildCondensedEditSubCuts(
   const sortedAnchors = Array.from(anchorPoints).sort((a, b) => a - b);
 
   for (const sStart of sortedAnchors) {
-    // Vary shot duration slightly around shotLen for natural editorial rhythm
     const sEnd = Number(Math.min(effectiveEnd, sStart + shotLen).toFixed(2));
     const sDur = Number((sEnd - sStart).toFixed(2));
-    if (sDur < 0.75) continue;
+    if (sDur < 2.0) continue;
 
     const stats = scoreViralWindow(source, sStart, sEnd, scheme);
     let modeScore = stats.viralScore;
     if (clipIndex % 3 === 2) {
-      // Action montage bias
       modeScore += stats.avgMotion * 28;
     } else if (clipIndex % 3 === 0) {
-      // Hook/Audio peak bias
       modeScore += stats.hookStrength * 0.25 + stats.peakCount * 4;
     }
 
@@ -319,24 +416,20 @@ export function buildCondensedEditSubCuts(
     });
   }
 
-  // Filter out silent filler if enough non-silent candidates exist
   const nonSilent = candidates.filter((c) => !c.isSilent);
   const pool = nonSilent.length >= targetShotCount ? nonSilent : candidates;
 
-  // Divide the video into zones so the compilation covers the full arc of the video while picking the highest-scoring shot in each zone
   const selectedShots: CandidateShot[] = [];
   let accumulatedDur = 0;
 
-  // Shift zone boundaries slightly per clipIndex so each generated compilation picks different highlight moments
   const phaseShift = totalClipsCount > 1 ? (clipIndex / totalClipsCount) * (shotLen * 0.85) : 0;
   const numZones = Math.max(3, targetShotCount);
   const zoneSpan = availableSpan / numZones;
 
-  for (let z = 0; z < numZones && accumulatedDur < desiredLen - 0.3; z++) {
+  for (let z = 0; z < numZones && accumulatedDur < desiredLen - 0.5; z++) {
     const zStart = effectiveStart + z * zoneSpan + (z > 0 ? phaseShift * 0.35 : 0);
     const zEnd = Math.min(effectiveEnd, effectiveStart + (z + 1) * zoneSpan + phaseShift * 0.35);
 
-    // Find highest-scoring non-overlapping candidate in or near this zone
     const inZone = pool
       .filter(
         (c) =>
@@ -352,10 +445,10 @@ export function buildCondensedEditSubCuts(
     if (chosen) {
       const needed = Number((desiredLen - accumulatedDur).toFixed(2));
       const trimmedEnd = Number(
-        Math.min(effectiveEnd, chosen.start + Math.min(chosen.duration, Math.max(0.8, needed))).toFixed(2)
+        Math.min(effectiveEnd, chosen.start + Math.min(chosen.duration, Math.max(2.0, needed))).toFixed(2)
       );
       const actualDur = Number((trimmedEnd - chosen.start).toFixed(2));
-      if (actualDur >= 0.6) {
+      if (actualDur >= 2.0) {
         selectedShots.push({
           ...chosen,
           end: trimmedEnd,
@@ -366,34 +459,8 @@ export function buildCondensedEditSubCuts(
     }
   }
 
-  // If we still need more duration to reach `desiredLen`, greedily add top remaining non-overlapping shots
-  const remainingSorted = [...pool].sort((a, b) => b.score - a.score);
-  for (const cand of remainingSorted) {
-    if (accumulatedDur >= desiredLen - 0.35) break;
-    const overlaps = selectedShots.some(
-      (sel) => Math.max(sel.start, cand.start) < Math.min(sel.end, cand.end) + 0.1
-    );
-    if (!overlaps) {
-      const needed = Number((desiredLen - accumulatedDur).toFixed(2));
-      const trimmedEnd = Number(
-        Math.min(effectiveEnd, cand.start + Math.min(cand.duration, Math.max(0.8, needed))).toFixed(2)
-      );
-      const actualDur = Number((trimmedEnd - cand.start).toFixed(2));
-      if (actualDur >= 0.6) {
-        selectedShots.push({
-          ...cand,
-          end: trimmedEnd,
-          duration: actualDur,
-        });
-        accumulatedDur = Number((accumulatedDur + actualDur).toFixed(2));
-      }
-    }
-  }
-
-  // Order the selected shots according to the compilation variant style
   let orderedShots = [...selectedShots].sort((a, b) => a.start - b.start);
   if (clipIndex % 3 === 0 && orderedShots.length > 2) {
-    // Variant 0: Hook-First Viral Cutdown -> Put the highest-scoring climax shot FIRST as a cold open hook, then chronological!
     let bestIdx = 0;
     for (let i = 1; i < orderedShots.length; i++) {
       if (orderedShots[i].score > orderedShots[bestIdx].score) {
@@ -406,15 +473,12 @@ export function buildCondensedEditSubCuts(
     }
   }
 
-  // Convert into SubCuts with clear source timestamp badges
   let tlCursor = 0;
   const subCuts: SubCut[] = orderedShots.map((shot, idx) => {
     const isHook = idx === 0;
-    const isEmphasis = idx % 2 === 1;
-    const zoom = isEmphasis ? Number(Math.max(0.55, scheme.punchInZoom || 1.0).toFixed(2)) : 1.0;
     const tsRange = `${formatShortTimestamp(shot.start)}–${formatShortTimestamp(shot.end)}`;
     const roleLabel = isHook
-      ? `Hook [${tsRange}]`
+      ? `Cold Open Hook [${tsRange}]`
       : idx === orderedShots.length - 1
         ? `Payoff [${tsRange}]`
         : `Shot #${idx + 1} [${tsRange}]`;
@@ -427,9 +491,9 @@ export function buildCondensedEditSubCuts(
       timelineStart: Number(tlCursor.toFixed(2)),
       timelineEnd: Number((tlCursor + shot.duration).toFixed(2)),
       label: roleLabel,
-      zoom,
+      zoom: 1.0,
       cropBiasX: 0,
-      isBeatCut: scheme.beatSyncCuts,
+      isBeatCut: false,
     };
     tlCursor += shot.duration;
     return cut;
@@ -439,11 +503,9 @@ export function buildCondensedEditSubCuts(
 }
 
 /**
- * Generates either:
- * 1. **Best Possible Viral Clips (`'clip-segment'`)**: Top $N$ non-overlapping continuous viral segments
- *    scored by hook strength, audio/speech peaks, visual motion, and minimal dead air.
- * 2. **Compilation Cutdowns (`'condensed-edit'`)**: Top $N$ multi-shot highlight compilations stitched
- *    together into `targetClipDuration` (`5s`–`180s`) with silent/low-energy dead air stripped out.
+ * Fallback generator ONLY used if no AI key is available or for the synthetic demo video.
+ * When `source.transcriptSegments` is present, snaps cuts to real spoken sentence boundaries
+ * and attaches word-level karaoke captions!
  */
 export function generateClipsFromScheme(
   source: SourceVideoAsset,
@@ -460,6 +522,7 @@ export function generateClipsFromScheme(
   const totalDur = Math.max(2, rEnd - rStart);
   const desiredCount = Math.max(1, Math.min(12, scheme.maxClipsCount || 4));
   const clipMode: ClipCreationMode = scheme.clipCreationMode || 'clip-segment';
+  const transcript = source.transcriptSegments || [];
 
   const targetLen = Math.min(
     totalDur,
@@ -470,14 +533,11 @@ export function generateClipsFromScheme(
   const clips: GeneratedClip[] = [];
 
   if (clipMode === 'condensed-edit') {
-    // MODE B: CREATE COMPILATION CUTDOWNS
     const editStyleLabels = [
-      'Hook-First Viral Compilation',
-      'Chronological Story Cutdown',
-      'High-Action Motion Montage',
-      'Peak Audio & Speech Cutdown',
-      'Fast Social Highlight Reel',
-      'Tight Beat-Synced Cutdown',
+      'Core Thesis & Climax Cutdown',
+      'Chronological Story Arc',
+      'Key Debate & Insights Supercut',
+      'Peak Moments Compilation',
     ];
 
     for (let i = 0; i < desiredCount; i++) {
@@ -491,27 +551,21 @@ export function generateClipsFromScheme(
         rEnd
       );
       const recalc = recalculateClipTimeline(subCuts);
-
-      const peaksInCuts = subCuts.reduce((acc, cut) => {
-        return (
-          acc +
-          source.audioPeakTimestamps.filter((p) => p >= cut.sourceStart && p <= cut.sourceEnd).length
-        );
-      }, 0);
-
-      const skippedDeadAir = Math.max(0, Number((totalDur - recalc.duration).toFixed(1)));
-      const rawScore =
-        84 +
-        Math.round(
-          peaksInCuts * 2.2 * (scheme.audioPeakWeight || 0.8) +
-            subCuts.length * 1.8 * (scheme.visualMotionWeight || 0.7) +
-            (i === 0 ? 5 : 0)
-        );
-      const viralScore = Math.max(78, Math.min(99, rawScore - i * 2));
+      const mappedCaptions = mapSourceTranscriptToClipTimeline(
+        transcript,
+        recalc.subCuts,
+        recalc.duration
+      );
+      const openingQuote = mappedCaptions[0]?.text || subCuts[0]?.spokenQuote || '';
 
       const variantLabel = editStyleLabels[i % editStyleLabels.length];
-      const clipName = `Compilation #${i + 1} — ${variantLabel} (${recalc.duration.toFixed(0)}s • ${subCuts.length} Cuts)`;
-      const hookReason = `Stitched ${subCuts.length} high-energy shots into ${recalc.duration.toFixed(1)}s • Cut ${skippedDeadAir}s of filler • ${peaksInCuts} audio peaks`;
+      const clipName = openingQuote
+        ? `${variantLabel}: "${openingQuote.slice(0, 36)}${openingQuote.length > 36 ? '…' : ''}"`
+        : `Compilation #${i + 1} — ${variantLabel} (${recalc.duration.toFixed(0)}s)`;
+
+      const hookReason = openingQuote
+        ? `Opens on hook "${openingQuote}" • Stitches ${subCuts.length} sentence-aligned quotes across ${recalc.duration.toFixed(0)}s`
+        : `Stitched ${subCuts.length} highlight quotes into ${recalc.duration.toFixed(1)}s`;
 
       clips.push({
         id: `clip-edit-${i + 1}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -520,20 +574,22 @@ export function generateClipsFromScheme(
         schemeId: scheme.id,
         schemeName: scheme.name,
         clipCreationMode: 'condensed-edit',
-        viralScore,
+        viralScore: Math.max(82, 95 - i * 2),
         hookReason,
+        commonThread: variantLabel,
+        viralMechanics: ['Cold Open Hook', 'Sentence-Aligned Cuts', 'Narrative Payoff'],
         sourceStart: recalc.sourceStart,
         sourceEnd: recalc.sourceEnd,
         duration: recalc.duration,
         trackingMode: scheme.trackingMode,
         trackingOffsetX: 0,
         trackingSmoothing: scheme.trackingSmoothing,
-        zoomScale: scheme.punchInZoom,
-        captionText: '',
+        zoomScale: 1.0,
+        captionText: openingQuote,
         captionStyle: scheme.captionStyle,
         safeZoneGuide: scheme.safeZoneGuide,
         subCuts: recalc.subCuts,
-        captions: [],
+        captions: mappedCaptions,
         manualKeyframes: [],
       });
     }
@@ -541,8 +597,6 @@ export function generateClipsFromScheme(
     return clips.sort((a, b) => b.viralScore - a.viralScore);
   }
 
-  // MODE A: FIND BEST POSSIBLE VIRAL CLIPS ('clip-segment')
-  // Slide a window of `windowLen` across `[rStart, rEnd]` and rank all candidate segments by real viral telemetry!
   interface RankedWindow {
     start: number;
     end: number;
@@ -567,28 +621,29 @@ export function generateClipsFromScheme(
     });
   } else {
     const candidateStarts = new Set<number>();
-    for (let t = rStart; t <= rEnd - windowLen; t += slideStep) {
-      candidateStarts.add(Number(t.toFixed(2)));
-    }
-    // Also align candidate starts with real scene cuts and audio peaks
-    for (const sc of source.sceneCutTimestamps) {
-      if (sc >= rStart && sc <= rEnd - windowLen) {
-        candidateStarts.add(Number(sc.toFixed(2)));
+    // Prefer starting on real transcript sentence boundaries when available!
+    for (const seg of transcript) {
+      if (seg.start >= rStart && seg.start <= rEnd - windowLen) {
+        candidateStarts.add(Number(seg.start.toFixed(2)));
       }
     }
-    for (const pk of source.audioPeakTimestamps) {
-      const pre = Math.max(rStart, pk - 0.3);
-      if (pre <= rEnd - windowLen) {
-        candidateStarts.add(Number(pre.toFixed(2)));
+    if (candidateStarts.size < desiredCount * 2) {
+      for (let t = rStart; t <= rEnd - windowLen; t += slideStep) {
+        candidateStarts.add(Number(t.toFixed(2)));
       }
     }
 
     for (const st of candidateStarts) {
-      const en = Number(Math.min(rEnd, st + windowLen).toFixed(2));
-      const stats = scoreViralWindow(source, st, en, scheme);
+      const snapped = snapRangeToTranscriptBoundaries(
+        st,
+        Math.min(rEnd, st + windowLen),
+        source.duration,
+        transcript
+      );
+      const stats = scoreViralWindow(source, snapped.start, snapped.end, scheme);
       candidateWindows.push({
-        start: st,
-        end: en,
+        start: snapped.start,
+        end: snapped.end,
         viralScore: stats.viralScore,
         hookStrength: stats.hookStrength,
         peakCount: stats.peakCount,
@@ -599,9 +654,8 @@ export function generateClipsFromScheme(
 
   candidateWindows.sort((a, b) => b.viralScore - a.viralScore);
 
-  // Greedily pick top N non-overlapping (or minimally overlapping) viral windows
   const chosenWindows: RankedWindow[] = [];
-  const maxAllowedOverlap = windowLen * 0.3;
+  const maxAllowedOverlap = windowLen * 0.25;
 
   for (const cand of candidateWindows) {
     if (chosenWindows.length >= desiredCount) break;
@@ -614,44 +668,33 @@ export function generateClipsFromScheme(
     }
   }
 
-  // If the video is short and user requested more clips than non-overlapping windows fit, fill with remaining best shifted windows
-  if (chosenWindows.length < desiredCount) {
-    const evenStep =
-      desiredCount > 1 && totalDur > windowLen
-        ? (totalDur - windowLen) / (desiredCount - 1)
-        : 0;
-    for (let i = chosenWindows.length; i < desiredCount; i++) {
-      const st = Number(Math.min(Math.max(rStart, rEnd - windowLen), rStart + i * evenStep).toFixed(2));
-      const en = Number(Math.min(rEnd, st + windowLen).toFixed(2));
-      const stats = scoreViralWindow(source, st, en, scheme);
-      chosenWindows.push({
-        start: st,
-        end: en,
-        viralScore: Math.max(72, stats.viralScore - i * 2),
-        hookStrength: stats.hookStrength,
-        peakCount: stats.peakCount,
-        avgMotion: stats.avgMotion,
-      });
-    }
-  }
-
   chosenWindows.forEach((win, i) => {
     const subCuts = buildSubCutsForRange(win.start, win.end, source, scheme, i);
     const recalc = recalculateClipTimeline(subCuts);
+    const mappedCaptions = mapSourceTranscriptToClipTimeline(
+      transcript,
+      recalc.subCuts,
+      recalc.duration
+    );
+    const openingQuote = mappedCaptions[0]?.text || '';
     const isDemo = Boolean(source.isSyntheticDemo);
     const tsLabel = `${formatShortTimestamp(win.start)}–${formatShortTimestamp(win.end)}`;
 
     const clipName = isDemo
       ? `Viral Clip #${i + 1} — ${DEMO_HOOK_LINES[i % DEMO_HOOK_LINES.length]} [${tsLabel}]`
-      : `Viral Clip #${i + 1} [${tsLabel}] (${recalc.duration.toFixed(0)}s)`;
+      : openingQuote
+        ? `"${openingQuote.slice(0, 42)}${openingQuote.length > 42 ? '…' : ''}" [${tsLabel}]`
+        : `Viral Clip #${i + 1} [${tsLabel}] (${recalc.duration.toFixed(0)}s)`;
 
     const captionText = isDemo
       ? i === 0
         ? 'SUMMER'
         : DEMO_HOOK_LINES[i % DEMO_HOOK_LINES.length]
-      : '';
+      : openingQuote;
 
-    const hookReason = `Continuous Viral Segment [${tsLabel}] • Hook Strength ${win.hookStrength}% • ${win.peakCount} audio/speech peaks`;
+    const hookReason = openingQuote
+      ? `Opens on sentence hook: "${openingQuote}" [${tsLabel}] • Complete spoken thought (${recalc.duration.toFixed(0)}s)`
+      : `Continuous Viral Segment [${tsLabel}] • Hook Strength ${win.hookStrength}%`;
 
     clips.push({
       id: `clip-seg-${i + 1}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -673,7 +716,7 @@ export function generateClipsFromScheme(
       captionStyle: scheme.captionStyle,
       safeZoneGuide: scheme.safeZoneGuide,
       subCuts: recalc.subCuts,
-      captions: [],
+      captions: mappedCaptions,
       manualKeyframes: [],
     });
   });
@@ -682,19 +725,24 @@ export function generateClipsFromScheme(
 }
 
 /**
- * Calls `/api/ai-analyze-video` with the uploaded video's real keyframes + WAV audio snippet
- * so Gemini / Claude / OpenAI identifies real content-aware clip ranges or condensed edits
- * and transcribes real captions.
+ * Stage 2 & 3 of the AI Viral Showrunner & Common-Thread Narrative Director:
+ * Sends the FULL timestamped transcript + sampled keyframes + audio peak telemetry to `/api/ai-analyze-video`,
+ * snaps every cut to exact spoken sentence boundaries, and automatically attaches word-level karaoke captions!
  */
 export async function generateClipsWithMultimodalAI(
   source: SourceVideoAsset,
   scheme: EditingScheme,
-  aiSettings: AIProviderSettings
+  aiSettings: AIProviderSettings,
+  options?: {
+    editorialFocusPrompt?: string;
+    sourceTranscript?: CaptionSegment[];
+  }
 ): Promise<{ clips: GeneratedClip[] | null; providerUsed?: string; error?: string }> {
   try {
     const provider = aiSettings.activeProvider;
     const clipMode: ClipCreationMode = scheme.clipCreationMode || 'clip-segment';
     const desiredCount = Math.max(1, Math.min(12, scheme.maxClipsCount || 4));
+    const transcript = options?.sourceTranscript || source.transcriptSegments || [];
 
     const resp = await fetch('/api/ai-analyze-video', {
       method: 'POST',
@@ -705,6 +753,12 @@ export async function generateClipsWithMultimodalAI(
         apiKeyOverride: aiSettings.apiKeys[provider],
         fileName: source.name,
         duration: source.duration,
+        editorialFocusPrompt: options?.editorialFocusPrompt,
+        transcriptSegments: transcript.map((seg) => ({
+          start: seg.start,
+          end: seg.end,
+          text: seg.text,
+        })),
         scheme: {
           name: scheme.name,
           clipCreationMode: clipMode,
@@ -721,7 +775,7 @@ export async function generateClipsWithMultimodalAI(
         audioPeakTimestamps: source.audioPeakTimestamps,
         highEnergyWindows: source.highEnergyWindows || [],
         sampledFrames: source.sampledFrames || [],
-        audioSampleBase64: source.audioSampleBase64,
+        audioSampleBase64: transcript.length === 0 ? source.audioSampleBase64 : undefined,
         audioMimeType: 'audio/wav',
       }),
     });
@@ -735,30 +789,49 @@ export async function generateClipsWithMultimodalAI(
       let subCuts: SubCut[] = [];
 
       if (
-        clipMode === 'condensed-edit' &&
         Array.isArray(c.subCuts) &&
-        c.subCuts.length > 1
+        c.subCuts.length > 0 &&
+        (clipMode === 'condensed-edit' || c.subCuts.length >= 1)
       ) {
         let tlCursor = 0;
         subCuts = c.subCuts.map((sc: any, sIdx: number) => {
-          const sStart = Math.max(0, Math.min(source.duration - 0.5, Number(sc.sourceStart) || 0));
-          const sEnd = Math.max(
-            sStart + 0.5,
-            Math.min(source.duration, Number(sc.sourceEnd) || sStart + scheme.targetAvgShotLength)
+          const rawStart = Math.max(0, Math.min(source.duration - 1.5, Number(sc.sourceStart) || 0));
+          const rawEnd = Math.max(
+            rawStart + 1.5,
+            Math.min(
+              source.duration,
+              Number(sc.sourceEnd) ||
+                rawStart +
+                  (clipMode === 'condensed-edit'
+                    ? Math.max(4.5, scheme.targetAvgShotLength)
+                    : scheme.targetClipDuration)
+            )
           );
-          const sDur = Number((sEnd - sStart).toFixed(2));
-          const tsRange = `${formatShortTimestamp(sStart)}–${formatShortTimestamp(sEnd)}`;
+          const snapped = snapRangeToTranscriptBoundaries(
+            rawStart,
+            rawEnd,
+            source.duration,
+            transcript
+          );
+          const sDur = Number((snapped.end - snapped.start).toFixed(2));
+          const tsRange = `${formatShortTimestamp(snapped.start)}–${formatShortTimestamp(snapped.end)}`;
+          const rolePrefix = sc.narrativeRole ? `${sc.narrativeRole}: ` : '';
+          const baseLabel = sc.label || `${rolePrefix}Cut #${sIdx + 1}`;
+          const cleanLabel = baseLabel.includes('[') ? baseLabel : `${baseLabel} [${tsRange}]`;
+
           const cut: SubCut = {
             id: `ai-edit-cut-${idx + 1}-${sIdx + 1}-${Date.now()}`,
             index: sIdx + 1,
-            sourceStart: Number(sStart.toFixed(2)),
-            sourceEnd: Number(sEnd.toFixed(2)),
+            sourceStart: snapped.start,
+            sourceEnd: snapped.end,
             timelineStart: Number(tlCursor.toFixed(2)),
             timelineEnd: Number((tlCursor + sDur).toFixed(2)),
-            label: sc.label ? `${sc.label} [${tsRange}]` : `Shot #${sIdx + 1} [${tsRange}]`,
-            zoom: sIdx % 2 === 1 ? scheme.punchInZoom : 1.0,
+            label: cleanLabel,
+            spokenQuote: sc.spokenQuote ? String(sc.spokenQuote) : undefined,
+            narrativeRole: sc.narrativeRole ? String(sc.narrativeRole) : undefined,
+            zoom: 1.0,
             cropBiasX: 0,
-            isBeatCut: scheme.beatSyncCuts,
+            isBeatCut: false,
           };
           tlCursor += sDur;
           return cut;
@@ -772,17 +845,35 @@ export async function generateClipsWithMultimodalAI(
           desiredCount
         );
       } else {
-        const start = Math.max(0, Math.min(source.duration - 3, Number(c.sourceStart) || 0));
-        const end = Math.max(
-          start + 3,
-          Math.min(source.duration, start + scheme.targetClipDuration)
+        const rawStart = Math.max(0, Math.min(source.duration - 3, Number(c.sourceStart) || 0));
+        const rawEnd = Math.max(
+          rawStart + 3,
+          Math.min(
+            source.duration,
+            Number(c.sourceEnd) && Number(c.sourceEnd) > rawStart + 3
+              ? Number(c.sourceEnd)
+              : rawStart + scheme.targetClipDuration
+          )
         );
-        subCuts = buildSubCutsForRange(start, end, source, scheme, idx);
+        const snapped = snapRangeToTranscriptBoundaries(
+          rawStart,
+          rawEnd,
+          source.duration,
+          transcript
+        );
+        subCuts = buildSubCutsForRange(snapped.start, snapped.end, source, scheme, idx);
       }
 
       const recalc = recalculateClipTimeline(subCuts);
 
-      const captions: CaptionSegment[] = Array.isArray(c.captions)
+      // Automatically slice & map the full source video's word-level transcript onto this clip's timeline!
+      const mappedCaptions = mapSourceTranscriptToClipTimeline(
+        transcript,
+        recalc.subCuts,
+        recalc.duration
+      );
+
+      const fallbackAiCaptions: CaptionSegment[] = Array.isArray(c.captions)
         ? c.captions.map((cap: any, cIdx: number) => ({
             id: `ai-cap-${idx}-${cIdx}`,
             start: Number(cap.start) || 0,
@@ -791,39 +882,48 @@ export async function generateClipsWithMultimodalAI(
           }))
         : [];
 
+      const finalCaptions = mappedCaptions.length > 0 ? mappedCaptions : fallbackAiCaptions;
+      const tsRangeBadge = `${formatShortTimestamp(recalc.sourceStart)}–${formatShortTimestamp(recalc.sourceEnd)}`;
+      const rawName =
+        c.name ||
+        (clipMode === 'condensed-edit' ? `Compilation #${idx + 1}` : `Viral Clip #${idx + 1}`);
+      const enrichedName = rawName.includes('[')
+        ? rawName
+        : `${rawName} [${tsRangeBadge}]`;
+
       return {
-        id: `ai-clip-${idx + 1}-${Date.now()}`,
-        name:
-          c.name ||
-          (clipMode === 'condensed-edit' ? `Compilation #${idx + 1}` : `Viral Clip #${idx + 1}`),
+        id: `ai-clip-${idx + 1}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        name: enrichedName,
         sourceVideoId: source.id,
         schemeId: scheme.id,
         schemeName: scheme.name,
         clipCreationMode: clipMode,
-        viralScore: Math.max(70, Math.min(99, Number(c.viralScore) || 90)),
-        hookReason: c.hookReason || `Selected by ${data.providerUsed}`,
+        viralScore: Math.max(75, Math.min(99, Number(c.viralScore) || 92)),
+        hookReason:
+          c.hookReason ||
+          (c.commonThread
+            ? `Theme: ${c.commonThread}`
+            : `Selected by ${data.providerUsed}`),
+        commonThread: c.commonThread ? String(c.commonThread) : undefined,
+        viralMechanics: Array.isArray(c.viralMechanics)
+          ? c.viralMechanics.map((m: any) => String(m))
+          : undefined,
+        editorialReasoning: c.editorialReasoning ? String(c.editorialReasoning) : undefined,
         sourceStart: recalc.sourceStart,
         sourceEnd: recalc.sourceEnd,
         duration: recalc.duration,
         trackingMode: scheme.trackingMode,
         trackingOffsetX: 0,
         trackingSmoothing: scheme.trackingSmoothing,
-        zoomScale: clipMode === 'condensed-edit' ? scheme.punchInZoom : 1.0,
-        captionText: c.captionText || captions[0]?.text || '',
+        zoomScale: 1.0,
+        captionText: c.captionText || finalCaptions[0]?.text || '',
         captionStyle: scheme.captionStyle,
         safeZoneGuide: scheme.safeZoneGuide,
         subCuts: recalc.subCuts,
-        captions,
+        captions: finalCaptions,
         manualKeyframes: [],
       };
     });
-
-    if (aiClips.length < desiredCount) {
-      const fallbackClips = generateClipsFromScheme(source, scheme);
-      for (let i = aiClips.length; i < desiredCount && i < fallbackClips.length; i++) {
-        aiClips.push(fallbackClips[i]);
-      }
-    }
 
     return { clips: aiClips, providerUsed: data.providerUsed };
   } catch (err: any) {
