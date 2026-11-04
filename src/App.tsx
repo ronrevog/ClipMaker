@@ -500,6 +500,11 @@ export const App: React.FC = () => {
     playheadTime,
     clipPlayheadTime,
     liveTrackedAnchor,
+    activeClip?.backgroundFillStyle,
+    activeClip?.subCuts,
+    activeClip?.zoomScale,
+    activeClip?.trackingOffsetX,
+    activeClip?.subjectFocus,
     activeClip?.captionFontFamily,
     activeClip?.captionStyle,
     activeClip?.captionPositionY,
@@ -832,16 +837,19 @@ export const App: React.FC = () => {
   // Quick Subject Focus Preset Selector (Auto Face/Speaker, Left Subject, Center, Right Subject, Action Motion)
   const handleSelectSubjectFocusStrategy = useCallback(
     (strategy: SubjectFocusStrategy) => {
+      const isVerticalSource = nativeDims.width < nativeDims.height;
       let anchorX = 0.5;
-      let anchorY = 0.48;
+      let anchorY = isVerticalSource ? 0.41 : 0.48;
       let label = 'Auto Salient Subject';
 
       if (strategy === 'left-subject') {
-        anchorX = currentTrack.leftSubjectX ?? 0.3;
-        label = 'Left Subject Focus';
+        anchorX = 0.26;
+        anchorY = isVerticalSource ? 0.41 : 0.46;
+        label = 'Left Speaker Focus';
       } else if (strategy === 'right-subject') {
-        anchorX = currentTrack.rightSubjectX ?? 0.7;
-        label = 'Right Subject Focus';
+        anchorX = 0.74;
+        anchorY = isVerticalSource ? 0.41 : 0.46;
+        label = 'Right Speaker Focus';
       } else if (strategy === 'face-speaker') {
         anchorX = currentTrack.faceX ?? currentTrack.cropX;
         anchorY = currentTrack.faceY ?? 0.42;
@@ -856,8 +864,9 @@ export const App: React.FC = () => {
         label = 'Center 9:16 Lock';
       }
 
-      if ( strategy !== 'click-track') {
+      if (strategy !== 'click-track') {
         userFocusAnchorsRef.current = [];
+        liveTrackedAnchorRef.current = null;
       }
 
       applySubjectFocusConfig({
@@ -868,10 +877,54 @@ export const App: React.FC = () => {
         label,
       });
 
+      // On vertical 2-speaker videos (e.g. 720x1280), isolating Left Speaker or Right Speaker requires ~1.85x zoom
+      if (isVerticalSource && (strategy === 'left-subject' || strategy === 'right-subject')) {
+        const speakerZoom = Math.max(1.85, currentZoom);
+        updateActiveTimelineClip((c) => ({
+          ...c,
+          backgroundFillStyle: c.backgroundFillStyle === 'split-screen' ? 'blurred' : c.backgroundFillStyle,
+          zoomScale: speakerZoom,
+          subCuts: c.subCuts.map((sc) => ({
+            ...sc,
+            zoom: speakerZoom,
+            cropBiasX: strategy === 'left-subject' ? -0.24 : 0.24,
+          })),
+        }));
+      } else {
+        updateActiveTimelineClip((c) => ({
+          ...c,
+          backgroundFillStyle: c.backgroundFillStyle === 'split-screen' ? 'blurred' : c.backgroundFillStyle,
+          subCuts: c.subCuts.map((sc) => ({
+            ...sc,
+            cropBiasX: 0,
+          })),
+        }));
+      }
+
       setMarkerNotice(`9:16 Subject Focus set to: ${label}`);
       setTimeout(() => setMarkerNotice(null), 2400);
     },
-    [currentTrack, playheadTime, applySubjectFocusConfig]
+    [currentTrack, playheadTime, applySubjectFocusConfig, nativeDims, currentZoom, updateActiveTimelineClip]
+  );
+
+  // Dedicated 2-Speaker Podcast Director (Split-Screen OR Auto-Switch Speaker Cuts)
+  const handleTwoSpeakerMode = useCallback(
+    (mode: 'split-screen' | 'auto-switch') => {
+      if (!activeClip || !activeSource) return;
+      userFocusAnchorsRef.current = [];
+      liveTrackedAnchorRef.current = null;
+      setLiveTrackedAnchor(null);
+
+      updateActiveTimelineClip((clip) => applyTwoSpeakerEditMode(clip, activeSource, mode));
+
+      if (mode === 'split-screen') {
+        setMarkerNotice('2-Speaker Split-Screen active (Top: Speaker A · Bottom: Speaker B)');
+      } else {
+        setMarkerNotice('2-Speaker Auto-Switch active (alternating Speaker A & Speaker B cuts)');
+      }
+      setTimeout(() => setMarkerNotice(null), 3000);
+    },
+    [activeClip, activeSource, updateActiveTimelineClip]
   );
 
   // Programmatically or interactively place a Focus Lock Point at normalized (0..1) coordinates on the source video
@@ -3589,7 +3642,7 @@ export const App: React.FC = () => {
           {/* LEFT PANEL: Generator & Clips */}
           <aside className="studio-panel">
             <div className="studio-panel-header">
-              <span>Generator</span>
+              <span>AI Clip & Compilation Generator</span>
               <button
                 className="btn btn-sm"
                 onClick={() => handleSaveAndApplyScheme(false)}
@@ -3600,14 +3653,14 @@ export const App: React.FC = () => {
               </button>
             </div>
 
-            {/* Compact Generator Controls */}
+            {/* Complete Generator Controls */}
             <div
               style={{
-                padding: 12,
+                padding: 10,
                 borderBottom: '1px solid var(--border-subtle)',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 10,
+                gap: 8,
               }}
             >
               {/* Radix Tabs Segmented Mode Switcher */}
@@ -3615,10 +3668,13 @@ export const App: React.FC = () => {
                 value={currentClipMode}
                 onValueChange={(v) => handleSelectClipMode(v as ClipCreationMode)}
               >
-                <Tabs.List className="seg-group" style={{ width: '100%', display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+                <Tabs.List
+                  className="seg-group"
+                  style={{ width: '100%', display: 'grid', gridTemplateColumns: '1fr 1fr' }}
+                >
                   <Tabs.Trigger value="clip-segment" className="seg-item">
                     <Flame size={12} />
-                    Viral Clips
+                    Best Viral Clips
                   </Tabs.Trigger>
                   <Tabs.Trigger value="condensed-edit" className="seg-item">
                     <Layers size={12} />
@@ -3628,13 +3684,13 @@ export const App: React.FC = () => {
               </Tabs.Root>
 
               {/* 3-Column Parameter Row: Duration, Count, Pace */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.9fr 0.9fr', gap: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.9fr 0.9fr', gap: 6 }}>
                 <div>
                   <div
                     style={{
-                      fontSize: 10.5,
+                      fontSize: 10,
                       color: 'var(--text-secondary)',
-                      marginBottom: 4,
+                      marginBottom: 3,
                       display: 'flex',
                       justifyContent: 'space-between',
                     }}
@@ -3682,8 +3738,19 @@ export const App: React.FC = () => {
                 </div>
 
                 <div>
-                  <div style={{ fontSize: 10.5, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                    Clips
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--text-secondary)',
+                      marginBottom: 3,
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <span>Clips</span>
+                    <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                      1–12
+                    </span>
                   </div>
                   <input
                     type="number"
@@ -3706,8 +3773,19 @@ export const App: React.FC = () => {
                 </div>
 
                 <div>
-                  <div style={{ fontSize: 10.5, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                    Pace (s)
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--text-secondary)',
+                      marginBottom: 3,
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <span>Shot Pace</span>
+                    <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                      {activeScheme.targetAvgShotLength}s
+                    </span>
                   </div>
                   <input
                     type="number"
@@ -3730,54 +3808,97 @@ export const App: React.FC = () => {
                 </div>
               </div>
 
-              {/* Clean Duration Slider */}
-              <input
-                type="range"
-                min={5}
-                max={180}
-                step={1}
-                value={activeScheme.targetClipDuration}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10);
-                  setDurationTextInput(String(v));
-                  setActiveScheme({
-                    ...activeScheme,
-                    targetClipDuration: v,
-                    maxClipDuration: 180,
-                  });
-                }}
-                onMouseUp={() => handleApplyTargetDuration(activeScheme.targetClipDuration, false)}
-                style={{ width: '100%' }}
-              />
+              {/* Clean Duration Slider + Quick Duration Presets */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <input
+                  type="range"
+                  min={5}
+                  max={180}
+                  step={1}
+                  value={activeScheme.targetClipDuration}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    setDurationTextInput(String(v));
+                    setActiveScheme({
+                      ...activeScheme,
+                      targetClipDuration: v,
+                      maxClipDuration: 180,
+                    });
+                  }}
+                  onMouseUp={() => handleApplyTargetDuration(activeScheme.targetClipDuration, false)}
+                  style={{ width: '100%' }}
+                />
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 4 }}>
+                  {[15, 30, 60, 90, 120, 180].map((sec) => {
+                    const active = Math.abs(activeScheme.targetClipDuration - sec) <= 1;
+                    return (
+                      <button
+                        key={sec}
+                        type="button"
+                        className={`btn btn-sm ${active ? 'btn-active' : ''}`}
+                        style={{
+                          height: 20,
+                          padding: 0,
+                          justifyContent: 'center',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 10,
+                        }}
+                        onClick={() => handleApplyTargetDuration(sec, false)}
+                      >
+                        {sec}s
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
-              {/* Topic / Focus Filter Input */}
-              <input
-                type="text"
-                className="input-field"
-                placeholder="Topic or speaker filter (optional)..."
-                value={editorialFocusInput}
-                onChange={(e) => setEditorialFocusInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && activeSource && !isGeneratingClips) {
-                    e.preventDefault();
-                    handleGenerateClipsFromFullVideo(currentClipMode);
-                  }
-                }}
-              />
+              {/* Topic / Common Thread Input + Indexed Transcript Status */}
+              <div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 3,
+                    fontSize: 10,
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  <span>Common Thread / Topic Filter</span>
+                  {activeSource?.transcriptSegments && activeSource.transcriptSegments.length > 0 && (
+                    <span className="badge-subtle">
+                      {activeSource.transcriptSegments.length} phrases indexed
+                    </span>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="Optional topic, quote, or speaker focus..."
+                  value={editorialFocusInput}
+                  onChange={(e) => setEditorialFocusInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && activeSource && !isGeneratingClips) {
+                      e.preventDefault();
+                      handleGenerateClipsFromFullVideo(currentClipMode);
+                    }
+                  }}
+                />
+              </div>
 
               {/* Generate Action */}
               <button
                 className="btn btn-primary"
-                style={{ width: '100%', height: 32, justifyContent: 'center' }}
+                style={{ width: '100%', height: 30, justifyContent: 'center' }}
                 onClick={() => handleGenerateClipsFromFullVideo(currentClipMode)}
                 disabled={!activeSource || isGeneratingClips}
               >
                 <Sparkles size={13} />
                 {isGeneratingClips
-                  ? `Analyzing (${clipGenerationProgress}%)`
+                  ? `Analyzing Transcript (${clipGenerationProgress}%)`
                   : currentClipMode === 'condensed-edit'
                     ? `Build ${activeScheme.maxClipsCount} Compilations (${activeScheme.targetClipDuration}s)`
-                    : `Generate ${activeScheme.maxClipsCount} Clips (${activeScheme.targetClipDuration}s)`}
+                    : `Generate ${activeScheme.maxClipsCount} Viral Clips (${activeScheme.targetClipDuration}s)`}
               </button>
 
               {isGeneratingClips && (
@@ -3818,7 +3939,7 @@ export const App: React.FC = () => {
             {/* Sticky Clips Header with Always-Visible Clear Video & Delete Clips */}
             <div className="studio-panel-header">
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span>Clips</span>
+                <span>Clips & Source</span>
                 <span className="badge-subtle">{generatedClips.length}</span>
               </div>
 
@@ -3870,7 +3991,7 @@ export const App: React.FC = () => {
                 </div>
               ) : (
                 <>
-                  {/* Source Video Item */}
+                  {/* Source Video Item with 1-Click Viral Clips & Compilation Actions */}
                   <div
                     className="clip-row"
                     data-selected={timelineMode === 'full-source'}
@@ -3906,7 +4027,7 @@ export const App: React.FC = () => {
                         style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <span className="badge-subtle">Source</span>
+                        <span className="badge-subtle">Full Source</span>
                         <button
                           type="button"
                           className="btn btn-sm btn-danger"
@@ -3933,7 +4054,36 @@ export const App: React.FC = () => {
                         {fullVideoClip?.subCuts.length || 1}{' '}
                         {(fullVideoClip?.subCuts.length || 1) === 1 ? 'cut' : 'cuts'}
                       </span>
-                      <span>{nativeDims.width}×{nativeDims.height}</span>
+                      <span>
+                        {nativeDims.width}×{nativeDims.height}
+                      </span>
+                    </div>
+
+                    {/* 1-Click Mode Actions directly on the Source Video Card */}
+                    <div
+                      style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5, marginTop: 2 }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        style={{ justifyContent: 'center' }}
+                        disabled={isGeneratingClips}
+                        onClick={() => handleGenerateClipsFromFullVideo('clip-segment')}
+                      >
+                        <Flame size={11} />
+                        Viral Clips
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        style={{ justifyContent: 'center' }}
+                        disabled={isGeneratingClips}
+                        onClick={() => handleGenerateClipsFromFullVideo('condensed-edit')}
+                      >
+                        <Layers size={11} />
+                        Compilation
+                      </button>
                     </div>
                   </div>
 
@@ -3942,9 +4092,6 @@ export const App: React.FC = () => {
                     const selected =
                       timelineMode === 'elected-clip' && clip.id === selectedClipObj?.id;
                     const isEditMode = clip.clipCreationMode === 'condensed-edit';
-                    const tooltipNotes = [clip.commonThread, clip.hookReason]
-                      .filter(Boolean)
-                      .join(' — ');
 
                     return (
                       <div
@@ -3977,32 +4124,9 @@ export const App: React.FC = () => {
                             style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            {tooltipNotes && (
-                              <Tooltip.Root>
-                                <Tooltip.Trigger asChild>
-                                  <button
-                                    type="button"
-                                    className="btn btn-sm"
-                                    style={{
-                                      padding: '0 4px',
-                                      height: 20,
-                                      border: 'none',
-                                      background: 'transparent',
-                                      color: 'var(--text-muted)',
-                                    }}
-                                  >
-                                    <Info size={11} />
-                                  </button>
-                                </Tooltip.Trigger>
-                                <Tooltip.Portal>
-                                  <Tooltip.Content className="rx-tooltip-content" sideOffset={5}>
-                                    {sanitizeCleanText(tooltipNotes)}
-                                  </Tooltip.Content>
-                                </Tooltip.Portal>
-                              </Tooltip.Root>
-                            )}
-
-                            <span className="badge-subtle">{clip.viralScore}%</span>
+                            <span className="badge-subtle">
+                              {isEditMode ? 'COMP' : 'CLIP'} · {clip.viralScore}%
+                            </span>
 
                             <button
                               type="button"
@@ -4030,10 +4154,52 @@ export const App: React.FC = () => {
                               ? `${clip.subCuts.length} cuts · ${clip.duration.toFixed(1)}s`
                               : `${formatSMPTETimecode(clip.sourceStart).slice(3, 8)}–${formatSMPTETimecode(clip.sourceEnd).slice(3, 8)} · ${clip.duration.toFixed(1)}s`}
                           </span>
-                          {clip.captions.length > 0 && (
-                            <span>{clip.captions.length} caps</span>
-                          )}
+                          {clip.captions.length > 0 && <span>{clip.captions.length} caps</span>}
                         </div>
+
+                        {clip.commonThread && (
+                          <div
+                            style={{
+                              fontSize: 10.5,
+                              color: 'var(--text-secondary)',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            Thread: {sanitizeCleanText(clip.commonThread)}
+                          </div>
+                        )}
+
+                        {clip.viralMechanics && clip.viralMechanics.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+                            {clip.viralMechanics.slice(0, 3).map((m, mIdx) => (
+                              <span
+                                key={mIdx}
+                                className="badge-subtle"
+                                style={{ fontSize: 9.5, padding: '1px 4px' }}
+                              >
+                                {sanitizeCleanText(m)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        {clip.hookReason && (
+                          <div
+                            style={{
+                              fontSize: 10.5,
+                              color: 'var(--text-muted)',
+                              lineHeight: 1.35,
+                              display: '-webkit-box',
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: 'vertical',
+                              overflow: 'hidden',
+                            }}
+                          >
+                            {sanitizeCleanText(clip.hookReason)}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -4060,14 +4226,36 @@ export const App: React.FC = () => {
                     : 'Monitor'}
                 </span>
                 {activeSource && timelineMode !== 'full-source' && (
-                  <button
-                    className="btn btn-sm"
-                    onClick={selectFullVideoOnTimeline}
-                  >
+                  <button className="btn btn-sm" onClick={selectFullVideoOnTimeline}>
                     <Video size={11} />
                     Full Video
                   </button>
                 )}
+                {activeSource &&
+                  timelineMode === 'full-source' &&
+                  fullVideoClip &&
+                  fullVideoClip.subCuts.length > 1 && (
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => {
+                        setFullVideoClip(createInitialFullVideoClip(activeSource, activeScheme));
+                        setSelectedCutIndex(0);
+                        activeCutIdxRef.current = 0;
+                        setMarkerNotice('Reset full video timeline.');
+                        setTimeout(() => setMarkerNotice(null), 2200);
+                      }}
+                    >
+                      <RotateCcw size={11} />
+                      Reset Cuts
+                    </button>
+                  )}
+                {activeClip?.backgroundFillStyle === 'split-screen' && (
+                  <span className="badge-subtle">2-Speaker Split-Screen</span>
+                )}
+                {activeClip?.backgroundFillStyle !== 'split-screen' &&
+                  activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch' && (
+                    <span className="badge-subtle">2-Speaker Auto-Switch</span>
+                  )}
               </div>
 
               {activeSource && activeClip && (
@@ -4144,7 +4332,7 @@ export const App: React.FC = () => {
                     alignItems: 'center',
                     justifyContent: 'center',
                     gap: 20,
-                    padding: '12px 16px',
+                    padding: '10px 16px',
                     minHeight: 0,
                     background: '#060608',
                     overflow: 'hidden',
@@ -4169,7 +4357,7 @@ export const App: React.FC = () => {
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
-                        marginBottom: 5,
+                        marginBottom: 4,
                         padding: '0 2px',
                       }}
                     >
@@ -4178,11 +4366,10 @@ export const App: React.FC = () => {
                       </span>
                       {isSolvingObjectTrack ? (
                         <span className="badge-subtle">Tracking {objectTrackProgress}%</span>
-                      ) : activeClip?.subjectFocus?.trackedPath &&
-                        activeClip.subjectFocus.trackedPath.length > 1 ? (
-                        <span className="badge-subtle">
-                          Tracked · {activeClip.subjectFocus.trackedPath.length} pts
-                        </span>
+                      ) : activeClip?.backgroundFillStyle === 'split-screen' ? (
+                        <span className="badge-subtle">Dual Speaker Crop</span>
+                      ) : activeClip?.subjectFocus?.label ? (
+                        <span className="badge-subtle">{activeClip.subjectFocus.label}</span>
                       ) : null}
                     </div>
 
@@ -4304,37 +4491,115 @@ export const App: React.FC = () => {
                           );
                         })}
 
-                      {/* Clean 9:16 Crop Guide */}
-                      <div
-                        style={{
-                          position: 'absolute',
-                          left: `${currentCrop.normX * 100}%`,
-                          top: `${currentCrop.normY * 100}%`,
-                          width: `${currentCrop.normW * 100}%`,
-                          height: `${currentCrop.normH * 100}%`,
-                          border: '1.5px solid rgba(250, 250, 250, 0.85)',
-                          boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.55)',
-                          pointerEvents: 'none',
-                        }}
-                      >
+                      {/* Dual Split-Screen Crop Overlays OR Single 9:16 Crop Guide */}
+                      {activeClip?.backgroundFillStyle === 'split-screen' ? (
+                        (() => {
+                          const isVert = nativeDims.width < nativeDims.height;
+                          const fineX = activeClip?.trackingOffsetX || 0;
+                          const leftCenter = Math.max(0.15, Math.min(0.46, 0.26 + fineX));
+                          const rightCenter = Math.max(0.54, Math.min(0.85, 0.74 + fineX));
+                          const boxW = isVert ? 0.5 : 0.46;
+                          const boxH = isVert ? 0.25 : 0.72;
+                          const centerY = isVert ? 0.39 : 0.44;
+                          const topY = Math.max(0, Math.min(1 - boxH, centerY - boxH / 2));
+                          const leftX = Math.max(0, Math.min(1 - boxW, leftCenter - boxW / 2));
+                          const rightX = Math.max(0, Math.min(1 - boxW, rightCenter - boxW / 2));
+
+                          return (
+                            <>
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  left: `${leftX * 100}%`,
+                                  top: `${topY * 100}%`,
+                                  width: `${boxW * 100}%`,
+                                  height: `${boxH * 100}%`,
+                                  border: '1.5px solid #fafafa',
+                                  background: 'rgba(255, 255, 255, 0.03)',
+                                  pointerEvents: 'none',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    position: 'absolute',
+                                    top: 3,
+                                    left: 3,
+                                    background: 'rgba(9, 9, 11, 0.85)',
+                                    border: '1px solid rgba(255,255,255,0.2)',
+                                    color: '#fafafa',
+                                    fontSize: 9,
+                                    fontFamily: 'var(--font-mono)',
+                                    padding: '1px 5px',
+                                    borderRadius: 3,
+                                  }}
+                                >
+                                  TOP · SPEAKER A
+                                </div>
+                              </div>
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  left: `${rightX * 100}%`,
+                                  top: `${topY * 100}%`,
+                                  width: `${boxW * 100}%`,
+                                  height: `${boxH * 100}%`,
+                                  border: '1.5px solid #a1a1aa',
+                                  background: 'rgba(255, 255, 255, 0.03)',
+                                  pointerEvents: 'none',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    position: 'absolute',
+                                    top: 3,
+                                    right: 3,
+                                    background: 'rgba(9, 9, 11, 0.85)',
+                                    border: '1px solid rgba(255,255,255,0.2)',
+                                    color: '#e4e4e7',
+                                    fontSize: 9,
+                                    fontFamily: 'var(--font-mono)',
+                                    padding: '1px 5px',
+                                    borderRadius: 3,
+                                  }}
+                                >
+                                  BOTTOM · SPEAKER B
+                                </div>
+                              </div>
+                            </>
+                          );
+                        })()
+                      ) : (
                         <div
                           style={{
                             position: 'absolute',
-                            top: 4,
-                            left: 4,
-                            background: 'rgba(9, 9, 11, 0.78)',
-                            border: '1px solid rgba(255,255,255,0.18)',
-                            color: '#fafafa',
-                            fontSize: 9.5,
-                            fontFamily: 'var(--font-mono)',
-                            padding: '1px 5px',
-                            borderRadius: 3,
-                            whiteSpace: 'nowrap',
+                            left: `${currentCrop.normX * 100}%`,
+                            top: `${currentCrop.normY * 100}%`,
+                            width: `${currentCrop.normW * 100}%`,
+                            height: `${currentCrop.normH * 100}%`,
+                            border: '1.5px solid rgba(250, 250, 250, 0.85)',
+                            boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.55)',
+                            pointerEvents: 'none',
                           }}
                         >
-                          {currentZoom.toFixed(2)}x
+                          <div
+                            style={{
+                              position: 'absolute',
+                              top: 4,
+                              left: 4,
+                              background: 'rgba(9, 9, 11, 0.78)',
+                              border: '1px solid rgba(255,255,255,0.18)',
+                              color: '#fafafa',
+                              fontSize: 9.5,
+                              fontFamily: 'var(--font-mono)',
+                              padding: '1px 5px',
+                              borderRadius: 3,
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {currentZoom.toFixed(2)}x
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
                   </div>
 
@@ -4354,11 +4619,19 @@ export const App: React.FC = () => {
                         width: '100%',
                         display: 'flex',
                         justifyContent: 'space-between',
-                        marginBottom: 5,
+                        alignItems: 'center',
+                        marginBottom: 4,
                         padding: '0 2px',
                       }}
                     >
                       <span className="section-label">9:16 Output</span>
+                      <span className="badge-subtle">
+                        {activeClip?.backgroundFillStyle === 'split-screen'
+                          ? 'Split-Screen'
+                          : activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+                            ? 'Auto-Switch'
+                            : '1080×1920'}
+                      </span>
                     </div>
 
                     <canvas
@@ -4377,7 +4650,7 @@ export const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Unified Bar 1: Framing, Zoom, Fill, AI Edit Tools & Speed */}
+                {/* Control Bar 1: 9:16 Subject Focus, Lock Points, Zoom & Fine X Offset */}
                 <div
                   style={{
                     padding: '6px 12px',
@@ -4390,16 +4663,17 @@ export const App: React.FC = () => {
                     gap: 8,
                   }}
                 >
-                  {/* Left: Segmented Framing Selector + Active Lock Nodes */}
+                  {/* Left: Segmented Subject Focus Presets + Active Focus Lock Nodes */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <span className="section-label" style={{ marginRight: 2 }}>
-                      Framing
-                    </span>
+                    <span className="section-label">Subject Focus</span>
                     <div className="seg-group">
                       <button
                         type="button"
                         className="seg-item"
-                        data-active={activeFocusStrategy === 'click-track'}
+                        data-active={
+                          activeClip?.backgroundFillStyle !== 'split-screen' &&
+                          activeFocusStrategy === 'click-track'
+                        }
                         onClick={() => {
                           setClickPickMode('track');
                           if (activeClip?.subjectFocus) {
@@ -4410,85 +4684,135 @@ export const App: React.FC = () => {
                             });
                           }
                         }}
+                        title="Click any moving person or object on the Source Video to track it"
                       >
                         <Crosshair size={11} />
-                        Track
+                        Track Subject
                       </button>
                       <button
                         type="button"
                         className="seg-item"
-                        data-active={activeFocusStrategy === 'static-lock'}
+                        data-active={
+                          activeClip?.backgroundFillStyle !== 'split-screen' &&
+                          activeFocusStrategy === 'static-lock' &&
+                          activeClip?.subjectFocus?.label !== '2-Speaker Auto-Switch'
+                        }
                         onClick={() => {
                           setClickPickMode('static');
                           handleSelectSubjectFocusStrategy('static-lock');
                         }}
+                        title="Lock static 9:16 center frame"
                       >
                         <Lock size={11} />
-                        Center
+                        Center Lock
                       </button>
                       <button
                         type="button"
                         className="seg-item"
-                        data-active={activeFocusStrategy === 'face-speaker'}
+                        data-active={
+                          activeClip?.backgroundFillStyle !== 'split-screen' &&
+                          activeFocusStrategy === 'face-speaker'
+                        }
                         onClick={() => handleSelectSubjectFocusStrategy('face-speaker')}
                       >
                         <UserCheck size={11} />
-                        Face
+                        Auto Face
                       </button>
                       <button
                         type="button"
                         className="seg-item"
-                        data-active={activeFocusStrategy === 'left-subject'}
+                        data-active={
+                          activeClip?.backgroundFillStyle !== 'split-screen' &&
+                          activeFocusStrategy === 'left-subject'
+                        }
                         onClick={() => handleSelectSubjectFocusStrategy('left-subject')}
+                        title="Isolate Left Speaker in 9:16 frame"
                       >
-                        Left
+                        Left Speaker
                       </button>
                       <button
                         type="button"
                         className="seg-item"
-                        data-active={activeFocusStrategy === 'right-subject'}
+                        data-active={
+                          activeClip?.backgroundFillStyle !== 'split-screen' &&
+                          activeFocusStrategy === 'right-subject'
+                        }
                         onClick={() => handleSelectSubjectFocusStrategy('right-subject')}
+                        title="Isolate Right Speaker in 9:16 frame"
                       >
-                        Right
+                        Right Speaker
                       </button>
                       <button
                         type="button"
                         className="seg-item"
-                        data-active={activeFocusStrategy === 'action-motion'}
+                        data-active={
+                          activeClip?.backgroundFillStyle !== 'split-screen' &&
+                          activeFocusStrategy === 'action-motion'
+                        }
                         onClick={() => handleSelectSubjectFocusStrategy('action-motion')}
                       >
                         Motion
                       </button>
                     </div>
 
-                    {userFocusAnchors.length > 0 && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                        {userFocusAnchors.map((pt, idx) => (
-                          <span
-                            key={`lock-pill-${pt.time}-${idx}`}
-                            className="badge-subtle"
-                            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}
-                            onClick={() => handleSeekSourceTime(pt.time)}
+                    {/* Focus Lock Pills + Step +2s & Reset */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                      {userFocusAnchors.map((pt, idx) => (
+                        <span
+                          key={`lock-pill-${pt.time}-${idx}`}
+                          className="badge-subtle"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            cursor: 'pointer',
+                          }}
+                          onClick={() => handleSeekSourceTime(pt.time)}
+                          title="Click to jump playhead to this Focus Lock point"
+                        >
+                          #{idx + 1} {pt.time.toFixed(1)}s
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteFocusLockPoint(pt.time);
+                            }}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: 'var(--text-muted)',
+                              cursor: 'pointer',
+                              padding: 0,
+                            }}
                           >
-                            #{idx + 1} {pt.time.toFixed(1)}s
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteFocusLockPoint(pt.time);
-                              }}
-                              style={{
-                                background: 'none',
-                                border: 'none',
-                                color: 'var(--text-muted)',
-                                cursor: 'pointer',
-                                padding: 0,
-                              }}
-                            >
-                              ×
-                            </button>
-                          </span>
-                        ))}
+                            ×
+                          </button>
+                        </span>
+                      ))}
+
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => {
+                          if (!activeSource) return;
+                          if (videoRef.current && !videoRef.current.paused) {
+                            videoRef.current.pause();
+                            setIsPlaying(false);
+                          }
+                          const nextTime = Math.min(activeSource.duration - 0.05, playheadTime + 2.0);
+                          handleSeekSourceTime(nextTime);
+                          setClickPickMode('track');
+                          setMarkerNotice(
+                            `Stepped to ${nextTime.toFixed(1)}s — click subject on Source Video to add Lock #${userFocusAnchors.length + 1}`
+                          );
+                          setTimeout(() => setMarkerNotice(null), 3200);
+                        }}
+                        title="Step forward 2 seconds to place another Focus Lock point"
+                      >
+                        +2s Add Lock
+                      </button>
+
+                      {userFocusAnchors.length > 0 && (
                         <button
                           type="button"
                           className="btn btn-sm"
@@ -4498,26 +4822,26 @@ export const App: React.FC = () => {
                             handleSelectSubjectFocusStrategy('auto-salient');
                           }}
                         >
-                          Reset Locks
+                          Clear Locks
                         </button>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
 
-                  {/* Center: Zoom & Fill */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {/* Right: Zoom Slider + 1:1 / Fit + Fine X Offset + All Clips Toggle */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                       <span className="section-label">Zoom</span>
                       <input
                         type="range"
                         min={0.56}
-                        max={1.5}
+                        max={2.2}
                         step={0.02}
                         value={currentZoom}
                         onChange={(e) =>
                           applyZoomAcrossStudio(parseFloat(e.target.value), applyFocusToAllClips)
                         }
-                        style={{ width: 64 }}
+                        style={{ width: 68 }}
                       />
                       <span className="badge-subtle" style={{ minWidth: 38, textAlign: 'center' }}>
                         {currentZoom.toFixed(2)}x
@@ -4527,61 +4851,123 @@ export const App: React.FC = () => {
                         className="btn btn-sm"
                         onClick={() => applyZoomAcrossStudio(1.0, true)}
                       >
-                        1:1
+                        1.0x
                       </button>
                       <button
                         type="button"
                         className="btn btn-sm"
                         onClick={() => applyZoomAcrossStudio(0.56, true)}
+                        title="Zoom out to fit wide frame inside 9:16"
                       >
-                        Fit
+                        Fit 16:9
                       </button>
                     </div>
 
                     <div className="studio-divider-v" />
 
-                    {/* Fill Mode */}
-                    <div className="seg-group">
-                      {(
-                        [
-                          { id: 'blurred', label: 'Blur' },
-                          { id: 'black', label: 'Bars' },
-                          { id: 'split-screen', label: 'Split' },
-                        ] as Array<{ id: BackgroundFillStyle; label: string }>
-                      ).map((opt) => {
-                        const activeFill = activeClip?.backgroundFillStyle ?? 'blurred';
-                        return (
-                          <button
-                            key={opt.id}
-                            type="button"
-                            className="seg-item"
-                            data-active={activeFill === opt.id}
-                            onClick={() =>
-                              updateActiveTimelineClip((c) =>
-                                opt.id === 'split-screen' && activeSource
-                                  ? applyTwoSpeakerEditMode(c, activeSource, 'split-screen')
-                                  : { ...c, backgroundFillStyle: opt.id }
-                              )
-                            }
-                          >
-                            {opt.label}
-                          </button>
-                        );
-                      })}
+                    {/* Fine X Offset Slider */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span className="section-label">Fine X</span>
+                      <input
+                        type="range"
+                        min={-0.4}
+                        max={0.4}
+                        step={0.01}
+                        value={activeClip?.trackingOffsetX || 0}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          if (applyFocusToAllClips) {
+                            setFullVideoClip((prev) =>
+                              prev ? { ...prev, trackingOffsetX: val } : prev
+                            );
+                            setGeneratedClips((prev) =>
+                              prev.map((c) => ({ ...c, trackingOffsetX: val }))
+                            );
+                          } else {
+                            updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: val }));
+                          }
+                        }}
+                        onDoubleClick={() =>
+                          updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: 0 }))
+                        }
+                        style={{ width: 54 }}
+                        title="Fine horizontal crop offset (double-click to reset to 0)"
+                      />
+                      <span className="badge-subtle" style={{ minWidth: 32, textAlign: 'center' }}>
+                        {((activeClip?.trackingOffsetX || 0) * 100).toFixed(0)}%
+                      </span>
                     </div>
-                  </div>
 
-                  {/* Right: AI Audio/Cut Tools + Speed */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <div className="studio-divider-v" />
+
+                    <label
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        fontSize: 11,
+                        color: 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        userSelect: 'none',
+                      }}
+                      title="Apply subject focus & zoom changes across all clips"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={applyFocusToAllClips}
+                        onChange={(e) => setApplyFocusToAllClips(e.target.checked)}
+                        style={{ accentColor: '#fafafa', width: 12, height: 12 }}
+                      />
+                      All Clips
+                    </label>
+                  </div>
+                </div>
+
+                {/* Control Bar 2: 2-Speaker Podcast Modes, AI Edit Skills, Captions & Fill Layout */}
+                <div
+                  style={{
+                    padding: '6px 12px',
+                    background: 'var(--bg-panel)',
+                    borderTop: '1px solid var(--border-subtle)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: 8,
+                  }}
+                >
+                  {/* Left: Dedicated 2-Speaker Podcast Controls + AI Audio/Cut Tools */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                    <span className="section-label">2-Speaker & AI Tools</span>
+
                     <button
                       type="button"
-                      className="btn btn-sm"
-                      disabled={isTranscribingAudio}
-                      onClick={handleRunAITranscription}
+                      className={`btn btn-sm ${
+                        activeClip?.backgroundFillStyle === 'split-screen' ? 'btn-active' : ''
+                      }`}
+                      onClick={() => handleTwoSpeakerMode('split-screen')}
+                      title="Stack Speaker A (Top) and Speaker B (Bottom) in a 9:16 Dual Split-Screen"
                     >
-                      <Mic size={11} />
-                      {isTranscribingAudio ? `Captions ${transcriptionProgress}%` : 'Captions'}
+                      <Layers size={11} />
+                      2-Speaker Split-Screen
                     </button>
+
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${
+                        activeClip?.backgroundFillStyle !== 'split-screen' &&
+                        activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+                          ? 'btn-active'
+                          : ''
+                      }`}
+                      onClick={() => handleTwoSpeakerMode('auto-switch')}
+                      title="Automatically cut back and forth between Speaker A (Left) and Speaker B (Right)"
+                    >
+                      <UserCheck size={11} />
+                      Auto-Switch Speakers
+                    </button>
+
+                    <div className="studio-divider-v" />
 
                     <button
                       type="button"
@@ -4590,14 +4976,16 @@ export const App: React.FC = () => {
                         if (!activeClip || !activeSource) return;
                         updateActiveTimelineClip((clip) => {
                           const res = stripSilenceFromClip(clip, activeSource, 0.18);
-                          setMarkerNotice(`Stripped ${res.removedSeconds.toFixed(1)}s silence`);
+                          setMarkerNotice(
+                            `Stripped ${res.removedSeconds.toFixed(1)}s of dead air (${res.cutsCreated} cuts)`
+                          );
                           setTimeout(() => setMarkerNotice(null), 2600);
                           return res.updatedClip;
                         });
                       }}
                     >
                       <Scissors size={11} />
-                      Strip Silence
+                      Strip Dead Air
                     </button>
 
                     <button
@@ -4614,21 +5002,146 @@ export const App: React.FC = () => {
                       }}
                     >
                       <Zap size={11} />
-                      Beat Sync
+                      Beat-Sync Cuts
                     </button>
 
                     <button
                       type="button"
                       className="btn btn-sm"
-                      onClick={() => {
-                        if (!activeClip || !activeSource) return;
-                        updateActiveTimelineClip((clip) =>
-                          applyTwoSpeakerEditMode(clip, activeSource, 'auto-switch')
-                        );
-                      }}
+                      disabled={isTranscribingAudio}
+                      onClick={handleRunAITranscription}
                     >
-                      2-Speaker
+                      <Mic size={11} />
+                      {isTranscribingAudio
+                        ? `Transcribing ${transcriptionProgress}%`
+                        : 'Transcribe Captions'}
                     </button>
+                  </div>
+
+                  {/* Right: Caption Style Dropdown, 9:16 Fill Mode & Playback Speed */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    {/* Radix Dropdown for Caption Style & Placement */}
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button type="button" className="btn btn-sm">
+                          <span>
+                            Captions:{' '}
+                            {activeClip?.hideCaptions
+                              ? 'Hidden'
+                              : activeClip?.captionStyle || 'Hormozi'}
+                          </span>
+                          <ChevronDown size={11} />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5}>
+                          <div className="rx-dropdown-label">Caption Style</div>
+                          {(
+                            [
+                              { id: 'bold-hormozi', label: 'Bold Hormozi' },
+                              { id: 'clean-minimal', label: 'Clean Minimal' },
+                              { id: 'kinetic-neon', label: 'Kinetic Neon' },
+                              { id: 'graffiti-pop', label: 'Street / Marker' },
+                              { id: 'editorial-serif', label: 'Editorial Serif' },
+                            ] as const
+                          ).map((st) => {
+                            const isSel =
+                              !activeClip?.hideCaptions &&
+                              (activeClip?.captionStyle || 'bold-hormozi') === st.id;
+                            return (
+                              <DropdownMenu.Item
+                                key={st.id}
+                                className="rx-dropdown-item"
+                                onSelect={() => {
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    hideCaptions: false,
+                                    captionStyle: st.id as any,
+                                  }));
+                                }}
+                              >
+                                <span>{st.label}</span>
+                                {isSel && <Check size={12} />}
+                              </DropdownMenu.Item>
+                            );
+                          })}
+                          <DropdownMenu.Separator className="rx-dropdown-separator" />
+                          <div className="rx-dropdown-label">Placement</div>
+                          {(
+                            [
+                              { label: 'Top', y: 0.14 },
+                              { label: 'Middle', y: 0.5 },
+                              { label: 'Bottom', y: 0.77 },
+                            ] as const
+                          ).map((pos) => {
+                            const curY = activeClip?.captionPositionY ?? 0.77;
+                            const isSel = !activeClip?.hideCaptions && Math.abs(curY - pos.y) < 0.08;
+                            return (
+                              <DropdownMenu.Item
+                                key={pos.label}
+                                className="rx-dropdown-item"
+                                onSelect={() => {
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    hideCaptions: false,
+                                    captionPositionY: pos.y,
+                                  }));
+                                }}
+                              >
+                                <span>{pos.label}</span>
+                                {isSel && <Check size={12} />}
+                              </DropdownMenu.Item>
+                            );
+                          })}
+                          <DropdownMenu.Separator className="rx-dropdown-separator" />
+                          <DropdownMenu.Item
+                            className="rx-dropdown-item"
+                            onSelect={() => {
+                              updateActiveTimelineClip((c) => ({
+                                ...c,
+                                hideCaptions: !c.hideCaptions,
+                              }));
+                            }}
+                          >
+                            <span>{activeClip?.hideCaptions ? 'Show Captions' : 'Hide Captions'}</span>
+                            {activeClip?.hideCaptions && <Check size={12} />}
+                          </DropdownMenu.Item>
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+
+                    {/* 9:16 Fill Mode Segmented Group */}
+                    <div className="seg-group">
+                      {(
+                        [
+                          { id: 'blurred', label: 'Blur Fill' },
+                          { id: 'black', label: 'Black Bars' },
+                          { id: 'split-screen', label: 'Split-Screen' },
+                        ] as Array<{ id: BackgroundFillStyle; label: string }>
+                      ).map((opt) => {
+                        const activeFill = activeClip?.backgroundFillStyle ?? 'blurred';
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            className="seg-item"
+                            data-active={activeFill === opt.id}
+                            onClick={() => {
+                              if (opt.id === 'split-screen') {
+                                handleTwoSpeakerMode('split-screen');
+                              } else {
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  backgroundFillStyle: opt.id,
+                                }));
+                              }
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
 
                     {/* Radix Dropdown for Playback Speed */}
                     <DropdownMenu.Root>
@@ -5045,12 +5558,12 @@ export const App: React.FC = () => {
                   />
                 </div>
 
-                {/* Compact Trim & Caption Row */}
-                {timelineMode !== 'full-source' && inspectedCut && (
+                {/* Timeline Inspector: Full-Source In/Out Sliders OR Selected Cut Trim Sliders + Caption */}
+                {timelineMode === 'full-source' && activeClip.subCuts.length === 1 ? (
                   <div
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: '180px 180px 1fr',
+                      gridTemplateColumns: '1fr 1fr 1fr',
                       gap: 10,
                       alignItems: 'center',
                       fontSize: 11,
@@ -5058,69 +5571,43 @@ export const App: React.FC = () => {
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ whiteSpace: 'nowrap' }}>Cut #{inspectedCut.index} In</span>
+                      <span style={{ whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)' }}>
+                        In {(inMarker ?? 0).toFixed(1)}s
+                      </span>
                       <input
-                        type="number"
+                        type="range"
                         min={0}
-                        max={Math.max(0.5, inspectedCut.sourceEnd - 0.5)}
+                        max={Math.max(
+                          0.5,
+                          (outMarker ?? activeSource.duration) - 0.5
+                        )}
                         step={0.1}
-                        className="input-field input-mono"
-                        style={{ height: 24 }}
-                        value={Number(inspectedCut.sourceStart.toFixed(1))}
+                        value={inMarker ?? 0}
                         onChange={(e) => {
-                          const val = parseFloat(e.target.value);
-                          if (!Number.isFinite(val)) return;
-                          const clamped = Math.max(0, Math.min(inspectedCut.sourceEnd - 0.5, val));
-                          updateActiveTimelineClip((c) => {
-                            const updatedCuts = c.subCuts.map((sc) =>
-                              sc.id === inspectedCut.id ? { ...sc, sourceStart: clamped } : sc
-                            );
-                            const recalc = recalculateClipTimeline(updatedCuts);
-                            return {
-                              ...c,
-                              subCuts: recalc.subCuts,
-                              duration: recalc.duration,
-                              sourceStart: recalc.sourceStart,
-                              sourceEnd: recalc.sourceEnd,
-                            };
-                          });
-                          handleSeekSourceTime(clamped);
+                          const v = parseFloat(e.target.value);
+                          setInMarker(v);
+                          handleSeekSourceTime(v);
                         }}
+                        style={{ flex: 1 }}
                       />
                     </div>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ whiteSpace: 'nowrap' }}>Out</span>
+                      <span style={{ whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)' }}>
+                        Out {(outMarker ?? activeSource.duration).toFixed(1)}s
+                      </span>
                       <input
-                        type="number"
-                        min={Math.min(activeSource.duration, inspectedCut.sourceStart + 0.5)}
+                        type="range"
+                        min={Math.min(activeSource.duration, (inMarker ?? 0) + 0.5)}
                         max={activeSource.duration}
                         step={0.1}
-                        className="input-field input-mono"
-                        style={{ height: 24 }}
-                        value={Number(inspectedCut.sourceEnd.toFixed(1))}
+                        value={outMarker ?? activeSource.duration}
                         onChange={(e) => {
-                          const val = parseFloat(e.target.value);
-                          if (!Number.isFinite(val)) return;
-                          const clamped = Math.max(
-                            inspectedCut.sourceStart + 0.5,
-                            Math.min(activeSource.duration, val)
-                          );
-                          updateActiveTimelineClip((c) => {
-                            const updatedCuts = c.subCuts.map((sc) =>
-                              sc.id === inspectedCut.id ? { ...sc, sourceEnd: clamped } : sc
-                            );
-                            const recalc = recalculateClipTimeline(updatedCuts);
-                            return {
-                              ...c,
-                              subCuts: recalc.subCuts,
-                              duration: recalc.duration,
-                              sourceStart: recalc.sourceStart,
-                              sourceEnd: recalc.sourceEnd,
-                            };
-                          });
-                          handleSeekSourceTime(clamped);
+                          const v = parseFloat(e.target.value);
+                          setOutMarker(v);
+                          handleSeekSourceTime(v);
                         }}
+                        style={{ flex: 1 }}
                       />
                     </div>
 
@@ -5138,6 +5625,105 @@ export const App: React.FC = () => {
                       />
                     </div>
                   </div>
+                ) : (
+                  inspectedCut && (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr 1fr',
+                        gap: 10,
+                        alignItems: 'center',
+                        fontSize: 11,
+                        color: 'var(--text-secondary)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ whiteSpace: 'nowrap' }}>Cut #{inspectedCut.index} In</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={Math.max(0.5, inspectedCut.sourceEnd - 0.5)}
+                          step={0.1}
+                          value={inspectedCut.sourceStart}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!Number.isFinite(val)) return;
+                            const clamped = Math.max(
+                              0,
+                              Math.min(inspectedCut.sourceEnd - 0.5, val)
+                            );
+                            updateActiveTimelineClip((c) => {
+                              const updatedCuts = c.subCuts.map((sc) =>
+                                sc.id === inspectedCut.id ? { ...sc, sourceStart: clamped } : sc
+                              );
+                              const recalc = recalculateClipTimeline(updatedCuts);
+                              return {
+                                ...c,
+                                subCuts: recalc.subCuts,
+                                duration: recalc.duration,
+                                sourceStart: recalc.sourceStart,
+                                sourceEnd: recalc.sourceEnd,
+                              };
+                            });
+                            handleSeekSourceTime(clamped);
+                          }}
+                          style={{ flex: 1 }}
+                        />
+                        <span className="badge-subtle">
+                          {inspectedCut.sourceStart.toFixed(1)}s
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ whiteSpace: 'nowrap' }}>Out</span>
+                        <input
+                          type="range"
+                          min={Math.min(activeSource.duration, inspectedCut.sourceStart + 0.5)}
+                          max={activeSource.duration}
+                          step={0.1}
+                          value={inspectedCut.sourceEnd}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!Number.isFinite(val)) return;
+                            const clamped = Math.max(
+                              inspectedCut.sourceStart + 0.5,
+                              Math.min(activeSource.duration, val)
+                            );
+                            updateActiveTimelineClip((c) => {
+                              const updatedCuts = c.subCuts.map((sc) =>
+                                sc.id === inspectedCut.id ? { ...sc, sourceEnd: clamped } : sc
+                              );
+                              const recalc = recalculateClipTimeline(updatedCuts);
+                              return {
+                                ...c,
+                                subCuts: recalc.subCuts,
+                                duration: recalc.duration,
+                                sourceStart: recalc.sourceStart,
+                                sourceEnd: recalc.sourceEnd,
+                              };
+                            });
+                            handleSeekSourceTime(clamped);
+                          }}
+                          style={{ flex: 1 }}
+                        />
+                        <span className="badge-subtle">{inspectedCut.sourceEnd.toFixed(1)}s</span>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ whiteSpace: 'nowrap' }}>Caption</span>
+                        <input
+                          type="text"
+                          className="input-field"
+                          style={{ height: 24 }}
+                          placeholder="Overlay caption..."
+                          value={activeClip.captionText}
+                          onChange={(e) =>
+                            updateActiveTimelineClip((c) => ({ ...c, captionText: e.target.value }))
+                          }
+                        />
+                      </div>
+                    </div>
+                  )
                 )}
               </div>
             )}

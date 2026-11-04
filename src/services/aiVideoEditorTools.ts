@@ -813,40 +813,38 @@ export function applyTwoSpeakerEditMode(
   source: SourceVideoAsset,
   mode: 'split-screen' | 'auto-switch' | 'blurred' | 'black'
 ): GeneratedClip {
-  if (mode === 'split-screen' || mode === 'blurred' || mode === 'black') {
+  if (mode === 'split-screen') {
+    return {
+      ...clip,
+      backgroundFillStyle: 'split-screen',
+      zoomScale: 1.0,
+      subCuts: clip.subCuts.map((c) => ({ ...c, zoom: 1.0, cropBiasX: 0 })),
+    };
+  }
+
+  if (mode === 'blurred' || mode === 'black') {
     return {
       ...clip,
       backgroundFillStyle: mode,
     };
   }
 
-  // 'auto-switch': Ensure timeline has conversational cuts and alternate camera between Left Speaker and Right Speaker.
-  // If source video is already 9:16 vertical (width < height), we MUST zoom in (e.g. 1.65x) so the single-speaker cut frames one speaker at a time!
+  // 'auto-switch': Ensure timeline has conversational cuts and alternate camera between Left Speaker (A) and Right Speaker (B).
+  // On a 9:16 vertical 2-speaker source video (width < height, like 720x1280), we zoom to 1.92x so each cut frames strictly ONE speaker!
   let workingClip = clip;
   if (workingClip.subCuts.length < 2) {
-    workingClip = snapCutsToAudioBeats(workingClip, source, Math.max(3.0, clip.duration / 18)).updatedClip;
+    const targetInterval = Math.max(2.8, Math.min(5.0, clip.duration / 12));
+    workingClip = snapCutsToAudioBeats(workingClip, source, targetInterval).updatedClip;
   }
 
   const isVerticalSource = (source.width || 1920) < (source.height || 1080);
-  const singleSpeakerZoom = isVerticalSource
-    ? Math.max(1.6, workingClip.zoomScale)
-    : Math.max(1.12, workingClip.zoomScale);
+  const singleSpeakerZoom = isVerticalSource ? 1.92 : Math.max(1.18, workingClip.zoomScale);
+  const speakerAnchorY = isVerticalSource ? 0.41 : 0.46;
 
   const switchedSubCuts: SubCut[] = workingClip.subCuts.map((cut, idx) => {
-    const midTime = (cut.sourceStart + cut.sourceEnd) / 2;
-    const sample = getTrackingStateAtTime(source.trackingSamples || [], midTime, 0, []);
-    const leftTargetX =
-      sample.leftSubjectX !== undefined && sample.leftSubjectX < 0.44
-        ? sample.leftSubjectX
-        : 0.27;
-    const rightTargetX =
-      sample.rightSubjectX !== undefined && sample.rightSubjectX > 0.56
-        ? sample.rightSubjectX
-        : 0.73;
-
     const isLeftSpeaker = idx % 2 === 0;
-    const rawBias = (isLeftSpeaker ? leftTargetX : rightTargetX) - sample.cropX;
-    const bias = Number(Math.max(-0.34, Math.min(0.34, rawBias)).toFixed(2));
+    // Anchor is fixed at centerX = 0.50, so -0.24 locks onto Left Speaker (x=0.26) and +0.24 locks onto Right Speaker (x=0.74)
+    const bias = isLeftSpeaker ? -0.24 : 0.24;
     const speakerTag = isLeftSpeaker ? 'Speaker A (Left)' : 'Speaker B (Right)';
 
     return {
@@ -861,6 +859,15 @@ export function applyTwoSpeakerEditMode(
     ...workingClip,
     zoomScale: singleSpeakerZoom,
     backgroundFillStyle: 'blurred',
+    trackingOffsetX: 0,
+    manualKeyframes: [],
+    subjectFocus: {
+      strategy: 'static-lock',
+      anchorX: 0.5,
+      anchorY: speakerAnchorY,
+      anchorTime: 0,
+      label: '2-Speaker Auto-Switch',
+    },
     subCuts: switchedSubCuts,
   };
 }
@@ -1023,14 +1030,14 @@ export function renderComposite9x16Frame(params: {
     const halfH = Math.floor(outH / 2);
     const panelAspect = outW / Math.max(1, halfH); // 9:8 aspect per speaker panel
 
-    // Ensure Left Speaker and Right Speaker are cleanly separated in the left & right halves of the source frame
-    const leftX =
-      leftSubjectX !== undefined && leftSubjectX < 0.44 ? leftSubjectX : 0.27;
-    const rightX =
-      rightSubjectX !== undefined && rightSubjectX > 0.56 ? rightSubjectX : 0.73;
+    // Lock Left Speaker (Top panel) to the left half (0.26) and Right Speaker (Bottom panel) to the right half (0.74)
+    // with optional Fine X Offset support so there is zero frame-to-frame jitter.
+    const fineOffsetX = activeClip?.trackingOffsetX || 0;
+    const leftX = Math.max(0.15, Math.min(0.46, 0.26 + fineOffsetX));
+    const rightX = Math.max(0.54, Math.min(0.85, 0.74 + fineOffsetX));
 
-    // On vertical 2-speaker videos (like IMG_0606.MOV 720x1280), speakers sit in the upper-middle band (y ~ 0.42) above the table
-    const speakerCenterY = vw < vh ? Math.min(0.43, Math.max(0.32, cropY)) : cropY;
+    // On vertical 2-speaker videos (like IMG_0606.MOV 720x1280), speakers sit in the upper-middle band (y ~ 0.39) above the table
+    const speakerCenterY = vw < vh ? 0.39 : Math.min(0.48, Math.max(0.34, cropY));
 
     const drawSpeakerPanel = (
       centerX: number,
@@ -1039,9 +1046,10 @@ export function renderComposite9x16Frame(params: {
       destH: number,
       badgeText: string
     ) => {
-      // Each speaker panel crops ~48% of the horizontal width so only ONE speaker fills each half
-      const widthFraction = vw < vh ? 0.52 : 0.46;
-      const sw = Math.max(64, Math.min(vw, (vw * widthFraction) / Math.max(1.0, zoom)));
+      // Each speaker panel crops ~50% of the horizontal width so only ONE speaker fills each half
+      const widthFraction = vw < vh ? 0.50 : 0.46;
+      const effectiveZoom = Math.max(0.85, Math.min(2.4, zoom > 1.35 ? 1.0 : zoom));
+      const sw = Math.max(64, Math.min(vw, (vw * widthFraction) / effectiveZoom));
       const sh = Math.max(64, Math.min(vh, sw / panelAspect));
       const sx = Math.max(0, Math.min(vw - sw, centerX * vw - sw / 2));
       const sy = Math.max(0, Math.min(vh - sh, centerY * vh - sh / 2));
@@ -1067,13 +1075,16 @@ export function renderComposite9x16Frame(params: {
         ctx.drawImage(videoEl, sx, sy, sw, sh, 0, destY, outW, destH);
       }
 
-      // Subtle speaker label pill in corner
+      // Clean monochrome speaker label pill in corner
       ctx.save();
-      ctx.font = `700 ${Math.max(10, Math.round(outW * 0.028))}px Inter, sans-serif`;
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
-      ctx.fillRect(8, destY + 8, Math.round(outW * 0.24), Math.round(outW * 0.055));
-      ctx.fillStyle = '#93c5fd';
-      ctx.fillText(badgeText, 14, destY + 8 + Math.round(outW * 0.04));
+      ctx.font = `600 ${Math.max(10, Math.round(outW * 0.026))}px Inter, sans-serif`;
+      ctx.fillStyle = 'rgba(9, 9, 11, 0.78)';
+      ctx.fillRect(8, destY + 8, Math.round(outW * 0.25), Math.round(outW * 0.052));
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(8, destY + 8, Math.round(outW * 0.25), Math.round(outW * 0.052));
+      ctx.fillStyle = '#f4f4f5';
+      ctx.fillText(badgeText, 14, destY + 8 + Math.round(outW * 0.037));
       ctx.restore();
     };
 
@@ -1084,8 +1095,10 @@ export function renderComposite9x16Frame(params: {
 
     // Clean divider line between Top & Bottom speaker panels
     ctx.save();
-    ctx.fillStyle = '#0f172a';
+    ctx.fillStyle = '#09090b';
     ctx.fillRect(0, halfH - 2, outW, 4);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.fillRect(0, halfH - 0.5, outW, 1);
     ctx.restore();
   } else {
     // MODE B: Single-Frame 9:16 Crop OR Wide Letterbox with Blurred / Black Background Fill
