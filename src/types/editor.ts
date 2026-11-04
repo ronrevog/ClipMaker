@@ -155,6 +155,13 @@ export interface SubCut {
   zoom: number;
   cropBiasX: number;
   isBeatCut?: boolean;
+  speed?: number;
+}
+
+export interface CaptionWordTiming {
+  word: string;
+  start: number;
+  end: number;
 }
 
 export interface CaptionSegment {
@@ -163,7 +170,10 @@ export interface CaptionSegment {
   end: number;
   text: string;
   highlightWord?: string;
+  words?: CaptionWordTiming[];
 }
+
+export type BackgroundFillStyle = 'blurred' | 'black' | 'split-screen';
 
 export interface GeneratedClip {
   id: string;
@@ -182,6 +192,8 @@ export interface GeneratedClip {
   trackingOffsetX: number;
   trackingSmoothing: number;
   zoomScale: number;
+  backgroundFillStyle?: BackgroundFillStyle;
+  playbackSpeed?: number;
   captionText: string;
   captionStyle: CaptionStyleId;
   safeZoneGuide: SafeZoneGuideId;

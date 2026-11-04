@@ -34,6 +34,7 @@ import {
 import {
   AIProviderId,
   AIProviderSettings,
+  BackgroundFillStyle,
   ClipCreationMode,
   CopilotAttachment,
   CopilotChatMessage,
@@ -46,6 +47,13 @@ import {
   SubjectFocusStrategy,
   TrackedObjectPoint,
 } from './types/editor';
+import {
+  applyTwoSpeakerEditMode,
+  buildWordLevelCaptionsFromText,
+  renderComposite9x16Frame,
+  snapCutsToAudioBeats,
+  stripSilenceFromClip,
+} from './services/aiVideoEditorTools';
 import {
   loadAISettings,
   loadSavedSchemes,
@@ -93,14 +101,14 @@ import {
 } from './services/projectStorage';
 
 const QUICK_FEEDBACK_CHIPS = [
-  'Lock onto the main subject in this frame',
-  'Find best viral clips',
-  'Create compilation cutdowns',
-  'Create 60s edit of video',
-  'Faster cut pacing',
-  'Zoom 1.25x',
-  'Split at playhead',
-  'Export 9:16 MP4',
+  'Remove all dead air & silent pauses',
+  'Add word-by-word karaoke captions',
+  '2-speaker top/bottom split screen',
+  'Auto-switch between left & right speakers',
+  'Fit 16:9 with blurred 9:16 background',
+  'Remove all zoom (1.0x across timeline)',
+  'Sync cuts to audio beats',
+  'Speed up to 1.25x',
 ];
 
 /**
@@ -428,60 +436,44 @@ export const App: React.FC = () => {
 
     const outW = canvas.width;
     const outH = canvas.height;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, outW, outH);
-
     const vw = vid.videoWidth || nativeDims.width;
     const vh = vid.videoHeight || nativeDims.height;
 
-    const crop = computeDistortionFree9x16Crop(
+    renderComposite9x16Frame({
+      ctx,
+      videoEl: vid,
+      outW,
+      outH,
       vw,
       vh,
-      currentTrack.cropX,
-      currentTrack.cropY,
-      currentZoom
-    );
-
-    const cropAspect = crop.sw / Math.max(1, crop.sh);
-    const canvasAspect = outW / outH;
-    let dx = 0;
-    let dy = 0;
-    let dw = outW;
-    let dh = outH;
-    if (cropAspect > canvasAspect + 0.01) {
-      dw = outW;
-      dh = Math.round(outW / cropAspect);
-      dx = 0;
-      dy = Math.round((outH - dh) / 2);
-    }
-
-    ctx.drawImage(vid, crop.sx, crop.sy, crop.sw, crop.sh, dx, dy, dw, dh);
-
-    // Draw caption if present
-    if (activeClip) {
-      const seg = activeClip.captions.find(
-        (c) => clipPlayheadTime >= c.start && clipPlayheadTime <= c.end
-      );
-      const text = seg?.text || activeClip.captionText;
-      if (text) {
-        ctx.save();
-        ctx.textAlign = 'center';
-        ctx.font = '800 22px Inter, sans-serif';
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
-        ctx.fillRect(outW * 0.07, outH * 0.76 - 26, outW * 0.86, 40);
-        ctx.fillStyle = '#facc15';
-        ctx.fillText(text, outW / 2, outH * 0.76);
-        ctx.restore();
-      }
-    }
+      cropX: currentTrack.cropX,
+      cropY: currentTrack.cropY,
+      leftSubjectX: currentTrack.leftSubjectX,
+      rightSubjectX: currentTrack.rightSubjectX,
+      zoom: currentZoom,
+      backgroundFillStyle: activeClip?.backgroundFillStyle ?? 'blurred',
+      activeClip,
+      clipPlayheadTime,
+    });
   }, [
     nativeDims,
     currentTrack.cropX,
     currentTrack.cropY,
+    currentTrack.leftSubjectX,
+    currentTrack.rightSubjectX,
     currentZoom,
     activeClip,
     clipPlayheadTime,
   ]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      const targetRate = activeClip?.playbackSpeed ?? 1.0;
+      if (Math.abs(videoRef.current.playbackRate - targetRate) > 0.01) {
+        videoRef.current.playbackRate = targetRate;
+      }
+    }
+  }, [activeClip?.playbackSpeed, activeClip?.id]);
 
   useEffect(() => {
     render9x16Preview();
@@ -2240,7 +2232,7 @@ export const App: React.FC = () => {
         }
       }
 
-      // 4. Handle Active Clip Timeline Mutations
+      // 4. Handle Active Clip Timeline Mutations & AI Video Editor Skills
       const clipOps = operations.filter((op: any) =>
         [
           'trim_start',
@@ -2251,9 +2243,91 @@ export const App: React.FC = () => {
           'set_zoom',
           'repace_cuts',
           'update_caption',
+          'strip_silence',
+          'beat_sync_cuts',
+          'set_layout_mode',
+          'generate_word_captions',
+          'set_playback_speed',
           'save_scheme_preset',
         ].includes(op.type)
       );
+
+      // Direct client-side intent detection for AI Video Editing Skills so natural-language commands always fire
+      const wantsStripSilence =
+        !clipOps.some((o: any) => o.type === 'strip_silence') &&
+        /\b(strip\s+silence|remove\s+(all\s+)?(dead\s+air|silence|pauses)|cut\s+out\s+(the\s+)?(pauses|silence|dead\s+air)|jump[\s-]cut)\b/i.test(
+          lowerPrompt
+        );
+      if (wantsStripSilence) {
+        clipOps.push({
+          type: 'strip_silence',
+          silenceThreshold: 0.18,
+          summary: 'Stripped Dead Air & Silent Pauses',
+        });
+      }
+
+      const wantsSplitScreen =
+        !clipOps.some((o: any) => o.type === 'set_layout_mode') &&
+        /\b(split[\s-]screen|top\s+(and|&)\s+bottom|2[\s-]speaker\s+top|both\s+speakers\s+stacked)\b/i.test(
+          lowerPrompt
+        );
+      const wantsAutoSwitchSpeakers =
+        !wantsSplitScreen &&
+        !clipOps.some((o: any) => o.type === 'set_layout_mode') &&
+        /\b(auto[\s-]switch|switch\s+between\s+(left|both|the)\s+.*speakers|alternate\s+speakers)\b/i.test(
+          lowerPrompt
+        );
+      const wantsBlurredBg =
+        !wantsSplitScreen &&
+        !wantsAutoSwitchSpeakers &&
+        !clipOps.some((o: any) => o.type === 'set_layout_mode') &&
+        /\b(blurred\s+(9:16\s+)?background|blur\s+fill|fill\s+black\s+bars)\b/i.test(lowerPrompt);
+
+      if (wantsSplitScreen) {
+        clipOps.push({
+          type: 'set_layout_mode',
+          layoutMode: 'split-screen',
+          summary: '9:16 Top/Bottom Split-Screen',
+        });
+      } else if (wantsAutoSwitchSpeakers) {
+        clipOps.push({
+          type: 'set_layout_mode',
+          layoutMode: 'auto-switch',
+          summary: '2-Speaker Auto Camera Switch',
+        });
+      } else if (wantsBlurredBg) {
+        clipOps.push({
+          type: 'set_layout_mode',
+          layoutMode: 'blurred',
+          zoom: 0.56,
+          summary: 'Fit 16:9 + Blurred 9:16 Background',
+        });
+      }
+
+      const wantsBeatSync =
+        !clipOps.some((o: any) => o.type === 'beat_sync_cuts') &&
+        /\b(sync\s+cuts?\s+to\s+(audio\s+)?beats?|cut\s+to\s+the\s+beat|beat[\s-]sync)\b/i.test(
+          lowerPrompt
+        );
+      if (wantsBeatSync) {
+        clipOps.push({
+          type: 'beat_sync_cuts',
+          summary: 'Beat-Synced Cuts to Audio Peaks',
+        });
+      }
+
+      const wantsWordCaptions =
+        !clipOps.some((o: any) => o.type === 'generate_word_captions') &&
+        /\b(word[\s-]by[\s-]word|karaoke\s+captions?|word[\s-]level\s+captions?|hormozi\s+captions?|transcribe\s+this)\b/i.test(
+          lowerPrompt
+        );
+      if (wantsWordCaptions) {
+        clipOps.push({
+          type: 'generate_word_captions',
+          captionStyle: lowerPrompt.includes('neon') ? 'neon-karaoke' : 'hormozi-bold',
+          summary: 'Word-Level Karaoke Captions',
+        });
+      }
 
       if ((clipOps.length > 0 || targetGlobalZoom !== null) && activeClip && activeSource) {
         updateActiveTimelineClip((clip) => {
@@ -2337,6 +2411,58 @@ export const App: React.FC = () => {
               const z = Math.max(0.55, Math.min(1.5, parsed));
               next.zoomScale = z;
               next.subCuts = next.subCuts.map((c) => ({ ...c, zoom: z }));
+            } else if (op.type === 'strip_silence') {
+              const res = stripSilenceFromClip(
+                next,
+                activeSource,
+                typeof op.silenceThreshold === 'number' ? op.silenceThreshold : 0.18
+              );
+              next = res.updatedClip;
+            } else if (op.type === 'beat_sync_cuts') {
+              const res = snapCutsToAudioBeats(next, activeSource);
+              next = res.updatedClip;
+            } else if (op.type === 'set_layout_mode') {
+              const mode = op.layoutMode || 'blurred';
+              next = applyTwoSpeakerEditMode(next, activeSource, mode);
+              if (typeof op.zoom === 'number') {
+                const z = Math.max(0.55, Math.min(1.5, op.zoom));
+                next.zoomScale = z;
+                next.subCuts = next.subCuts.map((c) => ({ ...c, zoom: z }));
+              }
+            } else if (op.type === 'generate_word_captions') {
+              if (op.captionStyle) {
+                next.captionStyle = op.captionStyle;
+              }
+              if (Array.isArray(op.captionSegments) && op.captionSegments.length > 0) {
+                next.captions = buildWordLevelCaptionsFromText(
+                  op.captionSegments.map((s: any, idx: number) => ({
+                    id: `ai-wcap-${idx}-${Date.now()}`,
+                    start: Number(s.start) || 0,
+                    end: Number(s.end) || 2.5,
+                    text: String(s.text || ''),
+                  })),
+                  next.duration
+                );
+                next.captionText = next.captions[0]?.text || next.captionText;
+              } else {
+                const seedText =
+                  op.captionText ||
+                  next.captionText ||
+                  (next.captions.length > 0
+                    ? next.captions.map((c) => c.text).join(' ')
+                    : `Watch this highlight from ${activeSource.name.replace(/\.[^/.]+$/, '')} — wait for the reaction at the end!`);
+                next.captions = buildWordLevelCaptionsFromText(seedText, next.duration, 4);
+                if (!next.captionText && next.captions[0]) {
+                  next.captionText = next.captions[0].text;
+                }
+              }
+            } else if (op.type === 'set_playback_speed') {
+              const spd = Math.max(0.5, Math.min(2.0, Number(op.speed) || 1.25));
+              next.playbackSpeed = spd;
+              next.subCuts = next.subCuts.map((c) => ({ ...c, speed: spd }));
+              if (videoRef.current) {
+                videoRef.current.playbackRate = spd;
+              }
             } else if (op.type === 'repace_cuts' && typeof op.pacingMultiplier === 'number') {
               const newAsl = Math.max(
                 0.8,
@@ -2367,6 +2493,13 @@ export const App: React.FC = () => {
               next.duration = recalc.duration;
             } else if (op.type === 'update_caption' && op.captionText !== undefined) {
               next.captionText = op.captionText;
+              if (op.captionText.trim()) {
+                next.captions = buildWordLevelCaptionsFromText(
+                  op.captionText,
+                  next.duration,
+                  5
+                );
+              }
             } else if (op.type === 'save_scheme_preset') {
               const presetName = op.schemePresetName || `Custom ${schemeAfterOps.name}`;
               const saved: EditingScheme = {
@@ -4360,6 +4493,289 @@ export const App: React.FC = () => {
                     />
                     Apply Focus to All Clips
                   </label>
+                </div>
+              </div>
+
+              {/* AI VIDEO EDITOR SKILLS & TOOLS BAR (Auto-Editor Silence Stripper, 2-Speaker Split-Screen, Blurred 9:16 Fill, Word Karaoke Captions, Beat-Sync, Speed Ramps) */}
+              <div
+                style={{
+                  padding: '7px 14px',
+                  background: 'rgba(15, 23, 42, 0.88)',
+                  borderTop: '1px solid var(--border-subtle)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span
+                    style={{
+                      fontSize: 10.5,
+                      fontWeight: 800,
+                      color: '#34d399',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      marginRight: 2,
+                      letterSpacing: '0.2px',
+                    }}
+                  >
+                    <Wand2 size={12} color="#34d399" />
+                    AI EDIT SKILLS:
+                  </span>
+
+                  {/* 1. Auto-Silence & Dead-Air Jump Cutter */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      if (!activeClip || !activeSource) return;
+                      updateActiveTimelineClip((clip) => {
+                        const res = stripSilenceFromClip(clip, activeSource, 0.18);
+                        setMarkerNotice(
+                          `✂ Auto-Silence Cutter: Stripped ${res.removedSeconds.toFixed(1)}s of dead air across ${res.cutsCreated} speech cuts!`
+                        );
+                        setTimeout(() => setMarkerNotice(null), 3200);
+                        return res.updatedClip;
+                      });
+                    }}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10.5,
+                      background: 'rgba(16, 185, 129, 0.14)',
+                      borderColor: 'rgba(16, 185, 129, 0.42)',
+                      color: '#6ee7b7',
+                      fontWeight: 700,
+                    }}
+                    title="Auto-Editor Jump Cutter: Scans audio RMS waveform and ripple-cuts silent pauses & dead air out of the timeline"
+                  >
+                    ✂ Strip Dead Air
+                  </button>
+
+                  {/* 2. Beat-Sync & Audio Peak Auto-Cutter */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      if (!activeClip || !activeSource) return;
+                      updateActiveTimelineClip((clip) => {
+                        const res = snapCutsToAudioBeats(clip, activeSource);
+                        setMarkerNotice(
+                          `🎵 Beat-Sync Cutter: Created ${res.beatCutsCount} audio-peak synced cuts!`
+                        );
+                        setTimeout(() => setMarkerNotice(null), 3000);
+                        return res.updatedClip;
+                      });
+                    }}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10.5,
+                    }}
+                    title="Slice and align timeline cuts to detected audio transients & beats"
+                  >
+                    🎵 Beat-Sync Cuts
+                  </button>
+
+                  {/* 3. Word-Level Karaoke Captions */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      if (!activeClip || !activeSource) return;
+                      updateActiveTimelineClip((clip) => {
+                        const seed =
+                          clip.captionText ||
+                          (clip.captions.length > 0
+                            ? clip.captions.map((c) => c.text).join(' ')
+                            : `Watch this moment from ${activeSource.name.replace(/\.[^/.]+$/, '')} — wait for the payoff!`);
+                        const wordCaps = buildWordLevelCaptionsFromText(seed, clip.duration, 4);
+                        setMarkerNotice(
+                          `🎤 Generated ${wordCaps.length} Word-Level Karaoke Caption cards!`
+                        );
+                        setTimeout(() => setMarkerNotice(null), 3000);
+                        return {
+                          ...clip,
+                          captions: wordCaps,
+                          captionText: clip.captionText || wordCaps[0]?.text || '',
+                        };
+                      });
+                    }}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10.5,
+                      background:
+                        (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
+                          ? 'rgba(250, 204, 21, 0.16)'
+                          : undefined,
+                      borderColor:
+                        (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
+                          ? 'rgba(250, 204, 21, 0.48)'
+                          : undefined,
+                      color:
+                        (activeClip?.captions?.[0]?.words?.length ?? 0) > 0
+                          ? '#fde047'
+                          : undefined,
+                    }}
+                    title="Generate word-by-word karaoke highlighted subtitles across the active clip"
+                  >
+                    🎤 Word Karaoke Captions
+                  </button>
+
+                  {/* 4. 2-Speaker Top/Bottom Podcast Split-Screen */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      if (!activeClip || !activeSource) return;
+                      updateActiveTimelineClip((clip) => {
+                        const nextMode: BackgroundFillStyle =
+                          clip.backgroundFillStyle === 'split-screen' ? 'blurred' : 'split-screen';
+                        setMarkerNotice(
+                          nextMode === 'split-screen'
+                            ? '👥 Enabled 9:16 Top/Bottom Dual-Speaker Podcast Split-Screen!'
+                            : 'Switched back to Single-Frame 9:16 view'
+                        );
+                        setTimeout(() => setMarkerNotice(null), 2800);
+                        return applyTwoSpeakerEditMode(clip, activeSource, nextMode);
+                      });
+                    }}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10.5,
+                      background:
+                        activeClip?.backgroundFillStyle === 'split-screen'
+                          ? 'rgba(59, 130, 246, 0.24)'
+                          : undefined,
+                      borderColor:
+                        activeClip?.backgroundFillStyle === 'split-screen'
+                          ? '#60a5fa'
+                          : undefined,
+                      color:
+                        activeClip?.backgroundFillStyle === 'split-screen'
+                          ? '#93c5fd'
+                          : undefined,
+                    }}
+                    title="Stack Left Speaker (top half) and Right Speaker (bottom half) in a 9:16 podcast split-screen"
+                  >
+                    👥 2-Speaker Split-Screen
+                  </button>
+
+                  {/* 5. 2-Speaker Active Camera Auto-Switcher */}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      if (!activeClip || !activeSource) return;
+                      updateActiveTimelineClip((clip) => {
+                        const next = applyTwoSpeakerEditMode(clip, activeSource, 'auto-switch');
+                        setMarkerNotice(
+                          `🔀 Applied 2-Speaker Auto Camera Switch across ${next.subCuts.length} cuts!`
+                        );
+                        setTimeout(() => setMarkerNotice(null), 2800);
+                        return next;
+                      });
+                    }}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10.5,
+                    }}
+                    title="Automatically alternate camera focus between Left Speaker and Right Speaker across timeline cuts"
+                  >
+                    🔀 Auto-Switch Speakers
+                  </button>
+                </div>
+
+                {/* Right side of AI Skills Bar: Blurred 9:16 Fill Toggle + Playback Speed Ramp */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      fontSize: 10.5,
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    <span>9:16 Fill:</span>
+                    {(
+                      [
+                        { id: 'blurred', label: '🌫 Blur Fill' },
+                        { id: 'black', label: '⬛ Black Bars' },
+                      ] as Array<{ id: BackgroundFillStyle; label: string }>
+                    ).map((opt) => {
+                      const activeFill = activeClip?.backgroundFillStyle ?? 'blurred';
+                      const isSel = activeFill === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          className="btn"
+                          onClick={() =>
+                            updateActiveTimelineClip((c) => ({
+                              ...c,
+                              backgroundFillStyle: opt.id,
+                            }))
+                          }
+                          style={{
+                            padding: '2px 7px',
+                            fontSize: 10,
+                            background: isSel ? 'rgba(45, 140, 235, 0.22)' : undefined,
+                            borderColor: isSel ? '#60a5fa' : undefined,
+                            color: isSel ? '#93c5fd' : undefined,
+                          }}
+                          title="Choose whether zoomed-out (<1.0x) frames use a soft Gaussian-blurred 9:16 background or black letterbox bars"
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      fontSize: 10.5,
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    <span>Speed:</span>
+                    {[0.75, 1.0, 1.25, 1.5].map((spd) => {
+                      const curSpd = activeClip?.playbackSpeed ?? 1.0;
+                      const isSel = Math.abs(curSpd - spd) < 0.03;
+                      return (
+                        <button
+                          key={spd}
+                          type="button"
+                          className="btn"
+                          onClick={() => {
+                            if (videoRef.current) {
+                              videoRef.current.playbackRate = spd;
+                            }
+                            updateActiveTimelineClip((c) => ({
+                              ...c,
+                              playbackSpeed: spd,
+                              subCuts: c.subCuts.map((cut) => ({ ...cut, speed: spd })),
+                            }));
+                          }}
+                          style={{
+                            padding: '2px 6px',
+                            fontSize: 10,
+                            fontFamily: 'var(--font-mono)',
+                            background: isSel ? 'rgba(16, 185, 129, 0.22)' : undefined,
+                            borderColor: isSel ? '#34d399' : undefined,
+                            color: isSel ? '#6ee7b7' : undefined,
+                          }}
+                          title={`Set playback speed to ${spd}x`}
+                        >
+                          {spd}x
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             </>

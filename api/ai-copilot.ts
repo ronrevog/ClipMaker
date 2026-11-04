@@ -90,7 +90,12 @@ export interface CopilotOperation {
     | 'seek_playhead'
     | 'playback_control'
     | 'export_mp4'
-    | 'save_project';
+    | 'save_project'
+    | 'strip_silence'
+    | 'beat_sync_cuts'
+    | 'set_layout_mode'
+    | 'generate_word_captions'
+    | 'set_playback_speed';
   clipsCount?: number;
   targetDuration?: number;
   clipMode?: 'condensed-edit' | 'clip-segment';
@@ -113,6 +118,10 @@ export interface CopilotOperation {
   zoom?: number;
   pacingMultiplier?: number;
   captionText?: string;
+  captionSegments?: Array<{ start: number; end: number; text: string }>;
+  silenceThreshold?: number;
+  layoutMode?: 'blurred' | 'black' | 'split-screen' | 'auto-switch';
+  speed?: number;
   schemePresetName?: string;
   clipIndex?: number;
   targetView?: 'full-source' | 'clip';
@@ -157,6 +166,15 @@ You are directly wired into every control in ClipMaker Studio:
    - "center_subject": Switch focus strategy ("auto-salient" | "face-speaker" | "left-subject" | "right-subject" | "action-motion" | "static-lock").
    - "clear_focus_points": Clear all manual focus lock points and reset to auto tracking.
    - "update_caption": Set or rewrite the on-screen 9:16 social caption text.
+   - "strip_silence": Auto-Editor style jump-cutter! Removes silent pauses and dead air across the active clip's timeline using audio RMS waveform analysis (optional silenceThreshold: 0.1..0.35). Use whenever the user says "remove dead air", "cut out the pauses/silence", or "jump-cut the awkward pauses".
+   - "beat_sync_cuts": Snaps and slices timeline cuts to detected audio peaks and musical/speech transients. Use when the user asks to "cut to the beat", "sync cuts to audio peaks", or "make rhythmic beat cuts".
+   - "set_layout_mode": Sets the 9:16 visual layout / background mode (layoutMode: "blurred" | "black" | "split-screen" | "auto-switch"):
+     * "split-screen": Top/Bottom 9:16 Dual-Speaker Podcast Stack (Speaker A on top half, Speaker B on bottom half).
+     * "auto-switch": Alternates camera cuts back and forth between Left Speaker and Right Speaker across the timeline.
+     * "blurred": Renders a soft Gaussian-blurred 9:16 background behind zoomed-out / Fit-16:9 frames instead of black letterbox bars.
+     * "black": Clean black letterbox bars when zoomed out (<1.0x).
+   - "generate_word_captions": Generates word-level karaoke captions across the clip (with optional captionText or captionSegments array [{start, end, text}] and captionStyle: "hormozi-bold" | "neon-karaoke" | "premiere-minimal" | "cinema-serif"). Use when the user asks to "add word-by-word captions", "transcribe/caption this clip", or "add karaoke subtitles".
+   - "set_playback_speed": Sets video & timeline playback speed (speed: 0.5 to 2.0, e.g. 1.25 for 25% faster, 0.5 for slow-mo).
    - "select_clip": Switch to a generated clip (clipIndex: 1, 2, 3...) or back to the full source video (targetView: "full-source").
    - "seek_playhead": Jump the playhead to targetTime (in seconds).
    - "playback_control": "play", "pause", or "loop_in_out".
@@ -171,7 +189,7 @@ Respond ONLY with valid JSON matching this schema:
   "reply": "Clear, helpful response explaining what you did or answering the user's question.",
   "operations": [
     {
-      "type": "generate_edited_clips" | "update_scheme" | "set_focus_point" | "clear_focus_points" | "set_in_out_markers" | "trim_start" | "trim_end" | "split_at_playhead" | "delete_current_cut" | "adjust_tracking_offset" | "adjust_smoothing" | "set_zoom" | "repace_cuts" | "update_caption" | "save_scheme_preset" | "center_subject" | "select_clip" | "seek_playhead" | "playback_control" | "export_mp4" | "save_project",
+      "type": "generate_edited_clips" | "update_scheme" | "set_focus_point" | "clear_focus_points" | "set_in_out_markers" | "trim_start" | "trim_end" | "split_at_playhead" | "delete_current_cut" | "adjust_tracking_offset" | "adjust_smoothing" | "set_zoom" | "repace_cuts" | "update_caption" | "strip_silence" | "beat_sync_cuts" | "set_layout_mode" | "generate_word_captions" | "set_playback_speed" | "save_scheme_preset" | "center_subject" | "select_clip" | "seek_playhead" | "playback_control" | "export_mp4" | "save_project",
       "clipsCount": number (optional, 1..12),
       "targetDuration": number (optional, 5..180 seconds),
       "clipMode": "condensed-edit" | "clip-segment" (optional),
@@ -191,9 +209,13 @@ Respond ONLY with valid JSON matching this schema:
       "targetTime": number (optional, seconds),
       "offsetX": number (optional, -0.35..0.35),
       "smoothing": number (optional, 0.15..0.96),
-      "zoom": number (optional, 1.0..1.5),
+      "zoom": number (optional, 0.56..1.5),
       "pacingMultiplier": number (optional, 0.5..2.0),
       "captionText": string (optional),
+      "captionSegments": [{"start": number, "end": number, "text": string}] (optional),
+      "silenceThreshold": number (optional, 0.08..0.4),
+      "layoutMode": "blurred" | "black" | "split-screen" | "auto-switch" (optional),
+      "speed": number (optional, 0.5..2.0),
       "schemePresetName": string (optional),
       "clipIndex": number (optional, 1-based index of generated clip),
       "targetView": "full-source" | "clip" (optional),
@@ -606,6 +628,67 @@ function buildDeterministicCopilotResponse(
       summary: `Caption: "${newText.slice(0, 18)}..."`,
     });
     replies.push(`Updated social caption overlay to "${newText}".`);
+  }
+
+  if (p.includes('silence') || p.includes('dead air') || p.includes('pause') || p.includes('jump cut') || p.includes('jump-cut')) {
+    ops.push({
+      type: 'strip_silence',
+      silenceThreshold: 0.18,
+      summary: 'Stripped Dead Air & Pauses',
+    });
+    replies.push('Scanned the audio waveform and jump-cut all silent pauses and dead air out of the timeline.');
+  }
+
+  if (p.includes('split screen') || p.includes('split-screen') || p.includes('both speakers') || p.includes('top and bottom')) {
+    ops.push({
+      type: 'set_layout_mode',
+      layoutMode: 'split-screen',
+      summary: '9:16 Dual-Speaker Split-Screen',
+    });
+    replies.push('Switched 9:16 output to Top/Bottom Dual-Speaker Podcast Split-Screen.');
+  } else if (p.includes('switch speaker') || p.includes('auto switch') || p.includes('back and forth')) {
+    ops.push({
+      type: 'set_layout_mode',
+      layoutMode: 'auto-switch',
+      summary: '2-Speaker Auto Camera Switch',
+    });
+    replies.push('Applied automatic Left/Right speaker switching across timeline cuts.');
+  } else if (p.includes('blur') || p.includes('blurred background')) {
+    ops.push({
+      type: 'set_layout_mode',
+      layoutMode: 'blurred',
+      zoom: 0.56,
+      summary: 'Fit 16:9 + Blurred 9:16 Fill',
+    });
+    replies.push('Enabled blurred 9:16 background fill behind the full 16:9 frame.');
+  }
+
+  if (p.includes('beat') || p.includes('sync to audio') || p.includes('transient')) {
+    ops.push({
+      type: 'beat_sync_cuts',
+      summary: 'Beat-Synced Cuts to Audio Peaks',
+    });
+    replies.push('Snapped timeline sub-cuts to detected audio peaks and transients.');
+  }
+
+  if (p.includes('speed') || p.includes('slow mo') || p.includes('slow-mo') || p.includes('fast forward') || p.includes('1.25x') || p.includes('1.5x') || p.includes('2x')) {
+    const spdMatch = p.match(/(\d+(?:\.\d+)?)x/);
+    const spd = spdMatch ? Math.max(0.5, Math.min(2.0, parseFloat(spdMatch[1]))) : p.includes('slow') ? 0.5 : 1.25;
+    ops.push({
+      type: 'set_playback_speed',
+      speed: spd,
+      summary: `Playback Speed: ${spd.toFixed(2)}x`,
+    });
+    replies.push(`Set timeline playback speed to ${spd.toFixed(2)}x.`);
+  }
+
+  if (p.includes('karaoke') || p.includes('word by word') || p.includes('word-by-word') || p.includes('transcribe') || p.includes('hormozi')) {
+    ops.push({
+      type: 'generate_word_captions',
+      captionStyle: p.includes('neon') ? 'neon-karaoke' : 'hormozi-bold',
+      summary: 'Word-Level Karaoke Captions',
+    });
+    replies.push('Generated word-level timed karaoke captions for the active 9:16 clip.');
   }
 
   if (p.includes('export') || p.includes('download') || p.includes('mp4')) {

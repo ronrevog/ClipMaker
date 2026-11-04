@@ -1,7 +1,7 @@
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
 import { GeneratedClip, SourceVideoAsset, SubCut } from '../types/editor';
+import { renderComposite9x16Frame } from './aiVideoEditorTools';
 import {
-  computeDistortionFree9x16Crop,
   evaluateUserAnchorSplineAtTime,
   getTrackingStateAtTime,
   resetLiveObjectTrackerState,
@@ -134,56 +134,22 @@ export async function exportClipTo9x16Video(
       activeFocus
     );
 
-    const crop = computeDistortionFree9x16Crop(
+    renderComposite9x16Frame({
+      ctx,
+      videoEl,
+      outW: outWidth,
+      outH: outHeight,
       vw,
       vh,
-      track.cropX,
-      track.cropY,
-      cutZoom
-    );
-
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, outWidth, outHeight);
-
-    const cropAspect = crop.sw / Math.max(1, crop.sh);
-    const canvasAspect = outWidth / outHeight;
-    let dx = 0;
-    let dy = 0;
-    let dw = outWidth;
-    let dh = outHeight;
-    if (cropAspect > canvasAspect + 0.01) {
-      dw = outWidth;
-      dh = Math.round(outWidth / cropAspect);
-      dx = 0;
-      dy = Math.round((outHeight - dh) / 2);
-    }
-
-    ctx.drawImage(
-      videoEl,
-      crop.sx,
-      crop.sy,
-      crop.sw,
-      crop.sh,
-      dx,
-      dy,
-      dw,
-      dh
-    );
-
-    const activeCaption = clip.captions.find(
-      (c) => clipRelTime >= c.start && clipRelTime <= c.end
-    );
-    const displayText = activeCaption?.text || clip.captionText;
-    if (displayText) {
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.font = '800 36px Inter, sans-serif';
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
-      ctx.fillRect(40, outHeight * 0.78 - 44, outWidth - 80, 64);
-      ctx.fillStyle = '#facc15';
-      ctx.fillText(displayText, outWidth / 2, outHeight * 0.78);
-      ctx.restore();
-    }
+      cropX: track.cropX,
+      cropY: track.cropY,
+      leftSubjectX: track.leftSubjectX,
+      rightSubjectX: track.rightSubjectX,
+      zoom: cutZoom,
+      backgroundFillStyle: clip.backgroundFillStyle ?? 'blurred',
+      activeClip: clip,
+      clipPlayheadTime: clipRelTime,
+    });
   };
 
   const seekVideoTo = async (targetTime: number) => {
