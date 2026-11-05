@@ -1063,8 +1063,39 @@ export function renderComposite9x16Frame(params: {
   const lutFilterStr = getColorGradeLutCanvasFilter(activeClip?.colorGradeLut);
   const effectiveClipZoom = Math.max(0.5, Math.min(3.2, zoom * (trans.extraScale || 1.0)));
 
+  // Per-Cut Layout Override: allows switching between Split-Screen (2 subjects) and Full-Screen (1 subject)
+  const activeCutAtPlayhead = activeClip?.subCuts?.find(
+    (c) => clipPlayheadTime >= c.timelineStart - 0.03 && clipPlayheadTime <= c.timelineEnd + 0.03
+  );
+  const cutLayout = activeCutAtPlayhead?.layoutMode || 'inherit';
+  const effectiveFillStyle: BackgroundFillStyle =
+    cutLayout === 'split-screen'
+      ? 'split-screen'
+      : cutLayout === 'full-single' ||
+          cutLayout === 'full-speaker-a' ||
+          cutLayout === 'full-speaker-b'
+        ? backgroundFillStyle === 'black'
+          ? 'black'
+          : 'blurred'
+        : backgroundFillStyle;
+
+  const defaultYForSpeakers = vw < vh ? 0.39 : Math.min(0.48, Math.max(0.34, cropY));
+  const fineOffsetXForSpeakers = activeClip?.trackingOffsetX || 0;
+  const effectiveCropX =
+    cutLayout === 'full-speaker-a'
+      ? Math.max(0.06, Math.min(0.94, (activeClip?.speakerAX ?? 0.26) + fineOffsetXForSpeakers))
+      : cutLayout === 'full-speaker-b'
+        ? Math.max(0.06, Math.min(0.94, (activeClip?.speakerBX ?? 0.74) + fineOffsetXForSpeakers))
+        : cropX;
+  const effectiveCropY =
+    cutLayout === 'full-speaker-a'
+      ? Math.max(0.06, Math.min(0.94, activeClip?.speakerAY ?? defaultYForSpeakers))
+      : cutLayout === 'full-speaker-b'
+        ? Math.max(0.06, Math.min(0.94, activeClip?.speakerBY ?? defaultYForSpeakers))
+        : cropY;
+
   // MODE A: 2-Speaker Top/Bottom 9:16 Podcast Split-Screen
-  if (backgroundFillStyle === 'split-screen') {
+  if (effectiveFillStyle === 'split-screen') {
     const splitRatio = Math.max(0.25, Math.min(0.75, activeClip?.splitScreenRatio ?? 0.5));
     const topH = Math.floor(outH * splitRatio);
     const bottomH = outH - topH;
@@ -1137,7 +1168,13 @@ export function renderComposite9x16Frame(params: {
     ctx.restore();
   } else {
     // MODE B: Single-Frame 9:16 Crop OR Wide Letterbox with Blurred / Black Background Fill
-    const crop = computeDistortionFree9x16Crop(vw, vh, cropX, cropY, effectiveClipZoom);
+    const crop = computeDistortionFree9x16Crop(
+      vw,
+      vh,
+      effectiveCropX,
+      effectiveCropY,
+      effectiveClipZoom
+    );
     const cropAspect = crop.sw / Math.max(1, crop.sh);
     const canvasAspect = outW / outH;
 
@@ -1162,8 +1199,8 @@ export function renderComposite9x16Frame(params: {
         dy = Math.round((outH - dh) / 2);
       }
 
-      if (backgroundFillStyle !== 'black') {
-        const bgCrop = computeDistortionFree9x16Crop(vw, vh, cropX, cropY, 1.12);
+      if (effectiveFillStyle !== 'black') {
+        const bgCrop = computeDistortionFree9x16Crop(vw, vh, effectiveCropX, effectiveCropY, 1.12);
         ctx.save();
         ctx.filter = 'blur(22px) brightness(0.48) saturate(1.25)';
         ctx.drawImage(

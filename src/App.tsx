@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useHotkeys } from 'react-hotkeys-hook';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -6,6 +7,8 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ClipboardPaste,
+  Copy,
   CornerDownLeft,
   Crosshair,
   Download,
@@ -33,6 +36,7 @@ import {
   Settings,
   Sliders,
   Sparkles,
+  Square,
   Trash2,
   Type,
   Upload,
@@ -54,6 +58,7 @@ import {
   CopilotAttachment,
   CopilotChatMessage,
   CopilotRevisionSnapshot,
+  CutLayoutMode,
   CutTransitionStyleId,
   EditingScheme,
   GeneratedClip,
@@ -110,9 +115,11 @@ import {
 import { exportClipTo9x16Video } from './services/videoExporter';
 import {
   detectActiveSpeakerTurnsWithLipSync,
+  detectSingleVsTwoSpeakerLayoutCuts,
   ensureMediaPipeImageSegmenter,
   inspectMp4ContainerWithMp4Box,
   Mp4ContainerTelemetry,
+  syncLivePlaybackAudioMastering,
 } from './services/sotaStudioEngines';
 import { AISettingsModal } from './components/AISettingsModal';
 import { ComplexAuthGate } from './components/ComplexAuthGate';
@@ -376,6 +383,8 @@ export const App: React.FC = () => {
   const [mp4ContainerTelemetry, setMp4ContainerTelemetry] =
     useState<Mp4ContainerTelemetry | null>(null);
   const [isRunningLipSyncSwitch, setIsRunningLipSyncSwitch] = useState<boolean>(false);
+  const [isAutoLayoutRunning, setIsAutoLayoutRunning] = useState<boolean>(false);
+  const [copiedCut, setCopiedCut] = useState<SubCut | null>(null);
   const [editorialFocusInput, setEditorialFocusInput] = useState<string>('');
 
   // 7. Cut Copilot Chat State
@@ -558,6 +567,14 @@ export const App: React.FC = () => {
       }
     }
   }, [activeClip?.playbackSpeed, activeClip?.id]);
+
+  // Synchronize live WebAudio Voice Isolation & Mastering chain on <video> during playback
+  useEffect(() => {
+    syncLivePlaybackAudioMastering(
+      videoRef.current,
+      activeClip?.audioMasteringPreset || 'off'
+    );
+  }, [activeClip?.audioMasteringPreset, activeClip?.id, activeSource?.id]);
 
   useEffect(() => {
     render9x16Preview();
@@ -1243,6 +1260,29 @@ export const App: React.FC = () => {
     }
   }, [activeSource, activeClip, isRunningLipSyncSwitch, updateActiveTimelineClip]);
 
+  // Auto-detect 1-Subject (Full Screen) vs 2-Subject (Split-Screen) layout per cut
+  const handleAutoDetectSplitVsFullLayout = useCallback(async () => {
+    if (!activeSource || !activeClip || isAutoLayoutRunning) return;
+    setIsAutoLayoutRunning(true);
+    setMarkerNotice('Detecting 1-Subject (Full Screen) vs 2-Subject (Split-Screen) cuts...');
+    try {
+      const res = await detectSingleVsTwoSpeakerLayoutCuts(
+        activeSource,
+        activeClip,
+        (msg: string) => setMarkerNotice(msg)
+      );
+      updateActiveTimelineClip(() => res.updatedClip);
+      setMarkerNotice(
+        `Auto Layout: ${res.splitCount} Split-Screen cuts & ${res.fullCount} Full-Screen cuts`
+      );
+    } catch (err: any) {
+      setMarkerNotice(`Auto Layout warning: ${err?.message || 'Could not scan'}`);
+    } finally {
+      setIsAutoLayoutRunning(false);
+      setTimeout(() => setMarkerNotice(null), 3200);
+    }
+  }, [activeSource, activeClip, isAutoLayoutRunning, updateActiveTimelineClip]);
+
   // Click or Drag directly on the Source Video to pick ANY object and track it across the clip!
   const handlePointerOnSourceVideo = (
     e: React.MouseEvent<HTMLDivElement>,
@@ -1377,6 +1417,102 @@ export const App: React.FC = () => {
   const handleSplitAtPlayhead = useCallback(() => {
     handleRazorSplitAtClipTime(clipPlayheadTime);
   }, [handleRazorSplitAtClipTime, clipPlayheadTime]);
+
+  // Stop playback and return playhead to start of clip/cut (Shortcut: S)
+  const handleStopPlayback = useCallback(() => {
+    if (videoRef.current) {
+      videoRef.current.pause();
+    }
+    setIsPlaying(false);
+    setIsLoopingInOut(false);
+    if (activeClip) {
+      const firstSrc = activeClip.subCuts[0]?.sourceStart ?? activeClip.sourceStart;
+      activeCutIdxRef.current = 0;
+      setSelectedCutIndex(0);
+      setClipPlayheadTime(0);
+      setPlayheadTime(firstSrc);
+      if (videoRef.current) {
+        videoRef.current.currentTime = firstSrc;
+      }
+      setMarkerNotice('Stopped playback [00:00.0]');
+      setTimeout(() => setMarkerNotice(null), 1800);
+    }
+  }, [activeClip]);
+
+  // Copy currently selected video cut to clipboard (Shortcut: Ctrl+C / Cmd+C)
+  const handleCopySelectedCut = useCallback(() => {
+    if (!activeClip || activeClip.subCuts.length === 0) return;
+    const idx = Math.min(selectedCutIndex, activeClip.subCuts.length - 1);
+    const cutToCopy = activeClip.subCuts[idx] || activeClip.subCuts[0];
+    if (!cutToCopy) return;
+    setCopiedCut({ ...cutToCopy });
+    const dur = (cutToCopy.sourceEnd - cutToCopy.sourceStart).toFixed(1);
+    setMarkerNotice(`Copied Cut #${cutToCopy.index} (${dur}s) to clipboard [Ctrl+V to paste]`);
+    setTimeout(() => setMarkerNotice(null), 2600);
+  }, [activeClip, selectedCutIndex]);
+
+  // Paste copied video cut right after the selected cut on the timeline (Shortcut: Ctrl+V / Cmd+V)
+  const handlePasteCopiedCut = useCallback(() => {
+    if (!activeClip || !copiedCut) {
+      setMarkerNotice('No video cut copied yet — select a cut and press Ctrl+C first');
+      setTimeout(() => setMarkerNotice(null), 2400);
+      return;
+    }
+    const insertAfterIdx = Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1));
+    const pastedId = `pasted-cut-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const pastedCut: SubCut = {
+      ...copiedCut,
+      id: pastedId,
+      label: `${copiedCut.label.replace(/\s*\(Copy\)/, '')} (Copy)`,
+    };
+
+    updateActiveTimelineClip((clip) => {
+      const nextList = [...clip.subCuts];
+      nextList.splice(insertAfterIdx + 1, 0, pastedCut);
+      const recalc = recalculateClipTimeline(nextList);
+      return {
+        ...clip,
+        subCuts: recalc.subCuts,
+        duration: recalc.duration,
+        sourceStart: recalc.sourceStart,
+        sourceEnd: recalc.sourceEnd,
+      };
+    });
+
+    const newIdx = insertAfterIdx + 1;
+    setSelectedCutIndex(newIdx);
+    activeCutIdxRef.current = newIdx;
+    const dur = (copiedCut.sourceEnd - copiedCut.sourceStart).toFixed(1);
+    setMarkerNotice(`Pasted Cut (${dur}s) at position #${newIdx + 1}`);
+    setTimeout(() => setMarkerNotice(null), 2600);
+  }, [activeClip, copiedCut, selectedCutIndex, updateActiveTimelineClip]);
+
+  // Switch a single cut on the timeline between Split-Screen (2 subjects) and Full-Screen (1 subject)
+  const handleSetSelectedCutLayoutMode = useCallback(
+    (mode: CutLayoutMode) => {
+      if (!activeClip || activeClip.subCuts.length === 0) return;
+      const targetIdx = Math.min(selectedCutIndex, activeClip.subCuts.length - 1);
+      updateActiveTimelineClip((clip) => ({
+        ...clip,
+        subCuts: clip.subCuts.map((sc, idx) =>
+          idx === targetIdx ? { ...sc, layoutMode: mode } : sc
+        ),
+      }));
+      const modeName =
+        mode === 'split-screen'
+          ? '2-Speaker Split-Screen'
+          : mode === 'full-single'
+            ? 'Full-Screen (Single Subject)'
+            : mode === 'full-speaker-a'
+              ? 'Full-Screen (Speaker A)'
+              : mode === 'full-speaker-b'
+                ? 'Full-Screen (Speaker B)'
+                : 'Clip Default Layout';
+      setMarkerNotice(`Cut #${targetIdx + 1} layout set to ${modeName}`);
+      setTimeout(() => setMarkerNotice(null), 2400);
+    },
+    [activeClip, selectedCutIndex, updateActiveTimelineClip]
+  );
 
   // Delete (Ripple-Delete) the currently selected cut on the timeline
   const handleDeleteSelectedCut = useCallback(() => {
@@ -1744,15 +1880,72 @@ export const App: React.FC = () => {
     ]
   );
 
-  // Keyboard shortcuts: Space (Play/Pause), C (Razor Blade Toggle), I (Set In), O (Set Out), Delete/Backspace (Delete Selected Cut)
+  // SOTA Keyboard Shortcuts powered by react-hotkeys-hook + Global NLE Hotkey Engine:
+  // Space / K = Play/Pause | S = Stop | B / X / Ctrl+K = Split Cut | Ctrl+C = Copy Cut | Ctrl+V = Paste Cut | 1 = Full Screen | 2 = Split-Screen | 3 = Speaker A | 4 = Speaker B
+  useHotkeys(
+    'ctrl+k, meta+k',
+    (e) => {
+      e.preventDefault();
+      handleSplitAtPlayhead();
+    },
+    { enableOnFormTags: false },
+    [handleSplitAtPlayhead]
+  );
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.code === 'Space') {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      // Copy Cut (Ctrl+C / Cmd+C when no text is selected)
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyC') {
+        const selection = window.getSelection()?.toString();
+        if (!selection) {
+          e.preventDefault();
+          handleCopySelectedCut();
+        }
+        return;
+      }
+
+      // Paste Cut (Ctrl+V / Cmd+V)
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV') {
+        e.preventDefault();
+        handlePasteCopiedCut();
+        return;
+      }
+
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (e.code === 'Space' || e.code === 'KeyK') {
         e.preventDefault();
         handleTogglePlay(false);
-      } else if (e.code === 'KeyM' && !e.metaKey && !e.ctrlKey) {
+      } else if (e.code === 'KeyS') {
+        e.preventDefault();
+        handleStopPlayback();
+      } else if (e.code === 'KeyB' || e.code === 'KeyX') {
+        e.preventDefault();
+        handleSplitAtPlayhead();
+      } else if (e.code === 'Digit1') {
+        e.preventDefault();
+        handleSetSelectedCutLayoutMode('full-single');
+      } else if (e.code === 'Digit2') {
+        e.preventDefault();
+        handleSetSelectedCutLayoutMode('split-screen');
+      } else if (e.code === 'Digit3') {
+        e.preventDefault();
+        handleSetSelectedCutLayoutMode('full-speaker-a');
+      } else if (e.code === 'Digit4') {
+        e.preventDefault();
+        handleSetSelectedCutLayoutMode('full-speaker-b');
+      } else if (e.code === 'KeyM') {
         e.preventDefault();
         setIsMuted((prev) => {
           const next = !prev;
@@ -1781,6 +1974,11 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, [
     handleTogglePlay,
+    handleStopPlayback,
+    handleSplitAtPlayhead,
+    handleCopySelectedCut,
+    handlePasteCopiedCut,
+    handleSetSelectedCutLayoutMode,
     handleSetInMarkerAtPlayhead,
     handleSetOutMarkerAtPlayhead,
     handleDeleteSelectedCut,
@@ -5908,6 +6106,56 @@ export const App: React.FC = () => {
                       {isRunningLipSyncSwitch ? 'Lip-Sync Scan...' : 'Lip-Sync Switch'}
                     </button>
 
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={isAutoLayoutRunning}
+                      onClick={handleAutoDetectSplitVsFullLayout}
+                      title="Automatically switch cuts between 2-Speaker Split-Screen (when 2 faces are detected) and Full-Screen (when 1 subject is detected)"
+                    >
+                      <Maximize2 size={11} />
+                      {isAutoLayoutRunning ? 'Scanning Layout...' : 'Auto Split/Full'}
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${
+                        activeClip?.audioMasteringPreset === 'rnnoise-isolate' ? 'btn-active' : ''
+                      }`}
+                      style={
+                        activeClip?.audioMasteringPreset === 'rnnoise-isolate'
+                          ? {
+                              borderColor: 'rgba(16, 185, 129, 0.8)',
+                              background: 'rgba(16, 185, 129, 0.22)',
+                              color: '#6ee7b7',
+                            }
+                          : undefined
+                      }
+                      onClick={() => {
+                        const isCurrentlyIsolated =
+                          activeClip?.audioMasteringPreset === 'rnnoise-isolate';
+                        const nextPreset: AudioMasteringPresetId = isCurrentlyIsolated
+                          ? 'off'
+                          : 'rnnoise-isolate';
+                        updateActiveTimelineClip((c) => ({
+                          ...c,
+                          audioMasteringPreset: nextPreset,
+                        }));
+                        setMarkerNotice(
+                          nextPreset === 'rnnoise-isolate'
+                            ? 'RNNoise Neural Voice Isolation ENABLED (Live + Export)'
+                            : 'Voice Isolation turned off'
+                        );
+                        setTimeout(() => setMarkerNotice(null), 2600);
+                      }}
+                      title="Isolate vocal speech cleanly using RNNoise WebAssembly neural denoising + high-pass de-hum"
+                    >
+                      <Volume2 size={11} />
+                      {activeClip?.audioMasteringPreset === 'rnnoise-isolate'
+                        ? 'Voice Isolated (RNNoise)'
+                        : 'Isolate Voice'}
+                    </button>
+
                     <div className="studio-divider-v" />
 
                     <button
@@ -6265,9 +6513,21 @@ export const App: React.FC = () => {
                         fontWeight: 600,
                       }}
                       onClick={() => handleTogglePlay(false)}
+                      title="Play / Pause [Space or K]"
                     >
                       {isPlaying && !isLoopingInOut ? <Pause size={13} /> : <Play size={13} />}
-                      {isPlaying && !isLoopingInOut ? 'Pause' : 'Play'}
+                      {isPlaying && !isLoopingInOut ? 'Pause [Space]' : 'Play [Space]'}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      style={{ height: 28 }}
+                      onClick={handleStopPlayback}
+                      title="Stop playback and rewind to start of clip [Shortcut: S]"
+                    >
+                      <Square size={11} />
+                      Stop [S]
                     </button>
 
                     <button
@@ -6285,10 +6545,10 @@ export const App: React.FC = () => {
                         setIsMuted(nextMute);
                         if (videoRef.current) videoRef.current.muted = nextMute;
                       }}
-                      title={isMuted ? 'Click to turn sound ON' : 'Click to mute sound'}
+                      title={isMuted ? 'Click to turn sound ON [M]' : 'Click to mute sound [M]'}
                     >
                       {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                      {isMuted ? 'Sound Off (Muted)' : 'Sound On'}
+                      {isMuted ? 'Sound Off' : 'Sound On'}
                     </button>
 
                     <div className="studio-divider-v" />
@@ -6297,7 +6557,7 @@ export const App: React.FC = () => {
                       type="button"
                       className={`btn btn-sm ${isRazorMode ? 'btn-active' : ''}`}
                       onClick={() => setIsRazorMode((prev) => !prev)}
-                      title="Razor Tool (C)"
+                      title="Razor Blade Tool [Shortcut: C]"
                     >
                       <Scissors size={11} />
                       Razor [C]
@@ -6307,9 +6567,90 @@ export const App: React.FC = () => {
                       type="button"
                       className="btn btn-sm"
                       onClick={handleSplitAtPlayhead}
+                      title="Split Video Cut at Playhead [Shortcut: B or Ctrl+K]"
                     >
-                      Split Cut
+                      <Scissors size={11} />
+                      Split Cut [B]
                     </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={handleCopySelectedCut}
+                      title="Copy Selected Video Cut [Shortcut: Ctrl+C]"
+                    >
+                      <Copy size={11} />
+                      Copy Cut [Ctrl+C]
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${copiedCut ? 'btn-active' : ''}`}
+                      onClick={handlePasteCopiedCut}
+                      disabled={!copiedCut}
+                      title={
+                        copiedCut
+                          ? `Paste Copied Cut (${(copiedCut.sourceEnd - copiedCut.sourceStart).toFixed(1)}s) after selected cut [Shortcut: Ctrl+V]`
+                          : 'Copy a cut first with Ctrl+C, then paste with Ctrl+V'
+                      }
+                    >
+                      <ClipboardPaste size={11} />
+                      Paste Cut [Ctrl+V]
+                    </button>
+
+                    {/* Per-Cut Layout Mode Switcher: Switch any cut between Split-Screen and Full-Screen */}
+                    {inspectedCut && (
+                      <div className="seg-group" title="Set Layout for Selected Cut (#1=Full, #2=Split, #3=Spk A, #4=Spk B)">
+                        <button
+                          type="button"
+                          className="seg-item"
+                          style={{ height: 22, fontSize: 10, padding: '0 6px' }}
+                          data-active={
+                            (inspectedCut.layoutMode || 'inherit') === 'full-single' ||
+                            ((inspectedCut.layoutMode || 'inherit') === 'inherit' &&
+                              activeClip.backgroundFillStyle !== 'split-screen')
+                          }
+                          onClick={() => handleSetSelectedCutLayoutMode('full-single')}
+                          title="Full-Screen Single Subject for this Cut [Shortcut: 1]"
+                        >
+                          Full [1]
+                        </button>
+                        <button
+                          type="button"
+                          className="seg-item"
+                          style={{ height: 22, fontSize: 10, padding: '0 6px' }}
+                          data-active={
+                            inspectedCut.layoutMode === 'split-screen' ||
+                            ((inspectedCut.layoutMode || 'inherit') === 'inherit' &&
+                              activeClip.backgroundFillStyle === 'split-screen')
+                          }
+                          onClick={() => handleSetSelectedCutLayoutMode('split-screen')}
+                          title="2-Speaker Split-Screen for this Cut [Shortcut: 2]"
+                        >
+                          Split [2]
+                        </button>
+                        <button
+                          type="button"
+                          className="seg-item"
+                          style={{ height: 22, fontSize: 10, padding: '0 6px' }}
+                          data-active={inspectedCut.layoutMode === 'full-speaker-a'}
+                          onClick={() => handleSetSelectedCutLayoutMode('full-speaker-a')}
+                          title="Full-Screen Speaker A for this Cut [Shortcut: 3]"
+                        >
+                          Spk A [3]
+                        </button>
+                        <button
+                          type="button"
+                          className="seg-item"
+                          style={{ height: 22, fontSize: 10, padding: '0 6px' }}
+                          data-active={inspectedCut.layoutMode === 'full-speaker-b'}
+                          onClick={() => handleSetSelectedCutLayoutMode('full-speaker-b')}
+                          title="Full-Screen Speaker B for this Cut [Shortcut: 4]"
+                        >
+                          Spk B [4]
+                        </button>
+                      </div>
+                    )}
 
                     <button
                       type="button"
@@ -6961,6 +7302,15 @@ export const App: React.FC = () => {
                                 pointerEvents: 'none',
                               }}
                             >
+                              {cut.layoutMode === 'split-screen'
+                                ? '[SPLIT] '
+                                : cut.layoutMode === 'full-single'
+                                  ? '[FULL] '
+                                  : cut.layoutMode === 'full-speaker-a'
+                                    ? '[SPK A] '
+                                    : cut.layoutMode === 'full-speaker-b'
+                                      ? '[SPK B] '
+                                      : ''}
                               {timelineMode === 'full-source' && activeClip.subCuts.length === 1
                                 ? activeSource.name
                                 : `${cut.label} (${cutDur.toFixed(1)}s)`}
@@ -7559,14 +7909,15 @@ export const App: React.FC = () => {
                     }}
                   >
                     <span className="badge-subtle" style={{ color: '#34d399' }}>
-                      A1 Broadcast Audio Mastering & Loudness Inspector
+                      A1 Voice Isolation & Broadcast Mastering Inspector
                     </span>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                      <span>Mastering Chain</span>
+                      <span>Audio Engine</span>
                       <div className="seg-group">
                         {(
                           [
                             { id: 'off', label: 'Raw Audio' },
+                            { id: 'rnnoise-isolate', label: 'RNNoise Voice Isolation' },
                             { id: 'podcast-clarity', label: 'Podcast Clarity (85Hz HPF)' },
                             { id: 'broadcast-lufs', label: '-14 LUFS Broadcast' },
                             { id: 'vocal-boost', label: 'Vocal Presence Boost' },

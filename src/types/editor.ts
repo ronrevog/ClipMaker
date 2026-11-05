@@ -168,6 +168,13 @@ export interface PerSecondTelemetry {
   isSilent: boolean;
 }
 
+export type CutLayoutMode =
+  | 'inherit'
+  | 'split-screen'
+  | 'full-single'
+  | 'full-speaker-a'
+  | 'full-speaker-b';
+
 export interface SubCut {
   id: string;
   index: number;
@@ -182,6 +189,7 @@ export interface SubCut {
   cropBiasX: number;
   isBeatCut?: boolean;
   speed?: number;
+  layoutMode?: CutLayoutMode;
 }
 
 export interface CaptionWordTiming {
@@ -201,7 +209,12 @@ export interface CaptionSegment {
 
 export type BackgroundFillStyle = 'blurred' | 'black' | 'split-screen';
 
-export type AudioMasteringPresetId = 'off' | 'podcast-clarity' | 'broadcast-lufs' | 'vocal-boost';
+export type AudioMasteringPresetId =
+  | 'off'
+  | 'rnnoise-isolate'
+  | 'podcast-clarity'
+  | 'broadcast-lufs'
+  | 'vocal-boost';
 export type CutTransitionStyleId = 'none' | 'whip-pan' | 'zoom-punch' | 'flash-cut' | 'chromatic-glitch';
 export type ColorGradeLutId = 'none' | 'cinematic-teal-orange' | 'warm-podcast' | 'crisp-contrast' | 'noir-bw';
 export type LottieOverlayPresetId = 'none' | 'subscribe-pulse' | 'viral-flame' | 'live-badge' | 'arrow-pointer';

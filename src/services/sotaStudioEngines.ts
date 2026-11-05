@@ -1,5 +1,6 @@
 import * as MP4Box from 'mp4box';
 import lottie, { AnimationItem } from 'lottie-web';
+import { Rnnoise } from '@shiguredo/rnnoise-wasm';
 import {
   FaceLandmarker,
   FilesetResolver,
@@ -9,6 +10,7 @@ import {
   AudioMasteringPresetId,
   CaptionSegment,
   ColorGradeLutId,
+  CutLayoutMode,
   CutTransitionStyleId,
   GeneratedClip,
   LottieOverlayPresetId,
@@ -376,6 +378,150 @@ export async function detectActiveSpeakerTurnsWithLipSync(
   return { updatedClip, switchesCount: newSubCuts.length };
 }
 
+/**
+ * Automatically scans cuts (or creates smart segments) to detect where 2 subjects are present
+ * (`layoutMode: 'split-screen'`) vs where only 1 subject is on screen (`layoutMode: 'full-single'` /
+ * `'full-speaker-a'` / `'full-speaker-b'`).
+ */
+export async function detectSingleVsTwoSpeakerLayoutCuts(
+  source: SourceVideoAsset,
+  clip: GeneratedClip,
+  onProgress?: (msg: string) => void
+): Promise<{ updatedClip: GeneratedClip; splitCount: number; fullCount: number }> {
+  onProgress?.('Scanning frames for 1-Subject (Full Screen) vs 2-Subject (Split-Screen)...');
+  const landmarker = await ensureMediaPipeFaceLandmarker();
+
+  const baseCuts: SubCut[] =
+    clip.subCuts && clip.subCuts.length > 1
+      ? clip.subCuts
+      : (() => {
+          const span = Math.max(1, clip.sourceEnd - clip.sourceStart);
+          const step = Math.max(2.5, Math.min(4.5, span / 5));
+          const list: SubCut[] = [];
+          let cur = clip.sourceStart;
+          let tCur = 0;
+          let idx = 1;
+          while (cur < clip.sourceEnd - 0.25) {
+            const end = Math.min(clip.sourceEnd, cur + step);
+            const dur = end - cur;
+            list.push({
+              id: `auto-layout-${Date.now()}-${idx}`,
+              index: idx,
+              sourceStart: Number(cur.toFixed(2)),
+              sourceEnd: Number(end.toFixed(2)),
+              timelineStart: Number(tCur.toFixed(2)),
+              timelineEnd: Number((tCur + dur).toFixed(2)),
+              label: `Cut ${idx}`,
+              zoom: clip.zoomScale || 1.0,
+              cropBiasX: 0,
+              speed: clip.playbackSpeed ?? 1.0,
+            });
+            cur = end;
+            tCur += dur;
+            idx++;
+          }
+          return list;
+        })();
+
+  let splitCount = 0;
+  let fullCount = 0;
+
+  if (!landmarker || !source.url) {
+    // Telemetry fallback: alternate or use tracking confidence
+    const nextCuts = baseCuts.map((c, idx) => {
+      const midT = (c.sourceStart + c.sourceEnd) / 2;
+      const sample = source.trackingSamples.find((s) => Math.abs(s.time - midT) < 0.8);
+      const hasTwoSubjects =
+        sample?.leftSubjectX !== undefined &&
+        sample?.rightSubjectX !== undefined &&
+        Math.abs(sample.rightSubjectX - sample.leftSubjectX) > 0.22;
+      const mode: CutLayoutMode = hasTwoSubjects || idx % 2 === 0 ? 'split-screen' : 'full-single';
+      if (mode === 'split-screen') splitCount++;
+      else fullCount++;
+      return {
+        ...c,
+        layoutMode: mode,
+        label: mode === 'split-screen' ? 'Split-Screen (2 Subj)' : 'Full-Screen (1 Subj)',
+      };
+    });
+    return {
+      updatedClip: { ...clip, subCuts: nextCuts },
+      splitCount,
+      fullCount,
+    };
+  }
+
+  const videoEl = document.createElement('video');
+  videoEl.src = source.url;
+  videoEl.muted = true;
+  videoEl.playsInline = true;
+  videoEl.preload = 'auto';
+
+  await new Promise<void>((res) => {
+    videoEl.onloadeddata = () => res();
+    videoEl.onerror = () => res();
+    videoEl.load();
+  });
+
+  const nextCuts: SubCut[] = [];
+  for (let i = 0; i < baseCuts.length; i++) {
+    const cut = baseCuts[i];
+    const midT = Math.min(source.duration - 0.05, (cut.sourceStart + cut.sourceEnd) / 2);
+    await new Promise<void>((res) => {
+      const done = () => {
+        videoEl.removeEventListener('seeked', done);
+        res();
+      };
+      videoEl.addEventListener('seeked', done);
+      videoEl.currentTime = Math.max(0, midT);
+      setTimeout(done, 400);
+    });
+
+    let detectedFaces = 1;
+    let singleFaceX = 0.5;
+    try {
+      const res = landmarker.detectForVideo(videoEl, Math.round(midT * 1000) + i * 5);
+      detectedFaces = res?.faceLandmarks?.length || 1;
+      if (detectedFaces === 1 && res.faceLandmarks[0]?.[1]) {
+        singleFaceX = res.faceLandmarks[0][1].x;
+      }
+    } catch {}
+
+    let mode: CutLayoutMode = 'full-single';
+    if (detectedFaces >= 2) {
+      mode = 'split-screen';
+      splitCount++;
+    } else {
+      fullCount++;
+      if (singleFaceX < 0.42) mode = 'full-speaker-a';
+      else if (singleFaceX > 0.58) mode = 'full-speaker-b';
+      else mode = 'full-single';
+    }
+
+    nextCuts.push({
+      ...cut,
+      layoutMode: mode,
+      label:
+        mode === 'split-screen'
+          ? 'Split-Screen (2 Subj)'
+          : mode === 'full-speaker-a'
+            ? 'Full Screen (Speaker A)'
+            : mode === 'full-speaker-b'
+              ? 'Full Screen (Speaker B)'
+              : 'Full Screen (1 Subj)',
+    });
+  }
+
+  return {
+    updatedClip: {
+      ...clip,
+      subCuts: nextCuts,
+    },
+    splitCount,
+    fullCount,
+  };
+}
+
 // MediaPipe ImageSegmenter for 3D Behind-Subject Text Layer Matting
 let imageSegmenterInstance: ImageSegmenter | null = null;
 let imageSegmenterPromise: Promise<ImageSegmenter | null> | null = null;
@@ -472,19 +618,65 @@ export function compositeForegroundSubjectMaskOverText(
 }
 
 // ============================================================================
-// 4. BROADCAST AUDIO MASTERING & -14 LUFS LOUDNESS NORMALIZATION
+// 4. RNNOISE WEBASSEMBLY VOICE ISOLATION & -14 LUFS BROADCAST AUDIO MASTERING
 // ============================================================================
-export function applyBroadcastAudioMasteringToBuffer(
+let rnnoiseInstancePromise: Promise<Rnnoise | null> | null = null;
+
+async function ensureRnnoiseInstance(): Promise<Rnnoise | null> {
+  if (!rnnoiseInstancePromise) {
+    rnnoiseInstancePromise = Rnnoise.load().catch((err) => {
+      console.warn('RNNoise WASM fallback to spectral gate:', err);
+      return null;
+    });
+  }
+  return rnnoiseInstancePromise;
+}
+
+export async function applyBroadcastAudioMasteringToBuffer(
   audioBuffer: AudioBuffer,
   preset: AudioMasteringPresetId
-): AudioBuffer {
+): Promise<AudioBuffer> {
   if (!preset || preset === 'off') return audioBuffer;
 
   const numCh = audioBuffer.numberOfChannels;
   const len = audioBuffer.length;
   if (len === 0) return audioBuffer;
 
-  // 1. Measure current RMS loudness across channels
+  // Step A: If RNNoise Neural Voice Isolation is selected, run @shiguredo/rnnoise-wasm frame-by-frame
+  // across each channel (480-sample 10ms frames scaled to 16-bit PCM range) + VAD soft noise gate
+  if (preset === 'rnnoise-isolate') {
+    const rnnoise = await ensureRnnoiseInstance();
+    if (rnnoise) {
+      const fSize = rnnoise.frameSize || 480;
+      const frameBuf = new Float32Array(fSize);
+      for (let ch = 0; ch < numCh; ch++) {
+        const state = rnnoise.createDenoiseState();
+        const data = audioBuffer.getChannelData(ch);
+        let smoothGain = 1.0;
+        try {
+          for (let offset = 0; offset + fSize <= len; offset += fSize) {
+            for (let i = 0; i < fSize; i++) {
+              frameBuf[i] = data[offset + i] * 32768.0;
+            }
+            const vadProb = state.processFrame(frameBuf);
+            // Soft VAD gate so non-speech background noise is attenuated by an extra -14dB
+            const targetGate = vadProb > 0.35 ? 1.0 : 0.22 + vadProb * 1.8;
+            smoothGain = smoothGain * 0.75 + Math.min(1.0, targetGate) * 0.25;
+            for (let i = 0; i < fSize; i++) {
+              data[offset + i] = Math.max(
+                -0.98,
+                Math.min(0.98, (frameBuf[i] / 32768.0) * smoothGain)
+              );
+            }
+          }
+        } finally {
+          state.destroy();
+        }
+      }
+    }
+  }
+
+  // Step B: Measure current RMS loudness across channels
   let sumSq = 0;
   for (let ch = 0; ch < numCh; ch++) {
     const data = audioBuffer.getChannelData(ch);
@@ -500,14 +692,15 @@ export function applyBroadcastAudioMasteringToBuffer(
   const targetRms =
     preset === 'broadcast-lufs'
       ? 0.21
-      : preset === 'vocal-boost'
-        ? 0.23
+      : preset === 'vocal-boost' || preset === 'rnnoise-isolate'
+        ? 0.22
         : 0.19;
   const makeupGain = currentRms > 0.001 ? Math.min(3.2, Math.max(0.7, targetRms / currentRms)) : 1.0;
 
-  // 2. Apply single-pole high-pass vocal clarity filter + soft-knee broadcast limiter
+  // Step C: Apply high-pass vocal clarity filter (100Hz for RNNoise isolate, 85Hz for broadcast) + soft-knee limiter
   const sr = audioBuffer.sampleRate || 48000;
-  const hpAlpha = Math.exp((-2 * Math.PI * 85) / sr);
+  const cutoffHz = preset === 'rnnoise-isolate' ? 105 : 85;
+  const hpAlpha = Math.exp((-2 * Math.PI * cutoffHz) / sr);
 
   for (let ch = 0; ch < numCh; ch++) {
     const data = audioBuffer.getChannelData(ch);
@@ -515,7 +708,7 @@ export function applyBroadcastAudioMasteringToBuffer(
     let prevOut = 0;
     for (let i = 0; i < len; i++) {
       const x = data[i];
-      // High-pass sub-85Hz rumble removal
+      // High-pass sub-rumble / AC hum removal
       const hp = hpAlpha * (prevOut + x - prevIn);
       prevIn = x;
       prevOut = hp;
@@ -527,6 +720,105 @@ export function applyBroadcastAudioMasteringToBuffer(
   }
 
   return audioBuffer;
+}
+
+// Live WebAudio Voice Isolation & Mastering Chain for real-time preview on <video>
+interface LiveAudioChain {
+  ctx: AudioContext;
+  source: MediaElementAudioSourceNode;
+  hpFilter: BiquadFilterNode;
+  presenceFilter: BiquadFilterNode;
+  lpFilter: BiquadFilterNode;
+  compressor: DynamicsCompressorNode;
+  gainNode: GainNode;
+}
+const liveVideoAudioChains = new WeakMap<HTMLVideoElement, LiveAudioChain>();
+
+export function syncLivePlaybackAudioMastering(
+  videoEl: HTMLVideoElement | null,
+  preset: AudioMasteringPresetId = 'off'
+): void {
+  if (!videoEl) return;
+  try {
+    let chain = liveVideoAudioChains.get(videoEl);
+    if (!chain) {
+      if (preset === 'off') return; // Don't allocate AudioContext until user selects an isolation/mastering preset
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const source = ctx.createMediaElementSource(videoEl);
+      const hpFilter = ctx.createBiquadFilter();
+      hpFilter.type = 'highpass';
+      const presenceFilter = ctx.createBiquadFilter();
+      presenceFilter.type = 'peaking';
+      const lpFilter = ctx.createBiquadFilter();
+      lpFilter.type = 'lowpass';
+      const compressor = ctx.createDynamicsCompressor();
+      const gainNode = ctx.createGain();
+
+      source
+        .connect(hpFilter)
+        .connect(presenceFilter)
+        .connect(lpFilter)
+        .connect(compressor)
+        .connect(gainNode)
+        .connect(ctx.destination);
+
+      chain = { ctx, source, hpFilter, presenceFilter, lpFilter, compressor, gainNode };
+      liveVideoAudioChains.set(videoEl, chain);
+    }
+
+    if (chain.ctx.state === 'suspended') {
+      chain.ctx.resume().catch(() => {});
+    }
+
+    if (preset === 'off') {
+      chain.hpFilter.frequency.value = 20;
+      chain.presenceFilter.gain.value = 0;
+      chain.lpFilter.frequency.value = 20000;
+      chain.compressor.threshold.value = 0;
+      chain.compressor.ratio.value = 1;
+      chain.gainNode.gain.value = 1.0;
+    } else if (preset === 'rnnoise-isolate') {
+      // Aggressive voice isolation bandpass + vocal presence boost + noise suppression leveling
+      chain.hpFilter.frequency.value = 115;
+      chain.presenceFilter.frequency.value = 3100;
+      chain.presenceFilter.Q.value = 1.1;
+      chain.presenceFilter.gain.value = 5.5;
+      chain.lpFilter.frequency.value = 7800;
+      chain.compressor.threshold.value = -24;
+      chain.compressor.knee.value = 12;
+      chain.compressor.ratio.value = 4.5;
+      chain.gainNode.gain.value = 1.35;
+    } else if (preset === 'podcast-clarity') {
+      chain.hpFilter.frequency.value = 85;
+      chain.presenceFilter.frequency.value = 2800;
+      chain.presenceFilter.Q.value = 0.9;
+      chain.presenceFilter.gain.value = 3.5;
+      chain.lpFilter.frequency.value = 14000;
+      chain.compressor.threshold.value = -20;
+      chain.compressor.ratio.value = 3.0;
+      chain.gainNode.gain.value = 1.2;
+    } else if (preset === 'broadcast-lufs') {
+      chain.hpFilter.frequency.value = 80;
+      chain.presenceFilter.frequency.value = 3000;
+      chain.presenceFilter.gain.value = 2.5;
+      chain.lpFilter.frequency.value = 16000;
+      chain.compressor.threshold.value = -18;
+      chain.compressor.ratio.value = 5.0;
+      chain.gainNode.gain.value = 1.4;
+    } else if (preset === 'vocal-boost') {
+      chain.hpFilter.frequency.value = 95;
+      chain.presenceFilter.frequency.value = 3400;
+      chain.presenceFilter.gain.value = 6.0;
+      chain.lpFilter.frequency.value = 12000;
+      chain.compressor.threshold.value = -22;
+      chain.compressor.ratio.value = 4.0;
+      chain.gainNode.gain.value = 1.45;
+    }
+  } catch (e) {
+    console.warn('Live audio isolation chain warning:', e);
+  }
 }
 
 // ============================================================================
