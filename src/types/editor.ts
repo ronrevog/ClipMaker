@@ -190,6 +190,8 @@ export interface SubCut {
   isBeatCut?: boolean;
   speed?: number;
   layoutMode?: CutLayoutMode;
+  isCompoundClip?: boolean;
+  compoundSubCuts?: SubCut[];
 }
 
 export interface CaptionWordTiming {

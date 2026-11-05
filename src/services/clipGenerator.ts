@@ -27,15 +27,52 @@ export function formatShortTimestamp(sec: number): string {
 }
 
 /**
- * Recomputes contiguous `timelineStart` and `timelineEnd` values (0 .. clip.duration)
- * across all `subCuts` in a clip so the elected clip's timeline is always 100% contiguous.
+ * Recomputes `timelineStart` and `timelineEnd` values across all `subCuts` in a clip.
+ * - When `closeGaps === true` (CapCut Main Track Magnet ON): packs all cuts contiguously (0 .. duration) with zero gaps.
+ * - When `closeGaps === false` (CapCut Main Track Magnet OFF): preserves each cut's `timelineStart` position so
+ *   deleting or moving a cut leaves non-destructive timeline gaps in place without snapping subsequent cuts backward.
  */
-export function recalculateClipTimeline(subCuts: SubCut[]): {
+export function recalculateClipTimeline(
+  subCuts: SubCut[],
+  closeGaps = true,
+  minTotalDuration?: number
+): {
   subCuts: SubCut[];
   duration: number;
   sourceStart: number;
   sourceEnd: number;
 } {
+  if (!closeGaps) {
+    const sorted = [...subCuts].sort((a, b) => a.timelineStart - b.timelineStart);
+    let minCursor = 0;
+    const preserved = sorted.map((cut, idx) => {
+      const segDur = Math.max(0.1, Number((cut.sourceEnd - cut.sourceStart).toFixed(2)));
+      const desiredStart = Number.isFinite(cut.timelineStart) ? Math.max(0, cut.timelineStart) : minCursor;
+      const tlStart = Number(Math.max(minCursor, desiredStart).toFixed(2));
+      const tlEnd = Number((tlStart + segDur).toFixed(2));
+      minCursor = tlEnd;
+      return {
+        ...cut,
+        index: idx + 1,
+        timelineStart: tlStart,
+        timelineEnd: tlEnd,
+      };
+    });
+
+    const firstStart = preserved[0]?.sourceStart ?? 0;
+    const lastEnd = preserved[preserved.length - 1]?.sourceEnd ?? firstStart;
+    const computedDur = Number(
+      Math.max(minCursor, minTotalDuration ?? 0, 0.5).toFixed(2)
+    );
+
+    return {
+      subCuts: preserved,
+      duration: computedDur,
+      sourceStart: firstStart,
+      sourceEnd: lastEnd,
+    };
+  }
+
   let tlCursor = 0;
   const normalized = subCuts.map((cut, idx) => {
     const segDur = Math.max(0.1, Number((cut.sourceEnd - cut.sourceStart).toFixed(2)));
@@ -61,20 +98,138 @@ export function recalculateClipTimeline(subCuts: SubCut[]): {
   };
 }
 
+export interface TimelineGapRange {
+  start: number;
+  end: number;
+  duration: number;
+}
+
+/**
+ * Finds any empty timeline gaps between cuts when CapCut Main Track Magnet is OFF.
+ */
+export function findTimelineGaps(
+  subCuts: SubCut[],
+  totalDuration: number
+): TimelineGapRange[] {
+  if (!subCuts || subCuts.length === 0) return [];
+  const gaps: TimelineGapRange[] = [];
+  let cursor = 0;
+  for (const cut of subCuts) {
+    if (cut.timelineStart > cursor + 0.05) {
+      gaps.push({
+        start: Number(cursor.toFixed(2)),
+        end: Number(cut.timelineStart.toFixed(2)),
+        duration: Number((cut.timelineStart - cursor).toFixed(2)),
+      });
+    }
+    cursor = Math.max(cursor, cut.timelineEnd);
+  }
+  if (totalDuration > cursor + 0.08) {
+    gaps.push({
+      start: Number(cursor.toFixed(2)),
+      end: Number(totalDuration.toFixed(2)),
+      duration: Number((totalDuration - cursor).toFixed(2)),
+    });
+  }
+  return gaps;
+}
+
+/**
+ * CapCut Auto-Snapping solver: snaps a candidate timeline timestamp to the nearest
+ * cut edge, caption edge, overlay edge, In/Out marker, or playhead within `thresholdSec`.
+ */
+export function computeAutoSnapTime(params: {
+  rawClipTime: number;
+  clip: GeneratedClip;
+  playheadClipTime?: number;
+  inMarkerClipTime?: number | null;
+  outMarkerClipTime?: number | null;
+  excludeCutId?: string;
+  thresholdSec?: number;
+}): { snappedTime: number; snapTargetTime: number | null; snapLabel: string | null } {
+  const {
+    rawClipTime,
+    clip,
+    playheadClipTime,
+    inMarkerClipTime,
+    outMarkerClipTime,
+    excludeCutId,
+    thresholdSec = 0.18,
+  } = params;
+
+  const candidates: Array<{ time: number; label: string }> = [
+    { time: 0, label: 'Timeline Start' },
+    { time: clip.duration, label: 'Timeline End' },
+  ];
+
+  if (typeof playheadClipTime === 'number' && Number.isFinite(playheadClipTime)) {
+    candidates.push({ time: playheadClipTime, label: 'Playhead' });
+  }
+  if (typeof inMarkerClipTime === 'number' && Number.isFinite(inMarkerClipTime)) {
+    candidates.push({ time: inMarkerClipTime, label: 'In Marker' });
+  }
+  if (typeof outMarkerClipTime === 'number' && Number.isFinite(outMarkerClipTime)) {
+    candidates.push({ time: outMarkerClipTime, label: 'Out Marker' });
+  }
+
+  for (const cut of clip.subCuts || []) {
+    if (excludeCutId && cut.id === excludeCutId) continue;
+    candidates.push({ time: cut.timelineStart, label: `Cut #${cut.index} Start` });
+    candidates.push({ time: cut.timelineEnd, label: `Cut #${cut.index} End` });
+  }
+
+  for (const cap of clip.captions || []) {
+    candidates.push({ time: cap.start, label: 'Caption Start' });
+    candidates.push({ time: cap.end, label: 'Caption End' });
+  }
+
+  for (const ov of clip.overlayLayers || []) {
+    candidates.push({ time: ov.startTime, label: `${ov.name} Start` });
+    candidates.push({ time: ov.endTime, label: `${ov.name} End` });
+  }
+
+  let bestDist = thresholdSec;
+  let bestCandidate: { time: number; label: string } | null = null;
+
+  for (const cand of candidates) {
+    const dist = Math.abs(rawClipTime - cand.time);
+    if (dist <= bestDist) {
+      bestDist = dist;
+      bestCandidate = cand;
+    }
+  }
+
+  if (bestCandidate) {
+    return {
+      snappedTime: Number(bestCandidate.time.toFixed(2)),
+      snapTargetTime: Number(bestCandidate.time.toFixed(2)),
+      snapLabel: bestCandidate.label,
+    };
+  }
+
+  return {
+    snappedTime: Number(rawClipTime.toFixed(2)),
+    snapTargetTime: null,
+    snapLabel: null,
+  };
+}
+
 /**
  * Converts a position on the elected clip's timeline (`0 .. clip.duration`)
  * into the exact timestamp in the underlying source video, plus the active `SubCut`.
+ * Also reports `isInGap: true` when Main Track Magnet is OFF and `clipTime` falls inside an empty gap.
  */
 export function clipTimeToSourceTime(
   clip: GeneratedClip,
   clipTime: number
-): { sourceTime: number; activeCut: SubCut | undefined; cutIndex: number } {
+): { sourceTime: number; activeCut: SubCut | undefined; cutIndex: number; isInGap?: boolean } {
   const clampedClipTime = Math.max(0, Math.min(clip.duration, clipTime));
   if (!clip.subCuts || clip.subCuts.length === 0) {
     return {
       sourceTime: Number((clip.sourceStart + clampedClipTime).toFixed(3)),
       activeCut: undefined,
       cutIndex: -1,
+      isInGap: false,
     };
   }
 
@@ -82,26 +237,59 @@ export function clipTimeToSourceTime(
     const cut = clip.subCuts[i];
     const isLast = i === clip.subCuts.length - 1;
     if (
-      (clampedClipTime >= cut.timelineStart && clampedClipTime < cut.timelineEnd) ||
-      (isLast && clampedClipTime <= cut.timelineEnd + 0.05)
+      (clampedClipTime >= cut.timelineStart - 0.02 && clampedClipTime < cut.timelineEnd) ||
+      (isLast &&
+        clampedClipTime >= cut.timelineStart - 0.02 &&
+        clampedClipTime <= cut.timelineEnd + 0.05)
     ) {
       const offsetInCut = Math.max(
         0,
         Math.min(cut.sourceEnd - cut.sourceStart, clampedClipTime - cut.timelineStart)
       );
+      if (cut.isCompoundClip && cut.compoundSubCuts && cut.compoundSubCuts.length > 0) {
+        let localCursor = 0;
+        for (const child of cut.compoundSubCuts) {
+          const childDur = Math.max(0.05, child.sourceEnd - child.sourceStart);
+          if (offsetInCut <= localCursor + childDur + 0.02) {
+            const childOffset = Math.max(0, Math.min(childDur, offsetInCut - localCursor));
+            return {
+              sourceTime: Number((child.sourceStart + childOffset).toFixed(3)),
+              activeCut: cut,
+              cutIndex: i,
+              isInGap: false,
+            };
+          }
+          localCursor += childDur;
+        }
+      }
       return {
         sourceTime: Number((cut.sourceStart + offsetInCut).toFixed(3)),
         activeCut: cut,
         cutIndex: i,
+        isInGap: false,
       };
     }
   }
 
+  // If we reach here, `clampedClipTime` is inside a timeline gap (when Main Track Magnet is OFF)
+  const nextCutIdx = clip.subCuts.findIndex((c) => c.timelineStart > clampedClipTime);
+  if (nextCutIdx >= 0) {
+    const nextCut = clip.subCuts[nextCutIdx];
+    return {
+      sourceTime: nextCut.sourceStart,
+      activeCut: undefined,
+      cutIndex: nextCutIdx,
+      isInGap: true,
+    };
+  }
+
   const lastCut = clip.subCuts[clip.subCuts.length - 1];
+  const isPastLast = clampedClipTime > lastCut.timelineEnd + 0.05;
   return {
     sourceTime: lastCut.sourceEnd,
-    activeCut: lastCut,
+    activeCut: isPastLast ? undefined : lastCut,
     cutIndex: clip.subCuts.length - 1,
+    isInGap: isPastLast,
   };
 }
 

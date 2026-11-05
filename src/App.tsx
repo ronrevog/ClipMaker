@@ -21,17 +21,23 @@ import {
   Image as ImageIcon,
   Info,
   Layers,
+  Link2,
   Lock,
   LogOut,
+  Magnet,
   Maximize2,
   Mic,
   Move,
+  Package,
+  PackageOpen,
   Paperclip,
   Pause,
   Play,
   Plus,
+  Redo2,
   RotateCcw,
   Save,
+  ScanLine,
   Scissors,
   Settings,
   Sliders,
@@ -39,6 +45,8 @@ import {
   Square,
   Trash2,
   Type,
+  Undo2,
+  Unlink2,
   Upload,
   UserCheck,
   Video,
@@ -94,6 +102,8 @@ import {
 import {
   buildCondensedEditSubCuts,
   clipTimeToSourceTime,
+  computeAutoSnapTime,
+  findTimelineGaps,
   formatSMPTETimecode,
   generateClipsFromScheme,
   generateClipsWithMultimodalAI,
@@ -268,7 +278,7 @@ export const App: React.FC = () => {
     ensureNeuralObjectDetector().catch(() => {});
   }, []);
 
-  // 4. Razor Blade Tool & In/Out Markers State
+  // 4. Razor Blade Tool, In/Out Markers, Undo/Redo History & CapCut Timeline Controls
   const [isRazorMode, setIsRazorMode] = useState<boolean>(false);
   const [razorHoverClipTime, setRazorHoverClipTime] = useState<number | null>(null);
   const [inMarker, setInMarker] = useState<number | null>(null); // seconds in source video
@@ -276,6 +286,39 @@ export const App: React.FC = () => {
   const [isLoopingInOut, setIsLoopingInOut] = useState<boolean>(false);
   const [markerNotice, setMarkerNotice] = useState<string | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<'playhead' | 'in' | 'out' | null>(null);
+
+  // CapCut Timeline Features: Main Track Magnet, Auto Snapping, Track Linkage, and Preview Axis
+  const [isMainTrackMagnet, setIsMainTrackMagnet] = useState<boolean>(true);
+  const [isAutoSnap, setIsAutoSnap] = useState<boolean>(true);
+  const [isTrackLinkage, setIsTrackLinkage] = useState<boolean>(true);
+  const [isPreviewAxis, setIsPreviewAxis] = useState<boolean>(true);
+  const [previewAxisClipTime, setPreviewAxisClipTime] = useState<number | null>(null);
+  const [previewAxisPct, setPreviewAxisPct] = useState<number | null>(null);
+  const [activeSnapTime, setActiveSnapTime] = useState<number | null>(null);
+  const [activeSnapLabel, setActiveSnapLabel] = useState<string | null>(null);
+  const [draggingCutMove, setDraggingCutMove] = useState<{
+    cutId: string;
+    cutIdx: number;
+    startClientX: number;
+    initialTimelineStart: number;
+  } | null>(null);
+  const previewThumbVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewThumbCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Undo / Redo Timeline History Stack
+  interface TimelineHistoryEntry {
+    fullVideoClip: GeneratedClip | null;
+    generatedClips: GeneratedClip[];
+    activeClipId: string | null;
+    timelineMode: 'full-source' | 'elected-clip';
+    selectedCutIndex: number;
+    inMarker: number | null;
+    outMarker: number | null;
+  }
+  const [undoStack, setUndoStack] = useState<TimelineHistoryEntry[]>([]);
+  const [redoStack, setRedoStack] = useState<TimelineHistoryEntry[]>([]);
+  const lastUndoPushTimeRef = useRef<number>(0);
+  const clipPlayheadTimeRef = useRef<number>(0);
 
   const selectedClipObj =
     generatedClips.find((c) => c.id === activeClipId) || generatedClips[0] || null;
@@ -705,12 +748,21 @@ export const App: React.FC = () => {
     syncLiveObjectLockOnCurrentFrame,
   ]);
 
+  useEffect(() => {
+    clipPlayheadTimeRef.current = clipPlayheadTime;
+  }, [clipPlayheadTime]);
+
   // 60fps synchronization + live Subject Tracking loop while playing
   useEffect(() => {
     if (!isPlaying) return;
     let rafId = 0;
+    let lastTickMs = performance.now();
 
     const tick = () => {
+      const nowMs = performance.now();
+      const dtSec = Math.min(0.1, Math.max(0.001, (nowMs - lastTickMs) / 1000));
+      lastTickMs = nowMs;
+
       const vid = videoRef.current;
       if (vid && activeSource && activeClip) {
         // Always run real-time visual + neural + rigid-object tracker on the live <video> element during playback!
@@ -753,26 +805,56 @@ export const App: React.FC = () => {
           let idx = activeCutIdxRef.current;
           if (idx < 0 || idx >= cuts.length) idx = 0;
           const currentCut = cuts[idx];
+          const curClipT = clipPlayheadTimeRef.current;
 
-          if (vid.currentTime >= currentCut.sourceEnd - 0.03 || vid.ended) {
+          // If playhead is currently inside a timeline gap before `currentCut.timelineStart` (when Main Track Magnet is OFF)
+          if (curClipT < currentCut.timelineStart - 0.03) {
+            const nextClipT = curClipT + dtSec * (activeClip.playbackSpeed ?? 1.0);
+            if (nextClipT >= currentCut.timelineStart) {
+              vid.muted = isMuted;
+              if (Math.abs(vid.currentTime - currentCut.sourceStart) > 0.08) {
+                vid.currentTime = currentCut.sourceStart;
+              }
+              if (vid.paused) vid.play().catch(() => {});
+              setPlayheadTime(currentCut.sourceStart);
+              setClipPlayheadTime(currentCut.timelineStart);
+              clipPlayheadTimeRef.current = currentCut.timelineStart;
+            } else {
+              if (!vid.paused) vid.pause();
+              setClipPlayheadTime(nextClipT);
+              clipPlayheadTimeRef.current = nextClipT;
+            }
+          } else if (vid.currentTime >= currentCut.sourceEnd - 0.03 || vid.ended) {
             const nextIdx = idx + 1;
             if (nextIdx < cuts.length) {
               activeCutIdxRef.current = nextIdx;
               setSelectedCutIndex(nextIdx);
               const nextCut = cuts[nextIdx];
-              if (Math.abs(vid.currentTime - nextCut.sourceStart) > 0.08) {
-                vid.currentTime = nextCut.sourceStart;
+              const gapBeforeNext = nextCut.timelineStart - currentCut.timelineEnd;
+              if (gapBeforeNext > 0.06) {
+                // Enter timeline gap (Magnet OFF)
+                if (!vid.paused) vid.pause();
+                setClipPlayheadTime(currentCut.timelineEnd + 0.01);
+                clipPlayheadTimeRef.current = currentCut.timelineEnd + 0.01;
+              } else {
+                vid.muted = isMuted;
+                if (Math.abs(vid.currentTime - nextCut.sourceStart) > 0.08) {
+                  vid.currentTime = nextCut.sourceStart;
+                }
+                setPlayheadTime(nextCut.sourceStart);
+                setClipPlayheadTime(nextCut.timelineStart);
+                clipPlayheadTimeRef.current = nextCut.timelineStart;
+                if (vid.paused) vid.play().catch(() => {});
               }
-              setPlayheadTime(nextCut.sourceStart);
-              setClipPlayheadTime(nextCut.timelineStart);
-              if (vid.paused) vid.play().catch(() => {});
             } else {
               activeCutIdxRef.current = 0;
               setSelectedCutIndex(0);
               const firstCut = cuts[0];
+              vid.muted = isMuted;
               vid.currentTime = firstCut.sourceStart;
               setPlayheadTime(firstCut.sourceStart);
-              setClipPlayheadTime(0);
+              setClipPlayheadTime(firstCut.timelineStart);
+              clipPlayheadTimeRef.current = firstCut.timelineStart;
               if (vid.paused) vid.play().catch(() => {});
             }
           } else {
@@ -783,6 +865,7 @@ export const App: React.FC = () => {
             );
             setPlayheadTime(vid.currentTime);
             setClipPlayheadTime(cTime);
+            clipPlayheadTimeRef.current = cTime;
           }
         } else {
           if (vid.currentTime >= activeClip.sourceEnd || vid.ended) {
@@ -790,7 +873,9 @@ export const App: React.FC = () => {
             if (vid.paused) vid.play().catch(() => {});
           }
           setPlayheadTime(vid.currentTime);
-          setClipPlayheadTime(Math.max(0, vid.currentTime - activeClip.sourceStart));
+          const cTime = Math.max(0, vid.currentTime - activeClip.sourceStart);
+          setClipPlayheadTime(cTime);
+          clipPlayheadTimeRef.current = cTime;
         }
         render9x16Preview();
       }
@@ -799,7 +884,16 @@ export const App: React.FC = () => {
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [isPlaying, isLoopingInOut, inMarker, outMarker, activeSource, activeClip, render9x16Preview]);
+  }, [
+    isPlaying,
+    isLoopingInOut,
+    inMarker,
+    outMarker,
+    activeSource,
+    activeClip,
+    isMuted,
+    render9x16Preview,
+  ]);
 
   // Play / Pause helper
   const handleTogglePlay = useCallback(
@@ -822,7 +916,8 @@ export const App: React.FC = () => {
             if (clipPlayheadTime >= activeClip.duration - 0.1) {
               activeCutIdxRef.current = 0;
               setSelectedCutIndex(0);
-              setClipPlayheadTime(0);
+              setClipPlayheadTime(cuts[0].timelineStart);
+              clipPlayheadTimeRef.current = cuts[0].timelineStart;
               setPlayheadTime(cuts[0].sourceStart);
               vid.currentTime = cuts[0].sourceStart;
             } else {
@@ -856,9 +951,115 @@ export const App: React.FC = () => {
     ]
   );
 
+  // Push current timeline state onto the Undo History Stack (throttled for continuous slider drags)
+  const recordUndoSnapshot = useCallback(
+    (forceImmediate = false) => {
+      const now = Date.now();
+      if (!forceImmediate && now - lastUndoPushTimeRef.current < 320) {
+        return;
+      }
+      lastUndoPushTimeRef.current = now;
+      const snapshot: TimelineHistoryEntry = {
+        fullVideoClip: fullVideoClip ? JSON.parse(JSON.stringify(fullVideoClip)) : null,
+        generatedClips: JSON.parse(JSON.stringify(generatedClips)),
+        activeClipId,
+        timelineMode,
+        selectedCutIndex,
+        inMarker,
+        outMarker,
+      };
+      setUndoStack((prev) => [...prev.slice(-49), snapshot]);
+      setRedoStack([]);
+    },
+    [fullVideoClip, generatedClips, activeClipId, timelineMode, selectedCutIndex, inMarker, outMarker]
+  );
+
+  // Undo last timeline operation (Shortcut: Ctrl+Z / Cmd+Z)
+  const handleUndo = useCallback(() => {
+    if (undoStack.length === 0) {
+      setMarkerNotice('Nothing to undo');
+      setTimeout(() => setMarkerNotice(null), 1600);
+      return;
+    }
+    const target = undoStack[undoStack.length - 1];
+    const currentSnapshot: TimelineHistoryEntry = {
+      fullVideoClip: fullVideoClip ? JSON.parse(JSON.stringify(fullVideoClip)) : null,
+      generatedClips: JSON.parse(JSON.stringify(generatedClips)),
+      activeClipId,
+      timelineMode,
+      selectedCutIndex,
+      inMarker,
+      outMarker,
+    };
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((prev) => [...prev.slice(-49), currentSnapshot]);
+
+    setFullVideoClip(target.fullVideoClip);
+    setGeneratedClips(target.generatedClips);
+    setActiveClipId(target.activeClipId);
+    setTimelineMode(target.timelineMode);
+    setSelectedCutIndex(target.selectedCutIndex);
+    activeCutIdxRef.current = target.selectedCutIndex;
+    setInMarker(target.inMarker);
+    setOutMarker(target.outMarker);
+    setMarkerNotice(`Undo (${undoStack.length - 1} steps remaining)`);
+    setTimeout(() => setMarkerNotice(null), 1800);
+  }, [
+    undoStack,
+    fullVideoClip,
+    generatedClips,
+    activeClipId,
+    timelineMode,
+    selectedCutIndex,
+    inMarker,
+    outMarker,
+  ]);
+
+  // Redo last undone timeline operation (Shortcut: Ctrl+Y / Ctrl+Shift+Z)
+  const handleRedo = useCallback(() => {
+    if (redoStack.length === 0) {
+      setMarkerNotice('Nothing to redo');
+      setTimeout(() => setMarkerNotice(null), 1600);
+      return;
+    }
+    const target = redoStack[redoStack.length - 1];
+    const currentSnapshot: TimelineHistoryEntry = {
+      fullVideoClip: fullVideoClip ? JSON.parse(JSON.stringify(fullVideoClip)) : null,
+      generatedClips: JSON.parse(JSON.stringify(generatedClips)),
+      activeClipId,
+      timelineMode,
+      selectedCutIndex,
+      inMarker,
+      outMarker,
+    };
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((prev) => [...prev.slice(-49), currentSnapshot]);
+
+    setFullVideoClip(target.fullVideoClip);
+    setGeneratedClips(target.generatedClips);
+    setActiveClipId(target.activeClipId);
+    setTimelineMode(target.timelineMode);
+    setSelectedCutIndex(target.selectedCutIndex);
+    activeCutIdxRef.current = target.selectedCutIndex;
+    setInMarker(target.inMarker);
+    setOutMarker(target.outMarker);
+    setMarkerNotice(`Redo (${redoStack.length - 1} steps remaining)`);
+    setTimeout(() => setMarkerNotice(null), 1800);
+  }, [
+    redoStack,
+    fullVideoClip,
+    generatedClips,
+    activeClipId,
+    timelineMode,
+    selectedCutIndex,
+    inMarker,
+    outMarker,
+  ]);
+
   // Universal updater that modifies either the active GeneratedClip OR the editable Full Video sequence
   const updateActiveTimelineClip = useCallback(
     (updater: (clip: GeneratedClip) => GeneratedClip) => {
+      recordUndoSnapshot(false);
       if (timelineMode === 'full-source') {
         setFullVideoClip((prev) => (prev ? updater(prev) : prev));
       } else if (selectedClipObj) {
@@ -867,7 +1068,7 @@ export const App: React.FC = () => {
         );
       }
     },
-    [timelineMode, selectedClipObj]
+    [timelineMode, selectedClipObj, recordUndoSnapshot]
   );
 
   // Apply a target zoom level across every sub-cut on the timeline (and optionally all generated clips + scheme)
@@ -1435,21 +1636,27 @@ export const App: React.FC = () => {
           didSplit = true;
           newCutIdx = nextSubCuts.length + 1;
           const splitSrc = Number(sourceTime.toFixed(2));
+          const splitTl = Number(targetClipTime.toFixed(2));
           splitSrcTime = splitSrc;
-          const baseLabel = cut.label
-            .replace(/\s*\(Part\s*\d+\)/gi, '')
-            .replace(/^Cut\s*@\s*[\d:.]+\s*/i, '')
-            .trim() || 'Video Cut';
+          const baseLabel =
+            cut.label
+              .replace(/\s*\(Part\s*\d+\)/gi, '')
+              .replace(/^Cut\s*@\s*[\d:.]+\s*/i, '')
+              .trim() || 'Video Cut';
           nextSubCuts.push({
             ...cut,
             id: `${cut.id}-a-${Date.now()}`,
             sourceEnd: splitSrc,
+            timelineStart: cut.timelineStart,
+            timelineEnd: splitTl,
             label: `${baseLabel} (Part 1)`,
           });
           nextSubCuts.push({
             ...cut,
             id: `${cut.id}-b-${Date.now()}`,
             sourceStart: splitSrc,
+            timelineStart: splitTl,
+            timelineEnd: cut.timelineEnd,
             label: `${baseLabel} (Part 2)`,
             zoom: cut.zoom,
             cropBiasX: cut.cropBiasX,
@@ -1469,7 +1676,11 @@ export const App: React.FC = () => {
         return;
       }
 
-      const recalc = recalculateClipTimeline(nextSubCuts);
+      const recalc = recalculateClipTimeline(
+        nextSubCuts,
+        isMainTrackMagnet,
+        activeClip.duration
+      );
       updateActiveTimelineClip((clip) => ({
         ...clip,
         subCuts: recalc.subCuts,
@@ -1491,7 +1702,7 @@ export const App: React.FC = () => {
       );
       setTimeout(() => setMarkerNotice(null), 2600);
     },
-    [activeClip, selectedCutIndex, updateActiveTimelineClip]
+    [activeClip, selectedCutIndex, isMainTrackMagnet, updateActiveTimelineClip]
   );
 
   // Split Active Clip at current playhead position
@@ -1540,23 +1751,73 @@ export const App: React.FC = () => {
       return;
     }
     const insertAfterIdx = Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1));
+    const anchorCut = activeClip.subCuts[insertAfterIdx];
+    const insertAtTl = anchorCut ? anchorCut.timelineEnd : activeClip.duration;
+    const pastedDur = Math.max(0.1, Number((copiedCut.sourceEnd - copiedCut.sourceStart).toFixed(2)));
     const pastedId = `pasted-cut-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const pastedCut: SubCut = {
       ...copiedCut,
       id: pastedId,
+      timelineStart: Number(insertAtTl.toFixed(2)),
+      timelineEnd: Number((insertAtTl + pastedDur).toFixed(2)),
       label: `${copiedCut.label.replace(/\s*\(Copy\)/, '')} (Copy)`,
     };
 
     updateActiveTimelineClip((clip) => {
       const nextList = [...clip.subCuts];
+      // If Magnet is OFF, push downstream cuts that would overlap with the pasted cut
+      for (let i = insertAfterIdx + 1; i < nextList.length; i++) {
+        nextList[i] = {
+          ...nextList[i],
+          timelineStart: Number((nextList[i].timelineStart + pastedDur).toFixed(2)),
+          timelineEnd: Number((nextList[i].timelineEnd + pastedDur).toFixed(2)),
+        };
+      }
       nextList.splice(insertAfterIdx + 1, 0, pastedCut);
-      const recalc = recalculateClipTimeline(nextList);
+      const recalc = recalculateClipTimeline(
+        nextList,
+        isMainTrackMagnet,
+        clip.duration + pastedDur
+      );
+
+      // When Track Linkage is ON, shift downstream V3 Captions & V4 Overlays right by `pastedDur`
+      const nextCaptions = isTrackLinkage
+        ? (clip.captions || []).map((cap) =>
+            cap.start >= insertAtTl - 0.05
+              ? {
+                  ...cap,
+                  start: Number((cap.start + pastedDur).toFixed(2)),
+                  end: Number((cap.end + pastedDur).toFixed(2)),
+                  words: cap.words?.map((w) => ({
+                    ...w,
+                    start: Number((w.start + pastedDur).toFixed(2)),
+                    end: Number((w.end + pastedDur).toFixed(2)),
+                  })),
+                }
+              : cap
+          )
+        : clip.captions;
+
+      const nextOverlays = isTrackLinkage
+        ? (clip.overlayLayers || []).map((ov) =>
+            ov.startTime >= insertAtTl - 0.05
+              ? {
+                  ...ov,
+                  startTime: Number((ov.startTime + pastedDur).toFixed(2)),
+                  endTime: Number((ov.endTime + pastedDur).toFixed(2)),
+                }
+              : ov
+          )
+        : clip.overlayLayers;
+
       return {
         ...clip,
         subCuts: recalc.subCuts,
         duration: recalc.duration,
         sourceStart: recalc.sourceStart,
         sourceEnd: recalc.sourceEnd,
+        captions: nextCaptions,
+        overlayLayers: nextOverlays,
       };
     });
 
@@ -1567,7 +1828,7 @@ export const App: React.FC = () => {
     const dur = (copiedCut.sourceEnd - copiedCut.sourceStart).toFixed(1);
     setMarkerNotice(`Pasted Cut (${dur}s) at position #${newIdx + 1}`);
     setTimeout(() => setMarkerNotice(null), 2600);
-  }, [activeClip, copiedCut, selectedCutIndex, updateActiveTimelineClip]);
+  }, [activeClip, copiedCut, selectedCutIndex, isMainTrackMagnet, isTrackLinkage, updateActiveTimelineClip]);
 
   // Switch a single cut on the timeline between Split-Screen (2 subjects) and Full-Screen (1 subject)
   const handleSetSelectedCutLayoutMode = useCallback(
@@ -1597,16 +1858,256 @@ export const App: React.FC = () => {
     [activeClip, selectedCutIndex, updateActiveTimelineClip]
   );
 
-  // Delete (Ripple-Delete) the currently selected cut on the timeline
+  // Delete the currently selected cut on the timeline:
+  // - When Main Track Magnet is ON: Ripple-Deletes and closes the gap (shifting linked V3/V4 tracks when Linkage is ON).
+  // - When Main Track Magnet is OFF: Lift-Deletes the cut in place, leaving a non-destructive timeline gap without snapping other cuts!
   const handleDeleteSelectedCut = useCallback(() => {
     if (!activeClip || activeClip.subCuts.length <= 1) return;
     const idxToDelete = Math.min(selectedCutIndex, activeClip.subCuts.length - 1);
     const deletedCut = activeClip.subCuts[idxToDelete];
+    const delStart = deletedCut.timelineStart;
+    const delEnd = deletedCut.timelineEnd;
+    const delDur = Math.max(0.1, Number((delEnd - delStart).toFixed(2)));
 
     updateActiveTimelineClip((clip) => {
       if (clip.subCuts.length <= 1) return clip;
       const filtered = clip.subCuts.filter((_, i) => i !== idxToDelete);
-      const recalc = recalculateClipTimeline(filtered);
+      const recalc = recalculateClipTimeline(
+        filtered,
+        isMainTrackMagnet,
+        isMainTrackMagnet ? undefined : clip.duration
+      );
+
+      let nextCaptions = clip.captions || [];
+      let nextOverlays = clip.overlayLayers || [];
+
+      if (isTrackLinkage) {
+        if (isMainTrackMagnet) {
+          // Ripple-shift linked captions and overlays after the deleted cut
+          nextCaptions = nextCaptions
+            .filter((cap) => !(cap.start >= delStart - 0.05 && cap.end <= delEnd + 0.05))
+            .map((cap) =>
+              cap.start >= delEnd - 0.05
+                ? {
+                    ...cap,
+                    start: Number(Math.max(0, cap.start - delDur).toFixed(2)),
+                    end: Number(Math.max(0.2, cap.end - delDur).toFixed(2)),
+                    words: cap.words?.map((w) => ({
+                      ...w,
+                      start: Number(Math.max(0, w.start - delDur).toFixed(2)),
+                      end: Number(Math.max(0.1, w.end - delDur).toFixed(2)),
+                    })),
+                  }
+                : cap
+            );
+          nextOverlays = nextOverlays
+            .filter((ov) => !(ov.startTime >= delStart - 0.05 && ov.endTime <= delEnd + 0.05))
+            .map((ov) =>
+              ov.startTime >= delEnd - 0.05
+                ? {
+                    ...ov,
+                    startTime: Number(Math.max(0, ov.startTime - delDur).toFixed(2)),
+                    endTime: Number(Math.max(0.3, ov.endTime - delDur).toFixed(2)),
+                  }
+                : ov
+            );
+        }
+      }
+
+      return {
+        ...clip,
+        subCuts: recalc.subCuts,
+        duration: recalc.duration,
+        sourceStart: recalc.sourceStart,
+        sourceEnd: recalc.sourceEnd,
+        captions: nextCaptions,
+        overlayLayers: nextOverlays,
+      };
+    });
+
+    const nextIdx = Math.max(0, idxToDelete - 1);
+    setSelectedCutIndex(nextIdx);
+    activeCutIdxRef.current = nextIdx;
+    setMarkerNotice(
+      isMainTrackMagnet
+        ? `Ripple-deleted Cut #${deletedCut.index} (${delDur.toFixed(1)}s closed · Magnet ON)`
+        : `Lift-deleted Cut #${deletedCut.index} (${delDur.toFixed(1)}s gap left in place · Magnet OFF)`
+    );
+    setTimeout(() => setMarkerNotice(null), 2800);
+  }, [activeClip, selectedCutIndex, isMainTrackMagnet, isTrackLinkage, updateActiveTimelineClip]);
+
+  // Toggle CapCut Main Track Magnet (Shortcut: P)
+  const handleToggleMainTrackMagnet = useCallback(() => {
+    setIsMainTrackMagnet((prev) => {
+      const next = !prev;
+      if (next && activeClip && activeClip.subCuts.length > 0) {
+        const gaps = findTimelineGaps(activeClip.subCuts, activeClip.duration);
+        if (gaps.length > 0) {
+          updateActiveTimelineClip((clip) => {
+            const recalc = recalculateClipTimeline(clip.subCuts, true);
+            return {
+              ...clip,
+              subCuts: recalc.subCuts,
+              duration: recalc.duration,
+              sourceStart: recalc.sourceStart,
+              sourceEnd: recalc.sourceEnd,
+            };
+          });
+          setMarkerNotice(
+            `Main Track Magnet ON — automatically closed ${gaps.length} timeline gap${gaps.length === 1 ? '' : 's'}`
+          );
+          setTimeout(() => setMarkerNotice(null), 2600);
+          return next;
+        }
+      }
+      setMarkerNotice(
+        next
+          ? 'Main Track Magnet ON [P] — deleting or moving clips automatically closes gaps'
+          : 'Main Track Magnet OFF [P] — deleting or moving clips leaves freeform gaps without snapping'
+      );
+      setTimeout(() => setMarkerNotice(null), 2600);
+      return next;
+    });
+  }, [activeClip, updateActiveTimelineClip]);
+
+  // Close a single timeline gap when Main Track Magnet is OFF
+  const handleCloseTimelineGap = useCallback(
+    (gapStart: number, gapEnd: number) => {
+      const gapDur = Math.max(0, Number((gapEnd - gapStart).toFixed(2)));
+      if (gapDur <= 0.02) return;
+      updateActiveTimelineClip((clip) => {
+        const shiftedCuts = clip.subCuts.map((c) =>
+          c.timelineStart >= gapEnd - 0.05
+            ? {
+                ...c,
+                timelineStart: Number(Math.max(0, c.timelineStart - gapDur).toFixed(2)),
+                timelineEnd: Number(Math.max(0.1, c.timelineEnd - gapDur).toFixed(2)),
+              }
+            : c
+        );
+        const recalc = recalculateClipTimeline(
+          shiftedCuts,
+          false,
+          Math.max(0.5, clip.duration - gapDur)
+        );
+        const nextCaptions = isTrackLinkage
+          ? (clip.captions || []).map((cap) =>
+              cap.start >= gapEnd - 0.05
+                ? {
+                    ...cap,
+                    start: Number(Math.max(0, cap.start - gapDur).toFixed(2)),
+                    end: Number(Math.max(0.2, cap.end - gapDur).toFixed(2)),
+                  }
+                : cap
+            )
+          : clip.captions;
+        const nextOverlays = isTrackLinkage
+          ? (clip.overlayLayers || []).map((ov) =>
+              ov.startTime >= gapEnd - 0.05
+                ? {
+                    ...ov,
+                    startTime: Number(Math.max(0, ov.startTime - gapDur).toFixed(2)),
+                    endTime: Number(Math.max(0.3, ov.endTime - gapDur).toFixed(2)),
+                  }
+                : ov
+            )
+          : clip.overlayLayers;
+        return {
+          ...clip,
+          subCuts: recalc.subCuts,
+          duration: recalc.duration,
+          sourceStart: recalc.sourceStart,
+          sourceEnd: recalc.sourceEnd,
+          captions: nextCaptions,
+          overlayLayers: nextOverlays,
+        };
+      });
+      setMarkerNotice(`Closed ${gapDur.toFixed(1)}s timeline gap`);
+      setTimeout(() => setMarkerNotice(null), 2200);
+    },
+    [isTrackLinkage, updateActiveTimelineClip]
+  );
+
+  // Create or Unpack a CapCut Compound Clip (Shortcut: Alt+G)
+  const handleToggleCompoundClip = useCallback(() => {
+    if (!activeClip || activeClip.subCuts.length === 0) return;
+    const selIdx = Math.min(selectedCutIndex, activeClip.subCuts.length - 1);
+    const selCut = activeClip.subCuts[selIdx];
+
+    // If the selected cut is already a Compound Clip, unpack it back into its child cuts!
+    if (selCut?.isCompoundClip && selCut.compoundSubCuts && selCut.compoundSubCuts.length > 0) {
+      updateActiveTimelineClip((clip) => {
+        const nextList: SubCut[] = [];
+        let cursor = selCut.timelineStart;
+        for (let i = 0; i < clip.subCuts.length; i++) {
+          if (i === selIdx) {
+            for (const child of selCut.compoundSubCuts || []) {
+              const dur = Math.max(0.1, Number((child.sourceEnd - child.sourceStart).toFixed(2)));
+              nextList.push({
+                ...child,
+                timelineStart: Number(cursor.toFixed(2)),
+                timelineEnd: Number((cursor + dur).toFixed(2)),
+              });
+              cursor += dur;
+            }
+          } else {
+            nextList.push(clip.subCuts[i]);
+          }
+        }
+        const recalc = recalculateClipTimeline(nextList, isMainTrackMagnet, clip.duration);
+        return {
+          ...clip,
+          subCuts: recalc.subCuts,
+          duration: recalc.duration,
+          sourceStart: recalc.sourceStart,
+          sourceEnd: recalc.sourceEnd,
+        };
+      });
+      setMarkerNotice(
+        `Unpacked Compound Clip into ${selCut.compoundSubCuts.length} individual cuts`
+      );
+      setTimeout(() => setMarkerNotice(null), 2600);
+      return;
+    }
+
+    if (activeClip.subCuts.length < 2) {
+      setMarkerNotice(
+        'Split the video into 2 or more cuts first [B], then press Compound Clip [Alt+G] to group them'
+      );
+      setTimeout(() => setMarkerNotice(null), 2800);
+      return;
+    }
+
+    // Group the selected cut and its adjacent cut (or all cuts if 2 cuts) into a Compound Clip
+    const startIdx = selIdx < activeClip.subCuts.length - 1 ? selIdx : Math.max(0, selIdx - 1);
+    const endIdx = Math.min(activeClip.subCuts.length - 1, startIdx + 1);
+    const groupCuts = activeClip.subCuts.slice(startIdx, endIdx + 1);
+    const totalDur = groupCuts.reduce(
+      (acc, c) => acc + Math.max(0.1, c.sourceEnd - c.sourceStart),
+      0
+    );
+    const first = groupCuts[0];
+    const last = groupCuts[groupCuts.length - 1];
+
+    const compoundCut: SubCut = {
+      ...first,
+      id: `compound-${Date.now()}`,
+      sourceStart: first.sourceStart,
+      sourceEnd: Number((first.sourceStart + totalDur).toFixed(2)),
+      timelineStart: first.timelineStart,
+      timelineEnd: Number((first.timelineStart + totalDur).toFixed(2)),
+      label: `Compound Clip (${groupCuts.length} Cuts · ${formatSMPTETimecode(first.sourceStart).slice(3, 8)}–${formatSMPTETimecode(last.sourceEnd).slice(3, 8)})`,
+      isCompoundClip: true,
+      compoundSubCuts: groupCuts.map((c) => ({ ...c })),
+    };
+
+    updateActiveTimelineClip((clip) => {
+      const nextList = [
+        ...clip.subCuts.slice(0, startIdx),
+        compoundCut,
+        ...clip.subCuts.slice(endIdx + 1),
+      ];
+      const recalc = recalculateClipTimeline(nextList, isMainTrackMagnet, clip.duration);
       return {
         ...clip,
         subCuts: recalc.subCuts,
@@ -1616,14 +2117,13 @@ export const App: React.FC = () => {
       };
     });
 
-    const nextIdx = Math.max(0, idxToDelete - 1);
-    setSelectedCutIndex(nextIdx);
-    activeCutIdxRef.current = nextIdx;
+    setSelectedCutIndex(startIdx);
+    activeCutIdxRef.current = startIdx;
     setMarkerNotice(
-      `Deleted Cut #${deletedCut.index} (${(deletedCut.sourceEnd - deletedCut.sourceStart).toFixed(1)}s removed)`
+      `Created Compound Clip from Cuts #${startIdx + 1}–#${endIdx + 1} (${totalDur.toFixed(1)}s) [Alt+G to unpack]`
     );
-    setTimeout(() => setMarkerNotice(null), 2500);
-  }, [activeClip, selectedCutIndex, updateActiveTimelineClip]);
+    setTimeout(() => setMarkerNotice(null), 2800);
+  }, [activeClip, selectedCutIndex, isMainTrackMagnet, updateActiveTimelineClip]);
 
   // Save the currently selected cut on the timeline as its own standalone 9:16 Clip in the list
   const handleSaveSelectedCutAsClip = useCallback(() => {
@@ -1964,7 +2464,8 @@ export const App: React.FC = () => {
   );
 
   // SOTA Keyboard Shortcuts powered by react-hotkeys-hook + Global NLE Hotkey Engine:
-  // Space / K = Play/Pause | S = Stop | B / X / Ctrl+K = Split Cut | Ctrl+C = Copy Cut | Ctrl+V = Paste Cut | 1 = Full Screen | 2 = Split-Screen | 3 = Speaker A | 4 = Speaker B
+  // Space / K = Play/Pause | S = Stop | B / X / Ctrl+K = Split Cut | Ctrl+C = Copy Cut | Ctrl+V = Paste Cut
+  // Ctrl+Z = Undo | Ctrl+Y / Ctrl+Shift+Z = Redo | P = Magnet | N = Auto Snap | L = Linkage | V = Preview Axis | Alt+G = Compound Clip
   useHotkeys(
     'ctrl+k, meta+k',
     (e) => {
@@ -1974,6 +2475,174 @@ export const App: React.FC = () => {
     { enableOnFormTags: false },
     [handleSplitAtPlayhead]
   );
+
+  // Dragging a cut horizontally on V1 when Main Track Magnet is OFF (or Alt+Drag)
+  useEffect(() => {
+    if (!draggingCutMove || !activeClip) return;
+    const onMove = (e: MouseEvent) => {
+      if (!timelineBarRef.current) return;
+      const rect = timelineBarRef.current.getBoundingClientRect();
+      if (rect.width < 40) return;
+      const deltaPx = e.clientX - draggingCutMove.startClientX;
+      const deltaSec = (deltaPx / rect.width) * activeClip.duration;
+      let rawTargetStart = Math.max(0, draggingCutMove.initialTimelineStart + deltaSec);
+
+      if (isAutoSnap) {
+        const snapRes = computeAutoSnapTime({
+          rawClipTime: rawTargetStart,
+          clip: activeClip,
+          playheadClipTime: clipPlayheadTime,
+          inMarkerClipTime: inMarker !== null ? sourceTimeToClipTime(activeClip, inMarker) : null,
+          outMarkerClipTime: outMarker !== null ? sourceTimeToClipTime(activeClip, outMarker) : null,
+          excludeCutId: draggingCutMove.cutId,
+          thresholdSec: 0.2,
+        });
+        rawTargetStart = snapRes.snappedTime;
+        setActiveSnapTime(snapRes.snapTargetTime);
+        setActiveSnapLabel(snapRes.snapLabel);
+      } else {
+        setActiveSnapTime(null);
+        setActiveSnapLabel(null);
+      }
+
+      const targetStart = Number(rawTargetStart.toFixed(2));
+      const updateFn = (clip: GeneratedClip): GeneratedClip => {
+        const targetCut = clip.subCuts.find((c) => c.id === draggingCutMove.cutId);
+        if (!targetCut) return clip;
+        const cutDur = Math.max(0.1, Number((targetCut.sourceEnd - targetCut.sourceStart).toFixed(2)));
+        const shiftDelta = Number((targetStart - targetCut.timelineStart).toFixed(2));
+        if (Math.abs(shiftDelta) < 0.02) return clip;
+
+        const oldStart = targetCut.timelineStart;
+        const oldEnd = targetCut.timelineEnd;
+
+        const updatedCuts = clip.subCuts.map((c) =>
+          c.id === draggingCutMove.cutId
+            ? {
+                ...c,
+                timelineStart: targetStart,
+                timelineEnd: Number((targetStart + cutDur).toFixed(2)),
+              }
+            : c
+        );
+        const recalc = recalculateClipTimeline(
+          updatedCuts,
+          false,
+          Math.max(clip.duration, targetStart + cutDur)
+        );
+
+        const nextCaptions = isTrackLinkage
+          ? (clip.captions || []).map((cap) =>
+              cap.start >= oldStart - 0.05 && cap.end <= oldEnd + 0.05
+                ? {
+                    ...cap,
+                    start: Number(Math.max(0, cap.start + shiftDelta).toFixed(2)),
+                    end: Number(Math.max(0.2, cap.end + shiftDelta).toFixed(2)),
+                    words: cap.words?.map((w) => ({
+                      ...w,
+                      start: Number(Math.max(0, w.start + shiftDelta).toFixed(2)),
+                      end: Number(Math.max(0.1, w.end + shiftDelta).toFixed(2)),
+                    })),
+                  }
+                : cap
+            )
+          : clip.captions;
+
+        const nextOverlays = isTrackLinkage
+          ? (clip.overlayLayers || []).map((ov) =>
+              ov.startTime >= oldStart - 0.05 && ov.endTime <= oldEnd + 0.05
+                ? {
+                    ...ov,
+                    startTime: Number(Math.max(0, ov.startTime + shiftDelta).toFixed(2)),
+                    endTime: Number(Math.max(0.3, ov.endTime + shiftDelta).toFixed(2)),
+                  }
+                : ov
+            )
+          : clip.overlayLayers;
+
+        return {
+          ...clip,
+          subCuts: recalc.subCuts,
+          duration: recalc.duration,
+          sourceStart: recalc.sourceStart,
+          sourceEnd: recalc.sourceEnd,
+          captions: nextCaptions,
+          overlayLayers: nextOverlays,
+        };
+      };
+
+      if (timelineMode === 'full-source') {
+        setFullVideoClip((prev) => (prev ? updateFn(prev) : prev));
+      } else if (selectedClipObj) {
+        setGeneratedClips((prev) =>
+          prev.map((c) => (c.id === selectedClipObj.id ? updateFn(c) : c))
+        );
+      }
+    };
+    const onUp = () => {
+      setDraggingCutMove(null);
+      setActiveSnapTime(null);
+      setActiveSnapLabel(null);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [
+    draggingCutMove,
+    activeClip,
+    isAutoSnap,
+    isTrackLinkage,
+    clipPlayheadTime,
+    inMarker,
+    outMarker,
+    timelineMode,
+    selectedClipObj,
+  ]);
+
+  // Render live video thumbnail inside the CapCut Preview Axis hover card
+  useEffect(() => {
+    if (!isPreviewAxis || previewAxisClipTime === null || !activeClip || !activeSource?.url) {
+      return;
+    }
+    const thumbVid = previewThumbVideoRef.current;
+    const thumbCan = previewThumbCanvasRef.current;
+    if (!thumbVid || !thumbCan) return;
+
+    const { sourceTime, isInGap } = clipTimeToSourceTime(activeClip, previewAxisClipTime);
+    const ctx = thumbCan.getContext('2d');
+    if (isInGap && ctx) {
+      ctx.fillStyle = '#09090b';
+      ctx.fillRect(0, 0, thumbCan.width, thumbCan.height);
+      return;
+    }
+
+    const drawThumb = () => {
+      const c = previewThumbCanvasRef.current;
+      const v = previewThumbVideoRef.current;
+      if (!c || !v || v.readyState < 2) return;
+      const g = c.getContext('2d');
+      if (!g) return;
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(v, 0, 0, c.width, c.height);
+    };
+
+    if (Math.abs(thumbVid.currentTime - sourceTime) > 0.08) {
+      const onSeeked = () => {
+        thumbVid.removeEventListener('seeked', onSeeked);
+        drawThumb();
+      };
+      thumbVid.addEventListener('seeked', onSeeked);
+      try {
+        thumbVid.currentTime = sourceTime;
+      } catch {}
+    } else {
+      drawThumb();
+    }
+  }, [isPreviewAxis, previewAxisClipTime, activeClip, activeSource?.url]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1985,6 +2654,29 @@ export const App: React.FC = () => {
         tag === 'SELECT' ||
         target?.isContentEditable
       ) {
+        return;
+      }
+
+      // Undo (Ctrl+Z / Cmd+Z) and Redo (Ctrl+Y / Ctrl+Shift+Z / Cmd+Shift+Z)
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+
+      // Compound Clip (Alt+G)
+      if (e.altKey && e.code === 'KeyG') {
+        e.preventDefault();
+        handleToggleCompoundClip();
         return;
       }
 
@@ -2016,6 +2708,49 @@ export const App: React.FC = () => {
       } else if (e.code === 'KeyB' || e.code === 'KeyX') {
         e.preventDefault();
         handleSplitAtPlayhead();
+      } else if (e.code === 'KeyP') {
+        e.preventDefault();
+        handleToggleMainTrackMagnet();
+      } else if (e.code === 'KeyN') {
+        e.preventDefault();
+        setIsAutoSnap((prev) => {
+          const next = !prev;
+          setMarkerNotice(
+            next
+              ? 'Auto Snapping ON [N] — aligns clips & playhead to cut edges'
+              : 'Auto Snapping OFF [N] — freeform sub-frame positioning'
+          );
+          setTimeout(() => setMarkerNotice(null), 2200);
+          return next;
+        });
+      } else if (e.code === 'KeyL') {
+        e.preventDefault();
+        setIsTrackLinkage((prev) => {
+          const next = !prev;
+          setMarkerNotice(
+            next
+              ? 'Track Linkage ON [L] — V3 Captions & V4 Overlays move with V1 cuts'
+              : 'Track Linkage OFF [L] — V1 cuts move independently of V3/V4 overlays'
+          );
+          setTimeout(() => setMarkerNotice(null), 2200);
+          return next;
+        });
+      } else if (e.code === 'KeyV') {
+        e.preventDefault();
+        setIsPreviewAxis((prev) => {
+          const next = !prev;
+          if (!next) {
+            setPreviewAxisClipTime(null);
+            setPreviewAxisPct(null);
+          }
+          setMarkerNotice(
+            next
+              ? 'Preview Axis ON [V] — hover timeline to scrub thumbnail previews'
+              : 'Preview Axis OFF [V]'
+          );
+          setTimeout(() => setMarkerNotice(null), 2000);
+          return next;
+        });
       } else if (e.code === 'Digit1') {
         e.preventDefault();
         handleSetSelectedCutLayoutMode('full-single');
@@ -2056,6 +2791,10 @@ export const App: React.FC = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [
+    handleUndo,
+    handleRedo,
+    handleToggleCompoundClip,
+    handleToggleMainTrackMagnet,
     handleTogglePlay,
     handleStopPlayback,
     handleSplitAtPlayhead,
@@ -3772,7 +4511,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Pointer drag handler on the Timeline Bar
+  // Pointer drag handler on the Timeline Bar (with Auto Snapping support)
   const updateTimelineDragAtClientX = (
     clientX: number,
     handle: 'playhead' | 'in' | 'out'
@@ -3780,7 +4519,32 @@ export const App: React.FC = () => {
     if (!timelineBarRef.current || !activeClip || !activeSource) return;
     const rect = timelineBarRef.current.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const timelineSec = ratio * activeClip.duration;
+    let timelineSec = ratio * activeClip.duration;
+
+    if (isAutoSnap) {
+      const snapRes = computeAutoSnapTime({
+        rawClipTime: timelineSec,
+        clip: activeClip,
+        playheadClipTime: handle === 'playhead' ? undefined : clipPlayheadTime,
+        inMarkerClipTime:
+          activeClip && inMarker !== null ? sourceTimeToClipTime(activeClip, inMarker) : null,
+        outMarkerClipTime:
+          activeClip && outMarker !== null ? sourceTimeToClipTime(activeClip, outMarker) : null,
+        thresholdSec: Math.max(0.08, Math.min(0.28, activeClip.duration * 0.015)),
+      });
+      if (snapRes.snapTargetTime !== null) {
+        timelineSec = snapRes.snappedTime;
+        setActiveSnapTime(snapRes.snapTargetTime);
+        setActiveSnapLabel(snapRes.snapLabel);
+      } else {
+        setActiveSnapTime(null);
+        setActiveSnapLabel(null);
+      }
+    } else {
+      setActiveSnapTime(null);
+      setActiveSnapLabel(null);
+    }
+
     const mappedSourceSec = Number(
       clipTimeToSourceTime(activeClip, timelineSec).sourceTime.toFixed(2)
     );
@@ -3809,6 +4573,10 @@ export const App: React.FC = () => {
 
   const activeFocusStrategy: SubjectFocusStrategy =
     activeClip?.subjectFocus?.strategy || 'auto-salient';
+
+  const timelineGaps = activeClip
+    ? findTimelineGaps(activeClip.subCuts, activeClip.duration)
+    : [];
 
   // Compute In/Out Marker positions in % on the current timeline when visible
   const inMarkerTimelineSec =
@@ -3947,15 +4715,43 @@ export const App: React.FC = () => {
             </button>
 
             {activeSource && (
-              <button
-                className="btn"
-                onClick={() => handleSaveCurrentProject(currentProjectName, false)}
-                disabled={isSavingProject}
-                title="Save project"
-              >
-                <Save size={13} />
-                {isSavingProject ? 'Saving' : 'Save'}
-              </button>
+              <>
+                <button
+                  className="btn"
+                  onClick={handleUndo}
+                  disabled={undoStack.length === 0}
+                  title={
+                    undoStack.length > 0
+                      ? `Undo last timeline action (${undoStack.length} steps) [Ctrl+Z]`
+                      : 'Nothing to undo [Ctrl+Z]'
+                  }
+                >
+                  <Undo2 size={13} />
+                  Undo{undoStack.length > 0 ? ` (${undoStack.length})` : ''}
+                </button>
+                <button
+                  className="btn"
+                  onClick={handleRedo}
+                  disabled={redoStack.length === 0}
+                  title={
+                    redoStack.length > 0
+                      ? `Redo timeline action (${redoStack.length} steps) [Ctrl+Y]`
+                      : 'Nothing to redo [Ctrl+Y]'
+                  }
+                >
+                  <Redo2 size={13} />
+                  Redo{redoStack.length > 0 ? ` (${redoStack.length})` : ''}
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => handleSaveCurrentProject(currentProjectName, false)}
+                  disabled={isSavingProject}
+                  title="Save project"
+                >
+                  <Save size={13} />
+                  {isSavingProject ? 'Saving' : 'Save'}
+                </button>
+              </>
             )}
 
             <div className="studio-divider-v" />
@@ -6670,6 +7466,145 @@ export const App: React.FC = () => {
 
                     <div className="studio-divider-v" />
 
+                    {/* Undo / Redo Timeline Controls */}
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={handleUndo}
+                      disabled={undoStack.length === 0}
+                      title={
+                        undoStack.length > 0
+                          ? `Undo last timeline action (${undoStack.length} steps) [Shortcut: Ctrl+Z]`
+                          : 'Nothing to undo [Shortcut: Ctrl+Z]'
+                      }
+                    >
+                      <Undo2 size={11} />
+                      Undo{undoStack.length > 0 ? ` (${undoStack.length})` : ''}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={handleRedo}
+                      disabled={redoStack.length === 0}
+                      title={
+                        redoStack.length > 0
+                          ? `Redo timeline action (${redoStack.length} steps) [Shortcut: Ctrl+Y]`
+                          : 'Nothing to redo [Shortcut: Ctrl+Y]'
+                      }
+                    >
+                      <Redo2 size={11} />
+                      Redo{redoStack.length > 0 ? ` (${redoStack.length})` : ''}
+                    </button>
+
+                    <div className="studio-divider-v" />
+
+                    {/* CapCut Timeline Features: Main Track Magnet, Auto Snapping, Linkage, Preview Axis, Compound Clip */}
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${isMainTrackMagnet ? 'btn-active' : ''}`}
+                      style={
+                        !isMainTrackMagnet
+                          ? {
+                              borderColor: 'rgba(245, 158, 11, 0.7)',
+                              background: 'rgba(245, 158, 11, 0.14)',
+                              color: '#fcd34d',
+                            }
+                          : undefined
+                      }
+                      onClick={handleToggleMainTrackMagnet}
+                      title="Main Track Magnet [Shortcut: P] — ON: automatically closes gaps on V1 when cuts are deleted or moved. OFF: leaves gaps in place and lets you drag cuts freely."
+                    >
+                      <Magnet size={11} />
+                      Magnet: {isMainTrackMagnet ? 'ON' : 'OFF'} [P]
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${isAutoSnap ? 'btn-active' : ''}`}
+                      onClick={() => {
+                        setIsAutoSnap((prev) => {
+                          const next = !prev;
+                          setMarkerNotice(
+                            next
+                              ? 'Auto Snapping: ON — playhead & cuts align to edges [N]'
+                              : 'Auto Snapping: OFF — free un-snapped positioning [N]'
+                          );
+                          setTimeout(() => setMarkerNotice(null), 2400);
+                          return next;
+                        });
+                      }}
+                      title="Auto Snapping [Shortcut: N] — Aligns playhead and clips to neighboring cut, caption, and overlay edges to prevent tiny gaps."
+                    >
+                      <Magnet size={11} />
+                      Snap: {isAutoSnap ? 'ON' : 'OFF'} [N]
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${isTrackLinkage ? 'btn-active' : ''}`}
+                      onClick={() => {
+                        setIsTrackLinkage((prev) => {
+                          const next = !prev;
+                          setMarkerNotice(
+                            next
+                              ? 'Track Linkage: ON — V3 Captions & V4 Overlays move with main V1 cuts [L]'
+                              : 'Track Linkage: OFF — V1 cuts move independently of V3/V4 layers [L]'
+                          );
+                          setTimeout(() => setMarkerNotice(null), 2400);
+                          return next;
+                        });
+                      }}
+                      title="Linkage [Shortcut: L] — Attaches secondary elements (V3 captions, V4 overlays) to the main track so they shift together when cuts are moved or deleted."
+                    >
+                      {isTrackLinkage ? <Link2 size={11} /> : <Unlink2 size={11} />}
+                      Linkage: {isTrackLinkage ? 'ON' : 'OFF'} [L]
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${isPreviewAxis ? 'btn-active' : ''}`}
+                      onClick={() => {
+                        setIsPreviewAxis((prev) => {
+                          const next = !prev;
+                          if (!next) setPreviewAxisClipTime(null);
+                          setMarkerNotice(
+                            next
+                              ? 'Preview Axis: ON — hover across timeline for live thumbnail scrubbing [V]'
+                              : 'Preview Axis: OFF [V]'
+                          );
+                          setTimeout(() => setMarkerNotice(null), 2400);
+                          return next;
+                        });
+                      }}
+                      title="Preview Axis [Shortcut: V] — Scrub live video thumbnail previews across the timeline on hover."
+                    >
+                      <ScanLine size={11} />
+                      Preview Axis: {isPreviewAxis ? 'ON' : 'OFF'} [V]
+                    </button>
+
+                    {(activeClip.subCuts.length > 1 || inspectedCut?.isCompoundClip) && (
+                      <button
+                        type="button"
+                        className={`btn btn-sm ${inspectedCut?.isCompoundClip ? 'btn-active' : ''}`}
+                        onClick={handleToggleCompoundClip}
+                        title={
+                          inspectedCut?.isCompoundClip
+                            ? 'Break apart this Compound Clip back into individual cuts [Shortcut: Alt+G]'
+                            : 'Group all timeline cuts into a single Compound Clip [Shortcut: Alt+G]'
+                        }
+                      >
+                        {inspectedCut?.isCompoundClip ? (
+                          <PackageOpen size={11} />
+                        ) : (
+                          <Package size={11} />
+                        )}
+                        {inspectedCut?.isCompoundClip ? 'Unpack Compound [Alt+G]' : 'Compound Clip [Alt+G]'}
+                      </button>
+                    )}
+
+                    <div className="studio-divider-v" />
+
                     <button
                       type="button"
                       className={`btn btn-sm ${isRazorMode ? 'btn-active' : ''}`}
@@ -6978,7 +7913,121 @@ export const App: React.FC = () => {
                 </div>
 
                 {/* MULTI-TRACK NLE VIDEO LAYER STACK (V4 Overlays, V3 Captions, V2 Speaker B, V1 Video Cuts, A1 Audio) */}
-                <div className="nle-layer-stack">
+                <div
+                  className="nle-layer-stack"
+                  style={{ position: 'relative' }}
+                  onMouseMove={(e) => {
+                    if (!isPreviewAxis || !timelineBarRef.current || !activeClip) return;
+                    const rect = timelineBarRef.current.getBoundingClientRect();
+                    if (e.clientX < rect.left || e.clientX > rect.right) {
+                      setPreviewAxisClipTime(null);
+                      return;
+                    }
+                    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                    setPreviewAxisPct(ratio * 100);
+                    setPreviewAxisClipTime(Number((ratio * activeClip.duration).toFixed(2)));
+                  }}
+                  onMouseLeave={() => {
+                    setPreviewAxisClipTime(null);
+                  }}
+                >
+                  {/* Hidden Video Element for Preview Axis Live Thumbnail Scrubbing */}
+                  {activeSource.url && (
+                    <video
+                      ref={previewThumbVideoRef}
+                      src={activeSource.url}
+                      muted
+                      playsInline
+                      preload="metadata"
+                      style={{ display: 'none' }}
+                    />
+                  )}
+
+                  {/* Floating Preview Axis Thumbnail Scrub Card & Snap Badge */}
+                  {isPreviewAxis && previewAxisClipTime !== null && previewAxisPct !== null && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: `calc(108px + (100% - 108px) * ${(previewAxisPct / 100).toFixed(4)})`,
+                        top: 2,
+                        transform:
+                          previewAxisPct > 86
+                            ? 'translateX(-95%)'
+                            : previewAxisPct < 14
+                              ? 'translateX(-5%)'
+                              : 'translateX(-50%)',
+                        zIndex: 40,
+                        pointerEvents: 'none',
+                        background: 'rgba(9, 9, 11, 0.94)',
+                        border: '1px solid rgba(250, 204, 21, 0.75)',
+                        borderRadius: 5,
+                        padding: 4,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        gap: 3,
+                        boxShadow: '0 6px 18px rgba(0, 0, 0, 0.65)',
+                      }}
+                    >
+                      <canvas
+                        ref={previewThumbCanvasRef}
+                        width={96}
+                        height={54}
+                        style={{
+                          width: 96,
+                          height: 54,
+                          borderRadius: 3,
+                          background: '#050507',
+                          display: 'block',
+                        }}
+                      />
+                      <span
+                        style={{
+                          fontSize: 9.5,
+                          fontFamily: 'var(--font-mono)',
+                          fontWeight: 700,
+                          color: '#fde047',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {previewAxisClipTime.toFixed(2)}s
+                        {(() => {
+                          const mapped = clipTimeToSourceTime(activeClip, previewAxisClipTime);
+                          return mapped.isInGap
+                            ? ' · [GAP]'
+                            : ` · Cut #${mapped.cutIndex + 1}`;
+                        })()}
+                      </span>
+                    </div>
+                  )}
+
+                  {activeSnapTime !== null && activeSnapLabel && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: `calc(108px + (100% - 108px) * ${Math.max(
+                          0,
+                          Math.min(1, activeSnapTime / Math.max(0.1, activeClip.duration))
+                        ).toFixed(4)})`,
+                        top: 2,
+                        transform: 'translateX(-50%)',
+                        zIndex: 42,
+                        pointerEvents: 'none',
+                        background: 'rgba(6, 182, 212, 0.95)',
+                        color: '#042f2e',
+                        fontSize: 9,
+                        fontFamily: 'var(--font-mono)',
+                        fontWeight: 700,
+                        padding: '1px 6px',
+                        borderRadius: 3,
+                        whiteSpace: 'nowrap',
+                        boxShadow: '0 2px 8px rgba(6, 182, 212, 0.45)',
+                      }}
+                    >
+                      SNAP: {activeSnapLabel} ({activeSnapTime.toFixed(2)}s)
+                    </div>
+                  )}
+
                   {/* LAYER V4: TEXT & GRAPHIC OVERLAYS */}
                   <div
                     className={`nle-layer-row ${selectedLayerTrack === 'v4-overlay' ? 'is-selected' : ''}`}
@@ -7266,20 +8315,22 @@ export const App: React.FC = () => {
                     <div
                       className="nle-layer-track"
                       style={{
-                        display: 'flex',
-                        flexDirection: 'row',
-                        alignItems: 'stretch',
-                        flexWrap: 'nowrap',
+                        position: 'relative',
                       }}
                       onMouseDown={(e) => {
                         setSelectedLayerTrack('v2-speaker');
                         updateTimelineDragAtClientX(e.clientX, 'playhead');
                       }}
                     >
-                      {activeClip.subCuts.length > 1 ? (
+                      {activeClip.subCuts.length > 1 || timelineGaps.length > 0 ? (
                         activeClip.subCuts.map((cut, idx) => {
+                          const totalDur = Math.max(0.5, activeClip.duration);
                           const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
-                          const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
+                          const leftPct = Math.max(0, Math.min(99.5, (cut.timelineStart / totalDur) * 100));
+                          const widthPct = Math.max(
+                            0.5,
+                            Math.min(100 - leftPct, (cutDur / totalDur) * 100)
+                          );
                           const cMode = cut.layoutMode || 'inherit';
                           const isSplit =
                             cMode === 'split-screen' ||
@@ -7297,9 +8348,11 @@ export const App: React.FC = () => {
                                 updateTimelineDragAtClientX(e.clientX, 'playhead');
                               }}
                               style={{
+                                position: 'absolute',
+                                left: `${leftPct}%`,
                                 width: `${widthPct}%`,
-                                height: '100%',
-                                flexShrink: 0,
+                                top: 0,
+                                bottom: 0,
                                 display: 'flex',
                                 alignItems: 'center',
                                 padding: '0 6px',
@@ -7398,8 +8451,21 @@ export const App: React.FC = () => {
                         <span style={{ color: '#3b82f6', fontFamily: 'var(--font-mono)' }}>V1</span>
                         <span>Video Cuts</span>
                       </span>
-                      <span className="badge-subtle" style={{ fontSize: 9, padding: '0 4px' }}>
+                      <span
+                        className="badge-subtle"
+                        style={{
+                          fontSize: 9,
+                          padding: '0 4px',
+                          color: !isMainTrackMagnet ? '#fcd34d' : undefined,
+                        }}
+                        title={
+                          isMainTrackMagnet
+                            ? 'Main Track Magnet ON — gaps close automatically'
+                            : 'Main Track Magnet OFF — gaps stay open and cuts can be dragged freely'
+                        }
+                      >
                         {activeClip.subCuts.length}
+                        {!isMainTrackMagnet ? ' · FREE' : ''}
                       </span>
                     </div>
 
@@ -7407,11 +8473,12 @@ export const App: React.FC = () => {
                       ref={timelineBarRef}
                       className="nle-layer-track"
                       style={{
-                        cursor: isRazorMode ? 'crosshair' : 'pointer',
-                        display: 'flex',
-                        flexDirection: 'row',
-                        alignItems: 'stretch',
-                        flexWrap: 'nowrap',
+                        cursor: isRazorMode
+                          ? 'crosshair'
+                          : draggingCutMove
+                            ? 'grabbing'
+                            : 'pointer',
+                        position: 'relative',
                       }}
                       onMouseDown={(e) => {
                         setSelectedLayerTrack('v1-video');
@@ -7437,15 +8504,81 @@ export const App: React.FC = () => {
                         if (!draggingHandle || isRazorMode) return;
                         updateTimelineDragAtClientX(e.clientX, draggingHandle);
                       }}
-                      onMouseUp={() => setDraggingHandle(null)}
+                      onMouseUp={() => {
+                        setDraggingHandle(null);
+                        setActiveSnapTime(null);
+                        setActiveSnapLabel(null);
+                      }}
                       onMouseLeave={() => {
                         setDraggingHandle(null);
                         setRazorHoverClipTime(null);
+                        setActiveSnapTime(null);
+                        setActiveSnapLabel(null);
                       }}
                     >
+                      {/* Render Empty Timeline Gaps when Main Track Magnet is OFF */}
+                      {timelineGaps.map((gap, gIdx) => {
+                        const totalDur = Math.max(0.5, activeClip.duration);
+                        const leftPct = Math.max(0, Math.min(99.5, (gap.start / totalDur) * 100));
+                        const widthPct = Math.max(
+                          0.8,
+                          Math.min(100 - leftPct, (gap.duration / totalDur) * 100)
+                        );
+                        return (
+                          <div
+                            key={`gap-${gIdx}-${gap.start}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCloseTimelineGap(gap.start, gap.end);
+                            }}
+                            style={{
+                              position: 'absolute',
+                              left: `${leftPct}%`,
+                              width: `${widthPct}%`,
+                              top: 0,
+                              bottom: 0,
+                              background:
+                                'repeating-linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0px, rgba(245, 158, 11, 0.12) 6px, rgba(9, 9, 11, 0.65) 6px, rgba(9, 9, 11, 0.65) 12px)',
+                              borderLeft: '1px dashed rgba(245, 158, 11, 0.6)',
+                              borderRight: '1px dashed rgba(245, 158, 11, 0.6)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: 4,
+                              padding: '0 4px',
+                              overflow: 'hidden',
+                              cursor: 'pointer',
+                              zIndex: 4,
+                            }}
+                            title={`Timeline Gap (${gap.duration.toFixed(2)}s from ${gap.start.toFixed(2)}s to ${gap.end.toFixed(2)}s) — Click to ripple-close this gap`}
+                          >
+                            <span
+                              style={{
+                                fontSize: 8.5,
+                                fontFamily: 'var(--font-mono)',
+                                fontWeight: 700,
+                                color: '#fcd34d',
+                                background: 'rgba(9, 9, 11, 0.85)',
+                                border: '1px solid rgba(245, 158, 11, 0.5)',
+                                borderRadius: 3,
+                                padding: '1px 5px',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              Gap {gap.duration.toFixed(1)}s · Close
+                            </span>
+                          </div>
+                        );
+                      })}
+
                       {activeClip.subCuts.map((cut, idx) => {
+                        const totalDur = Math.max(0.5, activeClip.duration);
                         const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
-                        const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
+                        const leftPct = Math.max(0, Math.min(99.5, (cut.timelineStart / totalDur) * 100));
+                        const widthPct = Math.max(
+                          0.5,
+                          Math.min(100 - leftPct, (cutDur / totalDur) * 100)
+                        );
                         const isCurrentCut =
                           clipPlayheadTime >= cut.timelineStart - 0.02 &&
                           clipPlayheadTime <= cut.timelineEnd + 0.02;
@@ -7468,33 +8601,80 @@ export const App: React.FC = () => {
                               }
                               setSelectedCutIndex(idx);
                               activeCutIdxRef.current = idx;
-                              setDraggingHandle('playhead');
+
+                              // When Main Track Magnet is OFF (or holding Alt), allow dragging the cut horizontally to reposition it!
+                              if ((!isMainTrackMagnet || e.altKey) && activeClip) {
+                                recordUndoSnapshot(true);
+                                setDraggingCutMove({
+                                  cutId: cut.id,
+                                  cutIdx: idx,
+                                  startClientX: e.clientX,
+                                  initialTimelineStart: cut.timelineStart,
+                                });
+                              } else {
+                                setDraggingHandle('playhead');
+                              }
                               updateTimelineDragAtClientX(e.clientX, 'playhead');
                             }}
                             style={{
+                              position: 'absolute',
+                              left: `${leftPct}%`,
                               width: `${widthPct}%`,
-                              height: '100%',
-                              flexShrink: 0,
-                              position: 'relative',
-                              background: isSelectedCut
-                                ? 'linear-gradient(180deg, rgba(59, 130, 246, 0.46) 0%, rgba(37, 99, 235, 0.32) 100%)'
-                                : isCurrentCut
-                                  ? 'linear-gradient(180deg, rgba(37, 99, 235, 0.34) 0%, rgba(29, 78, 216, 0.24) 100%)'
-                                  : 'linear-gradient(180deg, rgba(30, 64, 175, 0.28) 0%, rgba(23, 37, 84, 0.32) 100%)',
+                              top: 0,
+                              bottom: 0,
+                              cursor: isRazorMode
+                                ? 'crosshair'
+                                : !isMainTrackMagnet
+                                  ? 'grab'
+                                  : 'pointer',
+                              background: cut.isCompoundClip
+                                ? isSelectedCut
+                                  ? 'linear-gradient(180deg, rgba(16, 185, 129, 0.48) 0%, rgba(5, 150, 105, 0.34) 100%)'
+                                  : 'linear-gradient(180deg, rgba(16, 185, 129, 0.34) 0%, rgba(6, 95, 70, 0.28) 100%)'
+                                : isSelectedCut
+                                  ? 'linear-gradient(180deg, rgba(59, 130, 246, 0.46) 0%, rgba(37, 99, 235, 0.32) 100%)'
+                                  : isCurrentCut
+                                    ? 'linear-gradient(180deg, rgba(37, 99, 235, 0.34) 0%, rgba(29, 78, 216, 0.24) 100%)'
+                                    : 'linear-gradient(180deg, rgba(30, 64, 175, 0.28) 0%, rgba(23, 37, 84, 0.32) 100%)',
                               borderRight:
                                 idx < activeClip.subCuts.length - 1
                                   ? '2px solid #60a5fa'
                                   : 'none',
                               boxShadow: isSelectedCut
-                                ? 'inset 0 0 0 1.5px #93c5fd'
+                                ? cut.isCompoundClip
+                                  ? 'inset 0 0 0 1.5px #6ee7b7'
+                                  : 'inset 0 0 0 1.5px #93c5fd'
                                 : 'inset 0 0 0 1px rgba(59, 130, 246, 0.32)',
                               display: 'flex',
                               alignItems: 'center',
                               gap: 5,
                               padding: '0 6px',
                               overflow: 'hidden',
+                              zIndex: isSelectedCut ? 6 : 5,
                             }}
+                            title={
+                              !isMainTrackMagnet
+                                ? `Cut #${idx + 1} (${cut.timelineStart.toFixed(2)}s - ${cut.timelineEnd.toFixed(2)}s) — Drag horizontally to reposition`
+                                : `Cut #${idx + 1} (${cut.timelineStart.toFixed(2)}s - ${cut.timelineEnd.toFixed(2)}s) — Hold Alt + Drag or turn Magnet OFF [P] to move freely`
+                            }
                           >
+                            {cut.isCompoundClip && (
+                              <span
+                                style={{
+                                  fontSize: 8,
+                                  fontFamily: 'var(--font-mono)',
+                                  fontWeight: 700,
+                                  padding: '1px 4px',
+                                  borderRadius: 3,
+                                  background: '#10b981',
+                                  color: '#022c22',
+                                  flexShrink: 0,
+                                  pointerEvents: 'none',
+                                }}
+                              >
+                                COMPOUND ({cut.compoundSubCuts?.length || 1})
+                              </span>
+                            )}
                             {activeClip.subCuts.length > 1 && (
                               <span
                                 style={{
@@ -7535,7 +8715,7 @@ export const App: React.FC = () => {
                                     : cut.layoutMode === 'full-speaker-b'
                                       ? '[SPK B] '
                                       : ''}
-                              {timelineMode === 'full-source' && activeClip.subCuts.length === 1
+                              {timelineMode === 'full-source' && activeClip.subCuts.length === 1 && !cut.isCompoundClip
                                 ? activeSource.name
                                 : `${cut.label} (${cutDur.toFixed(1)}s)`}
                             </span>
@@ -7564,7 +8744,7 @@ export const App: React.FC = () => {
                                 borderTop: '1px solid rgba(250, 250, 250, 0.5)',
                                 borderBottom: '1px solid rgba(250, 250, 250, 0.5)',
                                 pointerEvents: 'none',
-                                zIndex: 5,
+                                zIndex: 7,
                               }}
                             />
                             <div
@@ -7613,6 +8793,49 @@ export const App: React.FC = () => {
                             </div>
                           </>
                         )}
+
+                      {/* Auto Snap Alignment Guide Line */}
+                      {activeSnapTime !== null && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            left: `${Math.max(
+                              0,
+                              Math.min(100, (activeSnapTime / Math.max(0.1, activeClip.duration)) * 100)
+                            )}%`,
+                            top: 0,
+                            bottom: 0,
+                            width: 2,
+                            background: '#06b6d4',
+                            boxShadow: '0 0 8px rgba(6, 182, 212, 0.95)',
+                            pointerEvents: 'none',
+                            zIndex: 18,
+                          }}
+                        />
+                      )}
+
+                      {/* Preview Axis Hover Scrub Line */}
+                      {isPreviewAxis && previewAxisClipTime !== null && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            left: `${Math.max(
+                              0,
+                              Math.min(
+                                100,
+                                (previewAxisClipTime / Math.max(0.1, activeClip.duration)) * 100
+                              )
+                            )}%`,
+                            top: 0,
+                            bottom: 0,
+                            width: 1.5,
+                            background: '#facc15',
+                            boxShadow: '0 0 6px rgba(250, 204, 21, 0.85)',
+                            pointerEvents: 'none',
+                            zIndex: 16,
+                          }}
+                        />
+                      )}
 
                       {/* Playhead Needle */}
                       <div
@@ -7670,17 +8893,14 @@ export const App: React.FC = () => {
                     <div
                       className="nle-layer-track"
                       style={{
-                        display: 'flex',
-                        flexDirection: 'row',
-                        alignItems: 'stretch',
-                        flexWrap: 'nowrap',
+                        position: 'relative',
                       }}
                       onMouseDown={(e) => {
                         setSelectedLayerTrack('a1-audio');
                         updateTimelineDragAtClientX(e.clientX, 'playhead');
                       }}
                     >
-                      {activeClip.subCuts.length === 1 && activeSource.url ? (
+                      {activeClip.subCuts.length === 1 && timelineGaps.length === 0 && activeSource.url ? (
                         <div style={{ width: '100%', height: '100%', position: 'relative' }}>
                           <WavesurferAudioTrack
                             audioUrl={activeSource.url}
@@ -7693,8 +8913,13 @@ export const App: React.FC = () => {
                         </div>
                       ) : (
                         activeClip.subCuts.map((cut, idx) => {
+                          const totalDur = Math.max(0.5, activeClip.duration);
                           const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
-                          const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
+                          const leftPct = Math.max(0, Math.min(99.5, (cut.timelineStart / totalDur) * 100));
+                          const widthPct = Math.max(
+                            0.5,
+                            Math.min(100 - leftPct, (cutDur / totalDur) * 100)
+                          );
                           const totalBuckets = activeSource.waveformPeaks.length;
                           const bStart = Math.max(
                             0,
@@ -7711,9 +8936,11 @@ export const App: React.FC = () => {
                             <div
                               key={`audio-${cut.id}`}
                               style={{
+                                position: 'absolute',
+                                left: `${leftPct}%`,
                                 width: `${widthPct}%`,
-                                height: '100%',
-                                flexShrink: 0,
+                                top: 0,
+                                bottom: 0,
                                 display: 'flex',
                                 alignItems: 'flex-end',
                                 gap: 1,

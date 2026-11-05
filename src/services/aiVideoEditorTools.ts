@@ -1067,6 +1067,8 @@ export function renderComposite9x16Frame(params: {
   const activeCutAtPlayhead = activeClip?.subCuts?.find(
     (c) => clipPlayheadTime >= c.timelineStart - 0.03 && clipPlayheadTime <= c.timelineEnd + 0.03
   );
+  const isTimelineGap =
+    Boolean(activeClip?.subCuts && activeClip.subCuts.length > 0) && !activeCutAtPlayhead;
   const cutLayout = activeCutAtPlayhead?.layoutMode || 'inherit';
   const effectiveFillStyle: BackgroundFillStyle =
     cutLayout === 'split-screen'
@@ -1094,8 +1096,8 @@ export function renderComposite9x16Frame(params: {
         ? Math.max(0.06, Math.min(0.94, activeClip?.speakerBY ?? defaultYForSpeakers))
         : cropY;
 
-  // MODE A: 2-Speaker Top/Bottom 9:16 Podcast Split-Screen
-  if (effectiveFillStyle === 'split-screen') {
+  // MODE A: 2-Speaker Top/Bottom 9:16 Podcast Split-Screen (skipped when playhead is inside an empty timeline gap)
+  if (!isTimelineGap && effectiveFillStyle === 'split-screen') {
     const splitRatio = Math.max(0.25, Math.min(0.75, activeClip?.splitScreenRatio ?? 0.5));
     const topH = Math.floor(outH * splitRatio);
     const bottomH = outH - topH;
@@ -1166,7 +1168,7 @@ export function renderComposite9x16Frame(params: {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
     ctx.fillRect(0, topH - 0.5, outW, 1);
     ctx.restore();
-  } else {
+  } else if (!isTimelineGap) {
     // MODE B: Single-Frame 9:16 Crop OR Wide Letterbox with Blurred / Black Background Fill
     const crop = computeDistortionFree9x16Crop(
       vw,
