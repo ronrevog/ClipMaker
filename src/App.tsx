@@ -7184,21 +7184,21 @@ export const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* ALWAYS-VISIBLE CAMERA, SUBJECT FOCUS, TARGET LOCK & 2-SPEAKER BAR */}
+                {/* ALWAYS-VISIBLE CAMERA, SUBJECT FOCUS, TARGET LOCK, 9:16 FILL & ZOOM BAR */}
                 <div
                   style={{
-                    padding: '6px 10px',
+                    padding: '5px 10px',
                     background: 'var(--bg-panel-header)',
                     borderTop: '1px solid var(--border-subtle)',
                     display: 'flex',
                     alignItems: 'center',
-                    justifyContent: 'space-between',
+                    justifyContent: 'flex-start',
                     flexWrap: 'wrap',
                     gap: 8,
                     flexShrink: 0,
                   }}
                 >
-                  {/* Left: Subject Focus Modes (Auto Target, Lock Subject, Center Lock, Auto Face, Left, Right, Motion) + 2-Speaker Toggles */}
+                  {/* Group 1: Subject Focus Modes + Focus Lock Keyframe Pills */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span className="section-label">Subject Focus</span>
                     <div className="shadcn-tabs-list">
@@ -7376,28 +7376,74 @@ export const App: React.FC = () => {
 
                     <ShadcnSeparator orientation="vertical" />
 
-                    {/* 1-Click 2-Speaker ON/OFF Toggle Pills right alongside Subject Focus */}
-                    <TogglePill
-                      checked={isCurrentCutSplitScreen}
-                      onCheckedChange={() => handleTwoSpeakerMode('split-screen')}
-                      icon={<Layers size={11} />}
-                      label="2-Speaker Split"
-                      activeColor="amber"
-                      title="Click to toggle 2-Speaker Split-Screen ON or OFF (Top: Speaker A · Bottom: Speaker B)"
-                    />
+                    {/* 9:16 Fill Mode Quick Switcher (Blur Fill | Black Bars | Split-Screen) */}
+                    <div className="shadcn-tabs-list" title="9:16 Background Fill Style">
+                      {(
+                        [
+                          { id: 'blurred', label: 'Blur Fill' },
+                          { id: 'black', label: 'Black Bars' },
+                          { id: 'split-screen', label: 'Split-Screen' },
+                        ] as Array<{ id: BackgroundFillStyle; label: string }>
+                      ).map((opt) => {
+                        const cutMode = inspectedCut?.layoutMode || 'inherit';
+                        const clipFill = activeClip?.backgroundFillStyle ?? 'blurred';
+                        const effectiveCutFill: BackgroundFillStyle =
+                          cutMode === 'split-screen'
+                            ? 'split-screen'
+                            : cutMode === 'full-single' ||
+                                cutMode === 'full-speaker-a' ||
+                                cutMode === 'full-speaker-b'
+                              ? clipFill === 'black'
+                                ? 'black'
+                                : 'blurred'
+                              : clipFill;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            className="shadcn-tabs-trigger"
+                            style={{ padding: '0 8px' }}
+                            data-state={effectiveCutFill === opt.id ? 'active' : 'inactive'}
+                            onClick={() => {
+                              if (opt.id === 'split-screen') {
+                                handleTwoSpeakerMode('split-screen');
+                              } else {
+                                const targetIdx = activeClip
+                                  ? Math.min(
+                                      selectedCutIndex,
+                                      Math.max(0, activeClip.subCuts.length - 1)
+                                    )
+                                  : 0;
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  backgroundFillStyle: opt.id,
+                                  subCuts: c.subCuts.map((sc, idx) =>
+                                    c.subCuts.length === 1 ||
+                                    idx === targetIdx ||
+                                    sc.layoutMode === 'split-screen'
+                                      ? {
+                                          ...sc,
+                                          layoutMode:
+                                            sc.layoutMode === 'full-speaker-a' ||
+                                            sc.layoutMode === 'full-speaker-b'
+                                              ? sc.layoutMode
+                                              : 'full-single',
+                                        }
+                                      : sc
+                                  ),
+                                }));
+                              }
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
 
-                    <TogglePill
-                      checked={isTwoSpeakerAutoSwitch}
-                      onCheckedChange={() => handleTwoSpeakerMode('auto-switch')}
-                      icon={<UserCheck size={11} />}
-                      label="Auto-Switch 2-Spk"
-                      activeColor="blue"
-                      title="Click to toggle 2-Speaker Active Speaker Auto-Switch ON or OFF"
-                    />
-                  </div>
+                    <ShadcnSeparator orientation="vertical" />
 
-                  {/* Right: Zoom Slider + 1:1 / Fit + Fine X Offset + All Clips Toggle */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    {/* Zoom Slider + 1:1 / Fit + Fine X Offset + All Clips Toggle */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                       <span className="section-label">Zoom</span>
                       <input
@@ -7412,7 +7458,7 @@ export const App: React.FC = () => {
                             applyFocusToAllClips
                           )
                         }
-                        style={{ width: 64 }}
+                        style={{ width: 60 }}
                       />
                       <span className="badge-subtle" style={{ minWidth: 38, textAlign: 'center' }}>
                         {currentZoom.toFixed(2)}x
@@ -7464,7 +7510,7 @@ export const App: React.FC = () => {
                         onDoubleClick={() =>
                           updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: 0 }))
                         }
-                        style={{ width: 52 }}
+                        style={{ width: 48 }}
                         title="Fine horizontal crop offset (double-click to reset to 0)"
                       />
                       <span className="badge-subtle" style={{ minWidth: 32, textAlign: 'center' }}>
@@ -7497,7 +7543,7 @@ export const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* SHADCN/UI UNIFIED STUDIO COMMAND DECK (2-Speaker & Cut Layout, AI Tools & Audio, Captions & Overlays) */}
+                {/* SINGLE-ROW INLINE SHADCN/UI STUDIO COMMAND DECK (Zero Dead Space — Tab Triggers + Active Controls on One Line) */}
                 <ShadcnTabs
                   value={studioDeckTab === 'framing' ? 'speakers' : studioDeckTab}
                   onValueChange={(v) => {
@@ -7507,165 +7553,46 @@ export const App: React.FC = () => {
                   className="shadcn-command-deck"
                 >
                   <div className="shadcn-command-deck-header">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <ShadcnTabsList>
-                        <ShadcnTabsTrigger value="speakers" title="2-Speaker Split-Screen, Lip-Sync Switch & Per-Cut Layouts">
-                          <Layers size={11} />
-                          <span>2-Speaker & Cut Layout</span>
-                        </ShadcnTabsTrigger>
-                        <ShadcnTabsTrigger value="ai-audio" title="RNNoise Voice Isolation, Strip Dead Air, Beat-Sync, FX & Speed">
-                          <Wand2 size={11} />
-                          <span>AI Tools & Voice Isolation</span>
-                        </ShadcnTabsTrigger>
-                        <ShadcnTabsTrigger value="layers" title="Captions (V3), Text/Lottie Overlays (V4) & Transcript Editor">
-                          <Type size={11} />
-                          <span>Captions (V3) & Overlays (V4)</span>
-                        </ShadcnTabsTrigger>
-                      </ShadcnTabsList>
-
-                      {/* Live Status Summary Pills */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                        <ShadcnBadge variant="secondary">
-                          {isCurrentCutSplitScreen
-                            ? '2-Speaker Split'
-                            : isTwoSpeakerAutoSwitch
-                              ? '2-Speaker Auto-Switch'
-                              : activeClip?.subjectFocus?.label || 'Auto Target'}
-                        </ShadcnBadge>
-                        {activeClip?.audioMasteringPreset === 'rnnoise-isolate' && (
-                          <ShadcnBadge variant="emerald">RNNoise Isolated</ShadcnBadge>
-                        )}
-                        {inspectedCut && activeClip && activeClip.subCuts.length > 1 && (
-                          <ShadcnBadge variant="blue">
-                            Cut #{inspectedCut.index} ·{' '}
-                            {isCurrentCutSplitScreen
-                              ? 'Split'
-                              : inspectedCut.layoutMode === 'full-speaker-a'
-                                ? 'Spk A'
-                                : inspectedCut.layoutMode === 'full-speaker-b'
-                                  ? 'Spk B'
-                                  : 'Full'}
-                          </ShadcnBadge>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Right Quick Access: 9:16 Fill Mode & Deck Collapse Toggle */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {/* 9:16 Fill Mode Quick Switcher */}
-                      <div className="shadcn-tabs-list">
-                        {(
-                          [
-                            { id: 'blurred', label: 'Blur Fill' },
-                            { id: 'black', label: 'Black Bars' },
-                            { id: 'split-screen', label: 'Split-Screen' },
-                          ] as Array<{ id: BackgroundFillStyle; label: string }>
-                        ).map((opt) => {
-                          const cutMode = inspectedCut?.layoutMode || 'inherit';
-                          const clipFill = activeClip?.backgroundFillStyle ?? 'blurred';
-                          const effectiveCutFill: BackgroundFillStyle =
-                            cutMode === 'split-screen'
-                              ? 'split-screen'
-                              : cutMode === 'full-single' ||
-                                  cutMode === 'full-speaker-a' ||
-                                  cutMode === 'full-speaker-b'
-                                ? clipFill === 'black'
-                                  ? 'black'
-                                  : 'blurred'
-                                : clipFill;
-                          return (
-                            <button
-                              key={opt.id}
-                              type="button"
-                              className="shadcn-tabs-trigger"
-                              style={{ padding: '0 8px', height: 22 }}
-                              data-state={effectiveCutFill === opt.id ? 'active' : 'inactive'}
-                              onClick={() => {
-                                if (opt.id === 'split-screen') {
-                                  handleTwoSpeakerMode('split-screen');
-                                } else {
-                                  const targetIdx = activeClip
-                                    ? Math.min(
-                                        selectedCutIndex,
-                                        Math.max(0, activeClip.subCuts.length - 1)
-                                      )
-                                    : 0;
-                                  updateActiveTimelineClip((c) => ({
-                                    ...c,
-                                    backgroundFillStyle: opt.id,
-                                    subCuts: c.subCuts.map((sc, idx) =>
-                                      c.subCuts.length === 1 ||
-                                      idx === targetIdx ||
-                                      sc.layoutMode === 'split-screen'
-                                        ? {
-                                            ...sc,
-                                            layoutMode:
-                                              sc.layoutMode === 'full-speaker-a' ||
-                                              sc.layoutMode === 'full-speaker-b'
-                                                ? sc.layoutMode
-                                                : 'full-single',
-                                          }
-                                        : sc
-                                    ),
-                                  }));
-                                }
-                              }}
-                            >
-                              {opt.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        onClick={() => setIsStudioDeckCollapsed((v) => !v)}
-                        title={
-                          isStudioDeckCollapsed
-                            ? 'Expand Studio Command Deck'
-                            : 'Collapse Studio Command Deck to maximize video monitor space'
-                        }
-                      >
-                        {isStudioDeckCollapsed ? <ChevronDown size={11} /> : <ChevronUp size={11} />}
-                        {isStudioDeckCollapsed ? 'Expand Deck' : 'Compact'}
-                      </button>
-                    </div>
+                    <ShadcnTabsList>
+                      <ShadcnTabsTrigger value="speakers" title="2-Speaker Split-Screen, Lip-Sync Switch & Per-Cut Layouts">
+                        <Layers size={11} />
+                        <span>2-Speaker & Cut Layout</span>
+                      </ShadcnTabsTrigger>
+                      <ShadcnTabsTrigger value="ai-audio" title="RNNoise Voice Isolation, Strip Dead Air, Beat-Sync, FX & Speed">
+                        <Wand2 size={11} />
+                        <span>AI Tools & Voice Isolation</span>
+                      </ShadcnTabsTrigger>
+                      <ShadcnTabsTrigger value="layers" title="Captions (V3), Text/Lottie Overlays (V4) & Transcript Editor">
+                        <Type size={11} />
+                        <span>Captions (V3) & Overlays (V4)</span>
+                      </ShadcnTabsTrigger>
+                    </ShadcnTabsList>
                   </div>
+
+                  <ShadcnSeparator orientation="vertical" />
 
                   {!isStudioDeckCollapsed && (
                     <>
-                      {/* TAB 1: 2-SPEAKER PODCAST SPLIT-SCREEN, AUTO-SWITCH & PER-CUT LAYOUTS */}
+                      {/* TAB 1: 2-SPEAKER PODCAST SPLIT-SCREEN, AUTO-SWITCH, PER-CUT LAYOUTS & SPEAKER A/B SCALES */}
                       <ShadcnTabsContent value="speakers" className="shadcn-command-deck-body">
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                          <span className="section-label">2-Speaker Modes</span>
-                          <button
-                            type="button"
-                            className={`btn btn-sm ${
-                              isCurrentCutSplitScreen ? 'btn-active' : ''
-                            }`}
-                            onClick={() => handleTwoSpeakerMode('split-screen')}
+                          <TogglePill
+                            checked={isCurrentCutSplitScreen}
+                            onCheckedChange={() => handleTwoSpeakerMode('split-screen')}
+                            icon={<Layers size={11} />}
+                            label="2-Speaker Split"
+                            activeColor="amber"
                             title="Click to toggle 2-Speaker Split-Screen ON or OFF (Top: Speaker A · Bottom: Speaker B)"
-                          >
-                            <Layers size={11} />
-                            {isCurrentCutSplitScreen
-                              ? '2-Speaker Split: ON (Click to Turn Off)'
-                              : '2-Speaker Split-Screen'}
-                          </button>
+                          />
 
-                          <button
-                            type="button"
-                            className={`btn btn-sm ${
-                              isTwoSpeakerAutoSwitch ? 'btn-active' : ''
-                            }`}
-                            onClick={() => handleTwoSpeakerMode('auto-switch')}
-                            title="Click to toggle 2-Speaker Auto-Switch ON or OFF (alternates Speaker A & Speaker B cuts)"
-                          >
-                            <UserCheck size={11} />
-                            {isTwoSpeakerAutoSwitch
-                              ? 'Auto-Switch: ON (Click to Turn Off)'
-                              : 'Auto-Switch Speakers'}
-                          </button>
+                          <TogglePill
+                            checked={isTwoSpeakerAutoSwitch}
+                            onCheckedChange={() => handleTwoSpeakerMode('auto-switch')}
+                            icon={<UserCheck size={11} />}
+                            label="Auto-Switch 2-Spk"
+                            activeColor="blue"
+                            title="Click to toggle 2-Speaker Active Speaker Auto-Switch ON or OFF"
+                          />
 
                           <button
                             type="button"
@@ -7692,7 +7619,7 @@ export const App: React.FC = () => {
                           {inspectedCut && (
                             <>
                               <ShadcnSeparator orientation="vertical" />
-                              <span className="section-label">Cut #{inspectedCut.index} Layout</span>
+                              <span className="section-label">Cut #{inspectedCut.index}</span>
                               <div
                                 className="shadcn-tabs-list"
                                 title="Set Layout for Selected Cut (#1=Full, #2=Split, #3=Spk A, #4=Spk B)"
@@ -7746,10 +7673,10 @@ export const App: React.FC = () => {
                               </div>
                             </>
                           )}
-                        </div>
 
-                        {/* Speaker A / B Scale & Split Ratio Sliders */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <ShadcnSeparator orientation="vertical" />
+
+                          {/* Speaker A / B Scale & Split Ratio Sliders right alongside the 2-Speaker buttons */}
                           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                             <span className="section-label">Spk A</span>
                             <input
@@ -7762,7 +7689,7 @@ export const App: React.FC = () => {
                                 const val = parseFloat(e.target.value);
                                 updateActiveTimelineClip((c) => ({ ...c, speakerAScale: val }));
                               }}
-                              style={{ width: 52 }}
+                              style={{ width: 48 }}
                             />
                             <span className="badge-subtle">
                               {(activeClip?.speakerAScale ?? 1.0).toFixed(2)}x
@@ -7780,7 +7707,7 @@ export const App: React.FC = () => {
                                 const val = parseFloat(e.target.value);
                                 updateActiveTimelineClip((c) => ({ ...c, speakerBScale: val }));
                               }}
-                              style={{ width: 52 }}
+                              style={{ width: 48 }}
                             />
                             <span className="badge-subtle">
                               {(activeClip?.speakerBScale ?? 1.0).toFixed(2)}x
@@ -7800,7 +7727,7 @@ export const App: React.FC = () => {
                                   splitScreenRatio: parseFloat(e.target.value),
                                 }))
                               }
-                              style={{ width: 52 }}
+                              style={{ width: 48 }}
                             />
                             <span className="badge-subtle">
                               {Math.round((activeClip?.splitScreenRatio ?? 0.5) * 100)}%
