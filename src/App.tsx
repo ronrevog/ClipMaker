@@ -2880,6 +2880,8 @@ export const App: React.FC = () => {
       };
 
       setGeneratedClips((prev) => [newClip, ...prev]);
+      setLeftSidebarOpen(true);
+      setLeftSidebarTab((prev) => (prev === 'generator' ? 'clips' : prev));
 
       if (switchToNewClip) {
         setTimelineMode('elected-clip');
@@ -2896,7 +2898,7 @@ export const App: React.FC = () => {
           `Created & opened "${newClip.name}" (${recalc.duration.toFixed(1)}s) on timeline!`
         );
       } else {
-        setMarkerNotice(`Added "${newClip.name}" (${recalc.duration.toFixed(1)}s) to clips list!`);
+        setMarkerNotice(`Added "${newClip.name}" (${recalc.duration.toFixed(1)}s) to Left Clips Bin!`);
       }
       setTimeout(() => setMarkerNotice(null), 3000);
     },
@@ -9495,15 +9497,10 @@ export const App: React.FC = () => {
                         </button>
                         <button
                           className="btn btn-sm btn-primary"
-                          onClick={() => handleCreateClipFromMarkers(true, false)}
+                          onClick={() => handleCreateClipFromMarkers(false, false)}
+                          title="Save In/Out marked range as a clip in the Left Clips Bin without leaving your current timeline"
                         >
                           Create Clip
-                        </button>
-                        <button
-                          className="btn btn-sm"
-                          onClick={() => handleCreateClipFromMarkers(true, true)}
-                        >
-                          Compile
                         </button>
                       </>
                     )}
