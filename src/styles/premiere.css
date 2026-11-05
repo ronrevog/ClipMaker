@@ -530,3 +530,322 @@ input[type='range']::-webkit-slider-thumb {
 .nle-layer-block:hover {
   filter: brightness(1.18);
 }
+
+/* ============================================================================
+ * SHADCN/UI COMPONENT SYSTEM & COMPACT MACBOOK RESPONSIVE STUDIO LAYOUT
+ * ========================================================================== */
+
+.shadcn-tabs-list {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  background: #0b0b0e;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
+  min-height: 28px;
+}
+
+.shadcn-tabs-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.shadcn-tabs-trigger:hover:not(:disabled) {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.shadcn-tabs-trigger[data-state='active'] {
+  background: #1c1c24;
+  border-color: #2e2e3a;
+  color: #fafafa;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.shadcn-tabs-content {
+  outline: none;
+}
+
+/* Shadcn Card */
+.shadcn-card {
+  background: #121217;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+.shadcn-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  gap: 6px;
+}
+
+.shadcn-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-main);
+}
+
+.shadcn-card-content {
+  padding: 8px 10px;
+}
+
+/* Shadcn Separators */
+.shadcn-separator-v {
+  width: 1px;
+  height: 18px;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.shadcn-separator-h {
+  width: 100%;
+  height: 1px;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+}
+
+/* Shadcn Toggle Pill / Switch */
+.shadcn-toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.shadcn-toggle-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--text-main);
+}
+
+.shadcn-toggle-pill--on-blue {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.6);
+  color: #bfdbfe;
+  font-weight: 600;
+}
+
+.shadcn-toggle-pill--on-amber {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.65);
+  color: #fde68a;
+  font-weight: 600;
+}
+
+.shadcn-toggle-pill--on-emerald {
+  background: rgba(16, 185, 129, 0.16);
+  border-color: rgba(16, 185, 129, 0.65);
+  color: #a7f3d0;
+  font-weight: 600;
+}
+
+.shadcn-toggle-pill--on-purple {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.65);
+  color: #e9d5ff;
+  font-weight: 600;
+}
+
+.shadcn-toggle-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #52525b;
+  transition: background 0.14s ease, box-shadow 0.14s ease;
+  flex-shrink: 0;
+}
+
+.shadcn-toggle-dot.is-on {
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.shadcn-kbd {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* Shadcn Badges */
+.shadcn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.shadcn-badge--secondary {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.shadcn-badge--blue {
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.5);
+  color: #93c5fd;
+}
+
+.shadcn-badge--amber {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  color: #fcd34d;
+}
+
+.shadcn-badge--purple {
+  background: rgba(168, 85, 247, 0.16);
+  border: 1px solid rgba(168, 85, 247, 0.5);
+  color: #d8b4fe;
+}
+
+.shadcn-badge--emerald {
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid rgba(16, 185, 129, 0.5);
+  color: #6ee7b7;
+}
+
+/* Horizontal Scrollable Single-Line Toolbars (No Messy Wrapping on MacBooks) */
+.shadcn-toolbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.shadcn-toolbar-row::-webkit-scrollbar {
+  display: none;
+}
+
+/* Unified Studio Command Deck (Tabbed Bar between Monitor & Timeline) */
+.shadcn-command-deck {
+  background: #101014;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.shadcn-command-deck-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: #131318;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.shadcn-command-deck-header::-webkit-scrollbar {
+  display: none;
+}
+
+.shadcn-command-deck-body {
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 36px;
+}
+
+/* MacBook 13" / 14" / 15" Compact Screen Optimizations */
+@media (max-width: 1440px) {
+  .studio-topbar {
+    height: 40px;
+    padding: 0 10px;
+    gap: 8px;
+  }
+
+  .studio-panel-header {
+    height: 32px;
+    padding: 0 9px;
+    font-size: 11px;
+  }
+
+  .btn {
+    height: 26px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+
+  .btn-sm {
+    height: 22px;
+    padding: 0 7px;
+    font-size: 10.5px;
+  }
+
+  .nle-layer-row {
+    grid-template-columns: 112px 1fr;
+    min-height: 24px;
+  }
+}
+
+@media (max-height: 860px) {
+  .studio-topbar {
+    height: 38px;
+  }
+
+  .studio-panel-header {
+    height: 30px;
+  }
+
+  .shadcn-command-deck-header {
+    padding: 3px 8px;
+  }
+
+  .shadcn-command-deck-body {
+    padding: 4px 8px;
+    min-height: 32px;
+  }
+}
+

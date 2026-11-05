@@ -7,7 +7,9 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ChevronUp,
   ClipboardPaste,
+  Columns,
   Copy,
   CornerDownLeft,
   Crosshair,
@@ -30,6 +32,8 @@ import {
   Move,
   Package,
   PackageOpen,
+  PanelLeft,
+  PanelRight,
   Paperclip,
   Pause,
   Play,
@@ -56,6 +60,15 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import {
+  Tabs as ShadcnTabs,
+  TabsList as ShadcnTabsList,
+  TabsTrigger as ShadcnTabsTrigger,
+  TabsContent as ShadcnTabsContent,
+  TogglePill,
+  Badge as ShadcnBadge,
+  Separator as ShadcnSeparator,
+} from './components/ui/shadcn';
 import {
   AIProviderId,
   AIProviderSettings,
@@ -366,10 +379,28 @@ export const App: React.FC = () => {
   const [scalingSpeaker, setScalingSpeaker] = useState<'A' | 'B' | null>(null);
   const [selectedSpeakerTarget, setSelectedSpeakerTarget] = useState<'A' | 'B'>('A');
 
-  // Resizable Workspace Panel Windows & Multi-Track NLE Layer State
-  const [leftPanelWidth, setLeftPanelWidth] = useState<number>(300);
-  const [rightPanelWidth, setRightPanelWidth] = useState<number>(315);
-  const [timelineHeight, setTimelineHeight] = useState<number>(265);
+  // Resizable Workspace Panel Windows & Multi-Track NLE Layer State (MacBook & compact screen aware)
+  const [leftPanelWidth, setLeftPanelWidth] = useState<number>(() =>
+    typeof window !== 'undefined' && window.innerWidth <= 1440 ? 268 : 300
+  );
+  const [rightPanelWidth, setRightPanelWidth] = useState<number>(() =>
+    typeof window !== 'undefined' && window.innerWidth <= 1440 ? 280 : 315
+  );
+  const [timelineHeight, setTimelineHeight] = useState<number>(() =>
+    typeof window !== 'undefined' && window.innerHeight <= 860 ? 225 : 265
+  );
+  const [leftSidebarOpen, setLeftSidebarOpen] = useState<boolean>(true);
+  const [rightSidebarOpen, setRightSidebarOpen] = useState<boolean>(true);
+  const [leftSidebarTab, setLeftSidebarTab] = useState<'clips' | 'generator' | 'split'>(() =>
+    typeof window !== 'undefined' && window.innerHeight <= 860 ? 'clips' : 'split'
+  );
+  const [monitorLayoutMode, setMonitorLayoutMode] = useState<
+    'dual' | 'source-only' | 'output-only'
+  >('dual');
+  const [studioDeckTab, setStudioDeckTab] = useState<
+    'framing' | 'speakers' | 'ai-audio' | 'layers'
+  >('framing');
+  const [isStudioDeckCollapsed, setIsStudioDeckCollapsed] = useState<boolean>(false);
   const [monitorSplitRatio, setMonitorSplitRatio] = useState<number>(0.5);
   const [resizingPane, setResizingPane] = useState<'left' | 'right' | 'timeline' | 'monitors' | null>(null);
   const dualMonitorStageRef = useRef<HTMLDivElement | null>(null);
@@ -385,6 +416,17 @@ export const App: React.FC = () => {
     'captions' | 'banner' | string | null
   >(null);
   const outputOverlayWrapRef = useRef<HTMLDivElement | null>(null);
+
+  // Automatically switch the shadcn Studio Command Deck tab when the user selects a specific timeline layer track
+  useEffect(() => {
+    if (selectedLayerTrack === 'v4-overlay' || selectedLayerTrack === 'v3-captions') {
+      setStudioDeckTab('layers');
+    } else if (selectedLayerTrack === 'v2-speaker') {
+      setStudioDeckTab('speakers');
+    } else if (selectedLayerTrack === 'a1-audio') {
+      setStudioDeckTab('ai-audio');
+    }
+  }, [selectedLayerTrack]);
 
   useEffect(() => {
     if (!resizingPane) return;
@@ -4639,30 +4681,92 @@ export const App: React.FC = () => {
           }}
         />
 
-        {/* Top Studio Bar */}
+        {/* Top Studio Bar (shadcn/ui Consolidated App Bar — MacBook Responsive) */}
         <header className="studio-topbar">
-          <div className="studio-brand">
-            <div className="studio-brand-mark">
-              <Scissors size={13} strokeWidth={2.2} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            <div className="studio-brand">
+              <div className="studio-brand-mark">
+                <Scissors size={13} strokeWidth={2.2} />
+              </div>
+              <span style={{ fontWeight: 600, fontSize: 13, letterSpacing: '-0.02em' }}>
+                ClipMaker
+              </span>
+              {activeSource && (
+                <>
+                  <span style={{ color: 'var(--text-muted)' }}>/</span>
+                  <span
+                    style={{
+                      fontSize: 11.5,
+                      color: 'var(--text-secondary)',
+                      maxWidth: 140,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {currentProjectName}
+                  </span>
+                </>
+              )}
             </div>
-            <span style={{ fontWeight: 600, fontSize: 13, letterSpacing: '-0.02em' }}>
-              ClipMaker
-            </span>
+
+            <ShadcnSeparator orientation="vertical" />
+
+            {/* Workspace Sidebar Toggles (Ideal for 13"/14" MacBook Screens) */}
+            <div className="shadcn-tabs-list" title="Toggle Left & Right Studio Panels">
+              <button
+                type="button"
+                className="shadcn-tabs-trigger"
+                data-state={leftSidebarOpen ? 'active' : 'inactive'}
+                onClick={() => setLeftSidebarOpen((v) => !v)}
+                title={leftSidebarOpen ? 'Hide Left Clips & Generator Panel' : 'Show Left Clips & Generator Panel'}
+              >
+                <PanelLeft size={12} />
+                <span>Clips</span>
+              </button>
+              <button
+                type="button"
+                className="shadcn-tabs-trigger"
+                data-state={rightSidebarOpen ? 'active' : 'inactive'}
+                onClick={() => setRightSidebarOpen((v) => !v)}
+                title={rightSidebarOpen ? 'Hide Right AI Assistant Panel' : 'Show Right AI Assistant Panel'}
+              >
+                <PanelRight size={12} />
+                <span>Copilot</span>
+              </button>
+            </div>
+
             {activeSource && (
               <>
-                <span style={{ color: 'var(--text-muted)' }}>/</span>
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--text-secondary)',
-                    maxWidth: 180,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {currentProjectName}
-                </span>
+                <ShadcnSeparator orientation="vertical" />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <button
+                    className="btn btn-sm"
+                    onClick={handleUndo}
+                    disabled={undoStack.length === 0}
+                    title={
+                      undoStack.length > 0
+                        ? `Undo last timeline action (${undoStack.length} steps) [Ctrl+Z]`
+                        : 'Nothing to undo [Ctrl+Z]'
+                    }
+                  >
+                    <Undo2 size={12} />
+                    Undo{undoStack.length > 0 ? ` (${undoStack.length})` : ''}
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={handleRedo}
+                    disabled={redoStack.length === 0}
+                    title={
+                      redoStack.length > 0
+                        ? `Redo timeline action (${redoStack.length} steps) [Ctrl+Y]`
+                        : 'Nothing to redo [Ctrl+Y]'
+                    }
+                  >
+                    <Redo2 size={12} />
+                    Redo{redoStack.length > 0 ? ` (${redoStack.length})` : ''}
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -4676,11 +4780,11 @@ export const App: React.FC = () => {
                 gap: 7,
                 background: 'var(--bg-card)',
                 border: '1px solid var(--border-subtle)',
-                padding: '4px 11px',
+                padding: '3px 10px',
                 borderRadius: 5,
                 color: 'var(--text-secondary)',
-                fontSize: 11.5,
-                maxWidth: 420,
+                fontSize: 11,
+                maxWidth: 360,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
@@ -4703,100 +4807,101 @@ export const App: React.FC = () => {
             </div>
           )}
 
-          {/* Right Studio Actions */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {/* Right Studio Actions (Consolidated with shadcn/ui DropdownMenu + Quick Actions) */}
+          <div className="shadcn-toolbar-row" style={{ gap: 6 }}>
             <button
-              className="btn"
-              onClick={() => setIsProjectsModalOpen(true)}
-              title="Saved projects"
-            >
-              <FolderOpen size={13} />
-              Projects
-            </button>
-
-            {activeSource && (
-              <>
-                <button
-                  className="btn"
-                  onClick={handleUndo}
-                  disabled={undoStack.length === 0}
-                  title={
-                    undoStack.length > 0
-                      ? `Undo last timeline action (${undoStack.length} steps) [Ctrl+Z]`
-                      : 'Nothing to undo [Ctrl+Z]'
-                  }
-                >
-                  <Undo2 size={13} />
-                  Undo{undoStack.length > 0 ? ` (${undoStack.length})` : ''}
-                </button>
-                <button
-                  className="btn"
-                  onClick={handleRedo}
-                  disabled={redoStack.length === 0}
-                  title={
-                    redoStack.length > 0
-                      ? `Redo timeline action (${redoStack.length} steps) [Ctrl+Y]`
-                      : 'Nothing to redo [Ctrl+Y]'
-                  }
-                >
-                  <Redo2 size={13} />
-                  Redo{redoStack.length > 0 ? ` (${redoStack.length})` : ''}
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => handleSaveCurrentProject(currentProjectName, false)}
-                  disabled={isSavingProject}
-                  title="Save project"
-                >
-                  <Save size={13} />
-                  {isSavingProject ? 'Saving' : 'Save'}
-                </button>
-              </>
-            )}
-
-            <div className="studio-divider-v" />
-
-            <button
-              className="btn"
+              className="btn btn-sm"
               onClick={() => sourceFileInputRef.current?.click()}
               disabled={isAnalyzing}
+              title="Upload source video"
             >
-              <Upload size={13} />
+              <Upload size={12} />
               Upload
             </button>
 
-            <button
-              className="btn btn-danger"
-              onClick={handleClearVideo}
-              disabled={!activeSource || isAnalyzing}
-              title="Clear video and reset workspace"
-            >
-              <Trash2 size={13} />
-              Clear Video
-            </button>
+            {activeSource && (
+              <button
+                className="btn btn-sm"
+                onClick={() => handleSaveCurrentProject(currentProjectName, false)}
+                disabled={isSavingProject}
+                title="Save project"
+              >
+                <Save size={12} />
+                {isSavingProject ? 'Saving' : 'Save'}
+              </button>
+            )}
+
+            {/* Consolidated Project & Media Management Dropdown (keeps every action accessible cleanly) */}
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button className="btn btn-sm" title="Projects, Style Cloning & Workspace Cleanup">
+                  <FolderOpen size={12} />
+                  <span>Project & Media</span>
+                  <ChevronDown size={11} />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5} align="end">
+                  <div className="rx-dropdown-label">Project Management</div>
+                  <DropdownMenu.Item
+                    className="rx-dropdown-item"
+                    onSelect={() => setIsProjectsModalOpen(true)}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <FolderOpen size={12} />
+                      Saved Projects...
+                    </span>
+                  </DropdownMenu.Item>
+                  {activeSource && (
+                    <DropdownMenu.Item
+                      className="rx-dropdown-item"
+                      disabled={isSavingProject}
+                      onSelect={() => handleSaveCurrentProject(currentProjectName, false)}
+                    >
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Save size={12} />
+                        Save Current Project
+                      </span>
+                    </DropdownMenu.Item>
+                  )}
+                  <DropdownMenu.Item
+                    className="rx-dropdown-item"
+                    disabled={isCloningRef}
+                    onSelect={() => referenceFileInputRef.current?.click()}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Wand2 size={12} />
+                      Clone Style from Reference Video...
+                    </span>
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Separator className="rx-dropdown-separator" />
+                  <div className="rx-dropdown-label">Workspace Cleanup</div>
+                  <DropdownMenu.Item
+                    className="rx-dropdown-item"
+                    disabled={generatedClips.length === 0 || isGeneratingClips}
+                    onSelect={() => handleClearAllClips()}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#fca5a5' }}>
+                      <Trash2 size={12} />
+                      Delete All Clips ({generatedClips.length})
+                    </span>
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item
+                    className="rx-dropdown-item"
+                    disabled={!activeSource || isAnalyzing}
+                    onSelect={() => handleClearVideo()}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#fca5a5' }}>
+                      <Trash2 size={12} />
+                      Clear Source Video & Reset
+                    </span>
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
 
             <button
-              className="btn btn-danger"
-              onClick={handleClearAllClips}
-              disabled={generatedClips.length === 0 || isGeneratingClips}
-              title="Delete all generated clips"
-            >
-              <Trash2 size={13} />
-              Delete Clips{generatedClips.length > 0 ? ` (${generatedClips.length})` : ''}
-            </button>
-
-            <button
-              className="btn"
-              onClick={() => referenceFileInputRef.current?.click()}
-              disabled={isCloningRef}
-              title="Clone editing style from reference video"
-            >
-              <Wand2 size={13} />
-              Clone Style
-            </button>
-
-            <button
-              className="btn"
+              className="btn btn-sm"
               style={{
                 borderColor: 'rgba(168, 85, 247, 0.65)',
                 background: 'rgba(168, 85, 247, 0.16)',
@@ -4806,14 +4911,14 @@ export const App: React.FC = () => {
               disabled={!activeSource}
               title="Open window to edit video transcription and caption lines"
             >
-              <FileText size={13} />
-              Edit Transcript
+              <FileText size={12} />
+              Transcript
             </button>
 
-            <div className="studio-divider-v" />
+            <ShadcnSeparator orientation="vertical" />
 
             {/* Segmented AI Provider Selector */}
-            <div className="seg-group">
+            <div className="shadcn-tabs-list">
               {(['gemini', 'claude', 'openai'] as AIProviderId[]).map((prov) => {
                 const active = aiSettings.activeProvider === prov;
                 const envReady =
@@ -4827,8 +4932,9 @@ export const App: React.FC = () => {
                   <button
                     key={prov}
                     type="button"
-                    className="seg-item"
-                    data-active={active}
+                    className="shadcn-tabs-trigger"
+                    style={{ padding: '0 7px' }}
+                    data-state={active ? 'active' : 'inactive'}
                     onClick={() => {
                       const updated = { ...aiSettings, activeProvider: prov };
                       setAiSettings(updated);
@@ -4849,21 +4955,22 @@ export const App: React.FC = () => {
               })}
               <button
                 type="button"
-                className="seg-item"
+                className="shadcn-tabs-trigger"
                 style={{ padding: '0 6px' }}
                 onClick={() => setIsAISettingsOpen(true)}
                 title="AI Model & API Settings"
               >
-                <Settings size={12} />
+                <Settings size={11} />
               </button>
             </div>
 
             <button
-              className="btn btn-primary"
+              className="btn btn-primary btn-sm"
+              style={{ height: 26, padding: '0 10px' }}
               onClick={handleExport}
               disabled={!activeSource || !activeClip || isExporting}
             >
-              <Download size={13} />
+              <Download size={12} />
               {isExporting ? `Exporting ${exportProgress}%` : 'Export MP4'}
             </button>
 
@@ -4871,19 +4978,19 @@ export const App: React.FC = () => {
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: 6,
-                height: 28,
-                padding: '0 8px',
+                gap: 5,
+                height: 26,
+                padding: '0 7px',
                 borderRadius: 5,
                 background: 'var(--bg-input)',
                 border: '1px solid var(--border-subtle)',
-                fontSize: 11,
+                fontSize: 10.5,
                 color: 'var(--text-secondary)',
               }}
             >
               <span
                 style={{
-                  maxWidth: 110,
+                  maxWidth: 92,
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
@@ -4907,35 +5014,68 @@ export const App: React.FC = () => {
                 }}
                 title="Sign out"
               >
-                <LogOut size={12} />
+                <LogOut size={11} />
               </button>
             </div>
           </div>
         </header>
 
-        {/* Main 3-Column Resizable Workspace */}
+        {/* Main 3-Column Resizable Workspace (adapts when Left or Right sidebar is collapsed) */}
         <main
           className="studio-workspace"
           style={{
-            gridTemplateColumns: `${leftPanelWidth}px 5px 1fr 5px ${rightPanelWidth}px`,
+            gridTemplateColumns: `${leftSidebarOpen ? `${leftPanelWidth}px 5px` : '0px 0px'} 1fr ${
+              rightSidebarOpen ? `5px ${rightPanelWidth}px` : '0px 0px'
+            }`,
             gap: 0,
           }}
         >
-          {/* LEFT PANEL: Generator & Clips */}
-          <aside className="studio-panel">
-            <div className="studio-panel-header">
-              <span>AI Clip & Compilation Generator</span>
-              <button
-                className="btn btn-sm"
-                onClick={() => handleSaveAndApplyScheme(false)}
-                title="Save preset"
+          {/* LEFT PANEL: shadcn/ui Tabbed Clips & AI Generator Sidebar */}
+          <aside
+            className="studio-panel"
+            style={{
+              display: leftSidebarOpen ? 'flex' : 'none',
+            }}
+          >
+            {/* shadcn/ui Sidebar View Switcher: Clips Only | AI Generator | Split View */}
+            <div
+              className="studio-panel-header"
+              style={{ padding: '0 8px', justifyContent: 'space-between' }}
+            >
+              <ShadcnTabs
+                value={leftSidebarTab}
+                onValueChange={(v) => setLeftSidebarTab(v as 'clips' | 'generator' | 'split')}
               >
-                <Save size={11} />
-                Save Preset
-              </button>
+                <ShadcnTabsList>
+                  <ShadcnTabsTrigger value="clips" title="Focus on Source & Generated Clips List">
+                    <Film size={11} />
+                    <span>Clips ({generatedClips.length})</span>
+                  </ShadcnTabsTrigger>
+                  <ShadcnTabsTrigger value="generator" title="Configure AI Viral Clips & Compilation Generator">
+                    <Sparkles size={11} />
+                    <span>AI Generator</span>
+                  </ShadcnTabsTrigger>
+                  <ShadcnTabsTrigger value="split" title="Show both AI Generator and Clips List">
+                    <Columns size={11} />
+                    <span>Both</span>
+                  </ShadcnTabsTrigger>
+                </ShadcnTabsList>
+              </ShadcnTabs>
+
+              {leftSidebarTab !== 'clips' && (
+                <button
+                  className="btn btn-sm"
+                  onClick={() => handleSaveAndApplyScheme(false)}
+                  title="Save generator preset"
+                >
+                  <Save size={10} />
+                  Preset
+                </button>
+              )}
             </div>
 
-            {/* Complete Generator Controls */}
+            {/* Complete Generator Controls (Visible in 'generator' or 'split' tab) */}
+            {leftSidebarTab !== 'clips' && (
             <div
               style={{
                 padding: 10,
@@ -4943,6 +5083,8 @@ export const App: React.FC = () => {
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 8,
+                overflowY: leftSidebarTab === 'generator' ? 'auto' : undefined,
+                flex: leftSidebarTab === 'generator' ? 1 : undefined,
               }}
             >
               {/* Radix Tabs Segmented Mode Switcher */}
@@ -4951,14 +5093,14 @@ export const App: React.FC = () => {
                 onValueChange={(v) => handleSelectClipMode(v as ClipCreationMode)}
               >
                 <Tabs.List
-                  className="seg-group"
+                  className="shadcn-tabs-list"
                   style={{ width: '100%', display: 'grid', gridTemplateColumns: '1fr 1fr' }}
                 >
-                  <Tabs.Trigger value="clip-segment" className="seg-item">
+                  <Tabs.Trigger value="clip-segment" className="shadcn-tabs-trigger">
                     <Flame size={12} />
                     Best Viral Clips
                   </Tabs.Trigger>
-                  <Tabs.Trigger value="condensed-edit" className="seg-item">
+                  <Tabs.Trigger value="condensed-edit" className="shadcn-tabs-trigger">
                     <Layers size={12} />
                     Compilations
                   </Tabs.Trigger>
@@ -5217,8 +5359,11 @@ export const App: React.FC = () => {
                 </div>
               )}
             </div>
+            )}
 
-            {/* Sticky Clips Header with Always-Visible Clear Video & Delete Clips */}
+            {/* Sticky Clips Header & List (Visible in 'clips' or 'split' tab) */}
+            {leftSidebarTab !== 'generator' && (
+              <>
             <div className="studio-panel-header">
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span>Clips & Source</span>
@@ -5488,11 +5633,14 @@ export const App: React.FC = () => {
                 </>
               )}
             </div>
+              </>
+            )}
           </aside>
 
           {/* Left Vertical Resize Splitter */}
           <div
             className="studio-splitter-v"
+            style={{ display: leftSidebarOpen ? 'block' : 'none' }}
             data-dragging={resizingPane === 'left'}
             onMouseDown={(e) => {
               e.preventDefault();
@@ -5502,7 +5650,7 @@ export const App: React.FC = () => {
             title="Drag to resize Left Panel (double-click to reset)"
           />
 
-          {/* CENTER STAGE: Dual Monitor & Unified NLE Timeline */}
+          {/* CENTER STAGE: Dual Monitor, shadcn/ui Studio Command Deck & Unified NLE Timeline */}
           <section className="studio-panel" style={{ display: 'flex', flexDirection: 'column' }}>
             <div className="studio-panel-header">
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
@@ -5554,15 +5702,35 @@ export const App: React.FC = () => {
 
               {activeSource && activeClip && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {/* shadcn/ui Monitor View Switcher (Dual | Input | 9:16 Output) — Ideal for MacBook Screens */}
+                  <ShadcnTabs
+                    value={monitorLayoutMode}
+                    onValueChange={(v) =>
+                      setMonitorLayoutMode(v as 'dual' | 'source-only' | 'output-only')
+                    }
+                  >
+                    <ShadcnTabsList>
+                      <ShadcnTabsTrigger value="dual" title="Show Input & 9:16 Output Monitors Side-by-Side">
+                        <Columns size={11} />
+                        <span>Dual</span>
+                      </ShadcnTabsTrigger>
+                      <ShadcnTabsTrigger value="source-only" title="Maximize Input Source Monitor">
+                        <Video size={11} />
+                        <span>Input</span>
+                      </ShadcnTabsTrigger>
+                      <ShadcnTabsTrigger value="output-only" title="Maximize 9:16 Viral Output Monitor">
+                        <Maximize2 size={11} />
+                        <span>9:16 Output</span>
+                      </ShadcnTabsTrigger>
+                    </ShadcnTabsList>
+                  </ShadcnTabs>
+
                   <button
                     type="button"
-                    className={`btn ${isMuted ? 'btn-danger' : 'btn-active'}`}
+                    className={`btn btn-sm ${isMuted ? 'btn-danger' : 'btn-active'}`}
                     style={{
-                      height: 26,
-                      padding: '0 10px',
-                      fontSize: 11.5,
                       fontWeight: 600,
-                      gap: 6,
+                      gap: 5,
                     }}
                     onClick={() => {
                       const nextMute = !isMuted;
@@ -5571,7 +5739,7 @@ export const App: React.FC = () => {
                     }}
                     title={isMuted ? 'Click to turn sound ON' : 'Click to mute sound'}
                   >
-                    {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                    {isMuted ? <VolumeX size={13} /> : <Volume2 size={13} />}
                     {isMuted ? 'Sound Off' : 'Sound On'}
                   </button>
                   <span className="timecode-pill">
@@ -5646,10 +5814,13 @@ export const App: React.FC = () => {
                   style={{
                     flex: 1,
                     display: 'grid',
-                    gridTemplateColumns: `calc(${(monitorSplitRatio * 100).toFixed(1)}% - 5px) 10px calc(${((1 - monitorSplitRatio) * 100).toFixed(1)}% - 5px)`,
+                    gridTemplateColumns:
+                      monitorLayoutMode === 'dual'
+                        ? `calc(${(monitorSplitRatio * 100).toFixed(1)}% - 5px) 10px calc(${((1 - monitorSplitRatio) * 100).toFixed(1)}% - 5px)`
+                        : '1fr',
                     alignItems: 'stretch',
                     justifyContent: 'center',
-                    padding: '10px 14px',
+                    padding: '8px 12px',
                     minHeight: 0,
                     background: '#050507',
                     overflow: 'hidden',
@@ -5660,7 +5831,7 @@ export const App: React.FC = () => {
                     style={{
                       width: '100%',
                       height: '100%',
-                      display: 'flex',
+                      display: monitorLayoutMode === 'output-only' ? 'none' : 'flex',
                       flexDirection: 'column',
                       background: '#09090d',
                       border: '1px solid var(--border-strong)',
@@ -6223,6 +6394,7 @@ export const App: React.FC = () => {
                       width: '100%',
                       height: '100%',
                       borderRadius: 4,
+                      display: monitorLayoutMode === 'dual' ? 'block' : 'none',
                     }}
                     onMouseDown={() => setResizingPane('monitors')}
                     onDoubleClick={() => setMonitorSplitRatio(0.5)}
@@ -6234,7 +6406,7 @@ export const App: React.FC = () => {
                     style={{
                       width: '100%',
                       height: '100%',
-                      display: 'flex',
+                      display: monitorLayoutMode === 'source-only' ? 'none' : 'flex',
                       flexDirection: 'column',
                       background: '#09090d',
                       border: '1px solid var(--border-strong)',
@@ -6657,726 +6829,1130 @@ export const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Control Bar 1: 9:16 Subject Focus, Lock Points, Zoom & Fine X Offset */}
-                <div
-                  style={{
-                    padding: '6px 12px',
-                    background: 'var(--bg-panel-header)',
-                    borderTop: '1px solid var(--border-subtle)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    flexWrap: 'wrap',
-                    gap: 8,
+                {/* SHADCN/UI UNIFIED STUDIO COMMAND DECK (Consolidates Framing, 2-Speaker, AI/Audio & Layers into clean tabs) */}
+                <ShadcnTabs
+                  value={studioDeckTab}
+                  onValueChange={(v) => {
+                    setStudioDeckTab(v as 'framing' | 'speakers' | 'ai-audio' | 'layers');
+                    setIsStudioDeckCollapsed(false);
                   }}
+                  className="shadcn-command-deck"
                 >
-                  {/* Left: Segmented Subject Focus Presets + Active Focus Lock Nodes */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <span className="section-label">Subject Focus</span>
-                    <div className="seg-group">
-                      <button
-                        type="button"
-                        className="seg-item"
-                        data-active={
-                          activeClip?.backgroundFillStyle !== 'split-screen' &&
-                          activeFocusStrategy === 'click-track'
-                        }
-                        onClick={() => {
-                          setClickPickMode('track');
-                          if (activeClip?.subjectFocus) {
-                            applySubjectFocusConfig({
-                              ...activeClip.subjectFocus,
-                              strategy: 'click-track',
-                              label: 'Tracked Subject',
-                            });
-                          }
-                        }}
-                        title="Click any moving person or object on the Source Video to track it"
-                      >
-                        <Crosshair size={11} />
-                        Track Subject
-                      </button>
-                      <button
-                        type="button"
-                        className="seg-item"
-                        data-active={
-                          activeClip?.backgroundFillStyle !== 'split-screen' &&
-                          activeFocusStrategy === 'static-lock' &&
-                          activeClip?.subjectFocus?.label !== '2-Speaker Auto-Switch'
-                        }
-                        onClick={() => {
-                          setClickPickMode('static');
-                          handleSelectSubjectFocusStrategy('static-lock');
-                        }}
-                        title="Lock static 9:16 center frame"
-                      >
-                        <Lock size={11} />
-                        Center Lock
-                      </button>
-                      <button
-                        type="button"
-                        className="seg-item"
-                        data-active={
-                          activeClip?.backgroundFillStyle !== 'split-screen' &&
-                          activeFocusStrategy === 'face-speaker'
-                        }
-                        onClick={() => handleSelectSubjectFocusStrategy('face-speaker')}
-                      >
-                        <UserCheck size={11} />
-                        Auto Face
-                      </button>
-                      <button
-                        type="button"
-                        className="seg-item"
-                        data-active={
-                          activeClip?.backgroundFillStyle !== 'split-screen' &&
-                          activeFocusStrategy === 'left-subject'
-                        }
-                        onClick={() => handleSelectSubjectFocusStrategy('left-subject')}
-                        title="Isolate Left Speaker in 9:16 frame"
-                      >
-                        Left Speaker
-                      </button>
-                      <button
-                        type="button"
-                        className="seg-item"
-                        data-active={
-                          activeClip?.backgroundFillStyle !== 'split-screen' &&
-                          activeFocusStrategy === 'right-subject'
-                        }
-                        onClick={() => handleSelectSubjectFocusStrategy('right-subject')}
-                        title="Isolate Right Speaker in 9:16 frame"
-                      >
-                        Right Speaker
-                      </button>
-                      <button
-                        type="button"
-                        className="seg-item"
-                        data-active={
-                          activeClip?.backgroundFillStyle !== 'split-screen' &&
-                          activeFocusStrategy === 'action-motion'
-                        }
-                        onClick={() => handleSelectSubjectFocusStrategy('action-motion')}
-                      >
-                        Motion
-                      </button>
+                  <div className="shadcn-command-deck-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <ShadcnTabsList>
+                        <ShadcnTabsTrigger value="framing" title="Subject Focus, Tracking Locks, Zoom, Fine X & 9:16 Fill">
+                          <Crosshair size={11} />
+                          <span>1. Framing & Crop</span>
+                        </ShadcnTabsTrigger>
+                        <ShadcnTabsTrigger value="speakers" title="2-Speaker Split-Screen, Lip-Sync Switch & Per-Cut Layouts">
+                          <Layers size={11} />
+                          <span>2. 2-Speaker & Split</span>
+                        </ShadcnTabsTrigger>
+                        <ShadcnTabsTrigger value="ai-audio" title="RNNoise Voice Isolation, Strip Dead Air, Beat-Sync, FX & Speed">
+                          <Wand2 size={11} />
+                          <span>3. AI Tools & Audio</span>
+                        </ShadcnTabsTrigger>
+                        <ShadcnTabsTrigger value="layers" title="Captions (V3), Text/Lottie Overlays (V4) & Transcript Editor">
+                          <Type size={11} />
+                          <span>4. Captions & Overlays</span>
+                        </ShadcnTabsTrigger>
+                      </ShadcnTabsList>
+
+                      {/* Live Status Summary Pills */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <ShadcnBadge variant="secondary">{currentZoom.toFixed(2)}x</ShadcnBadge>
+                        {activeClip?.audioMasteringPreset === 'rnnoise-isolate' && (
+                          <ShadcnBadge variant="emerald">RNNoise Isolated</ShadcnBadge>
+                        )}
+                        {inspectedCut && activeClip && activeClip.subCuts.length > 1 && (
+                          <ShadcnBadge variant="blue">
+                            Cut #{inspectedCut.index} ·{' '}
+                            {inspectedCut.layoutMode === 'split-screen'
+                              ? 'Split'
+                              : inspectedCut.layoutMode === 'full-speaker-a'
+                                ? 'Spk A'
+                                : inspectedCut.layoutMode === 'full-speaker-b'
+                                  ? 'Spk B'
+                                  : 'Full'}
+                          </ShadcnBadge>
+                        )}
+                      </div>
                     </div>
 
-                    {/* Focus Lock Pills + Step +2s & Reset */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                      {userFocusAnchors.map((pt, idx) => (
-                        <span
-                          key={`lock-pill-${pt.time}-${idx}`}
-                          className="badge-subtle"
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 4,
-                            cursor: 'pointer',
-                          }}
-                          onClick={() => handleSeekSourceTime(pt.time)}
-                          title="Click to jump playhead to this Focus Lock point"
-                        >
-                          #{idx + 1} {pt.time.toFixed(1)}s
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteFocusLockPoint(pt.time);
-                            }}
+                    {/* Right Quick Access: Transcript, Fill Mode & Deck Collapse Toggle */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {/* 9:16 Fill Mode Quick Switcher */}
+                      <div className="shadcn-tabs-list">
+                        {(
+                          [
+                            { id: 'blurred', label: 'Blur Fill' },
+                            { id: 'black', label: 'Black Bars' },
+                            { id: 'split-screen', label: 'Split-Screen' },
+                          ] as Array<{ id: BackgroundFillStyle; label: string }>
+                        ).map((opt) => {
+                          const cutMode = inspectedCut?.layoutMode || 'inherit';
+                          const clipFill = activeClip?.backgroundFillStyle ?? 'blurred';
+                          const effectiveCutFill: BackgroundFillStyle =
+                            cutMode === 'split-screen'
+                              ? 'split-screen'
+                              : cutMode === 'full-single' ||
+                                  cutMode === 'full-speaker-a' ||
+                                  cutMode === 'full-speaker-b'
+                                ? clipFill === 'black'
+                                  ? 'black'
+                                  : 'blurred'
+                                : clipFill;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              className="shadcn-tabs-trigger"
+                              style={{ padding: '0 8px', height: 22 }}
+                              data-state={effectiveCutFill === opt.id ? 'active' : 'inactive'}
+                              onClick={() => {
+                                if (opt.id === 'split-screen') {
+                                  handleTwoSpeakerMode('split-screen');
+                                } else {
+                                  const targetIdx = activeClip
+                                    ? Math.min(
+                                        selectedCutIndex,
+                                        Math.max(0, activeClip.subCuts.length - 1)
+                                      )
+                                    : 0;
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    backgroundFillStyle:
+                                      c.subCuts.length === 1
+                                        ? opt.id
+                                        : c.backgroundFillStyle === 'split-screen'
+                                          ? 'split-screen'
+                                          : opt.id,
+                                    subCuts:
+                                      c.subCuts.length > 1
+                                        ? c.subCuts.map((sc, idx) =>
+                                            idx === targetIdx
+                                              ? {
+                                                  ...sc,
+                                                  layoutMode:
+                                                    sc.layoutMode === 'full-speaker-a' ||
+                                                    sc.layoutMode === 'full-speaker-b'
+                                                      ? sc.layoutMode
+                                                      : 'full-single',
+                                                }
+                                              : sc
+                                          )
+                                        : c.subCuts,
+                                  }));
+                                }
+                              }}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => setIsStudioDeckCollapsed((v) => !v)}
+                        title={
+                          isStudioDeckCollapsed
+                            ? 'Expand Studio Command Deck'
+                            : 'Collapse Studio Command Deck to maximize video monitor space'
+                        }
+                      >
+                        {isStudioDeckCollapsed ? <ChevronDown size={11} /> : <ChevronUp size={11} />}
+                        {isStudioDeckCollapsed ? 'Expand Deck' : 'Compact'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {!isStudioDeckCollapsed && (
+                    <>
+                      {/* TAB 1: FRAMING, SUBJECT FOCUS, LOCKS, ZOOM & FINE X */}
+                      <ShadcnTabsContent value="framing" className="shadcn-command-deck-body">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <span className="section-label">Subject Focus</span>
+                          <div className="shadcn-tabs-list">
+                            <button
+                              type="button"
+                              className="shadcn-tabs-trigger"
+                              data-state={
+                                activeClip?.backgroundFillStyle !== 'split-screen' &&
+                                activeFocusStrategy === 'click-track'
+                                  ? 'active'
+                                  : 'inactive'
+                              }
+                              onClick={() => {
+                                setClickPickMode('track');
+                                if (activeClip?.subjectFocus) {
+                                  applySubjectFocusConfig({
+                                    ...activeClip.subjectFocus,
+                                    strategy: 'click-track',
+                                    label: 'Tracked Subject',
+                                  });
+                                }
+                              }}
+                              title="Click any moving person or object on the Source Video to track it"
+                            >
+                              <Crosshair size={11} />
+                              Track Subject
+                            </button>
+                            <button
+                              type="button"
+                              className="shadcn-tabs-trigger"
+                              data-state={
+                                activeClip?.backgroundFillStyle !== 'split-screen' &&
+                                activeFocusStrategy === 'static-lock' &&
+                                activeClip?.subjectFocus?.label !== '2-Speaker Auto-Switch'
+                                  ? 'active'
+                                  : 'inactive'
+                              }
+                              onClick={() => {
+                                setClickPickMode('static');
+                                handleSelectSubjectFocusStrategy('static-lock');
+                              }}
+                              title="Lock static 9:16 center frame"
+                            >
+                              <Lock size={11} />
+                              Center Lock
+                            </button>
+                            <button
+                              type="button"
+                              className="shadcn-tabs-trigger"
+                              data-state={
+                                activeClip?.backgroundFillStyle !== 'split-screen' &&
+                                activeFocusStrategy === 'face-speaker'
+                                  ? 'active'
+                                  : 'inactive'
+                              }
+                              onClick={() => handleSelectSubjectFocusStrategy('face-speaker')}
+                            >
+                              <UserCheck size={11} />
+                              Auto Face
+                            </button>
+                            <button
+                              type="button"
+                              className="shadcn-tabs-trigger"
+                              data-state={
+                                activeClip?.backgroundFillStyle !== 'split-screen' &&
+                                activeFocusStrategy === 'left-subject'
+                                  ? 'active'
+                                  : 'inactive'
+                              }
+                              onClick={() => handleSelectSubjectFocusStrategy('left-subject')}
+                              title="Isolate Left Speaker in 9:16 frame"
+                            >
+                              Left Speaker
+                            </button>
+                            <button
+                              type="button"
+                              className="shadcn-tabs-trigger"
+                              data-state={
+                                activeClip?.backgroundFillStyle !== 'split-screen' &&
+                                activeFocusStrategy === 'right-subject'
+                                  ? 'active'
+                                  : 'inactive'
+                              }
+                              onClick={() => handleSelectSubjectFocusStrategy('right-subject')}
+                              title="Isolate Right Speaker in 9:16 frame"
+                            >
+                              Right Speaker
+                            </button>
+                            <button
+                              type="button"
+                              className="shadcn-tabs-trigger"
+                              data-state={
+                                activeClip?.backgroundFillStyle !== 'split-screen' &&
+                                activeFocusStrategy === 'action-motion'
+                                  ? 'active'
+                                  : 'inactive'
+                              }
+                              onClick={() => handleSelectSubjectFocusStrategy('action-motion')}
+                            >
+                              Motion
+                            </button>
+                          </div>
+
+                          {/* Focus Lock Pills + Step +2s & Reset */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                            {userFocusAnchors.map((pt, idx) => (
+                              <span
+                                key={`lock-pill-${pt.time}-${idx}`}
+                                className="badge-subtle"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 4,
+                                  cursor: 'pointer',
+                                }}
+                                onClick={() => handleSeekSourceTime(pt.time)}
+                                title="Click to jump playhead to this Focus Lock point"
+                              >
+                                #{idx + 1} {pt.time.toFixed(1)}s
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteFocusLockPoint(pt.time);
+                                  }}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: 'var(--text-muted)',
+                                    cursor: 'pointer',
+                                    padding: 0,
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            ))}
+
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => {
+                                if (!activeSource) return;
+                                if (videoRef.current && !videoRef.current.paused) {
+                                  videoRef.current.pause();
+                                  setIsPlaying(false);
+                                }
+                                const nextTime = Math.min(
+                                  activeSource.duration - 0.05,
+                                  playheadTime + 2.0
+                                );
+                                handleSeekSourceTime(nextTime);
+                                setClickPickMode('track');
+                                setMarkerNotice(
+                                  `Stepped to ${nextTime.toFixed(1)}s — click subject on Source Video to add Lock #${userFocusAnchors.length + 1}`
+                                );
+                                setTimeout(() => setMarkerNotice(null), 3200);
+                              }}
+                              title="Step forward 2 seconds to place another Focus Lock point"
+                            >
+                              +2s Add Lock
+                            </button>
+
+                            {userFocusAnchors.length > 0 && (
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                onClick={() => {
+                                  userFocusAnchorsRef.current = [];
+                                  liveTrackedAnchorRef.current = null;
+                                  handleSelectSubjectFocusStrategy('auto-salient');
+                                }}
+                              >
+                                Clear Locks
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Right: Zoom Slider + 1:1 / Fit + Fine X Offset + All Clips Toggle */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                            <span className="section-label">Zoom</span>
+                            <input
+                              type="range"
+                              min={0.56}
+                              max={2.2}
+                              step={0.02}
+                              value={currentZoom}
+                              onChange={(e) =>
+                                applyZoomAcrossStudio(
+                                  parseFloat(e.target.value),
+                                  applyFocusToAllClips
+                                )
+                              }
+                              style={{ width: 68 }}
+                            />
+                            <span className="badge-subtle" style={{ minWidth: 38, textAlign: 'center' }}>
+                              {currentZoom.toFixed(2)}x
+                            </span>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => applyZoomAcrossStudio(1.0, true)}
+                            >
+                              1.0x
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => applyZoomAcrossStudio(0.56, true)}
+                              title="Zoom out to fit wide frame inside 9:16"
+                            >
+                              Fit 16:9
+                            </button>
+                          </div>
+
+                          <ShadcnSeparator orientation="vertical" />
+
+                          {/* Fine X Offset Slider */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                            <span className="section-label">Fine X</span>
+                            <input
+                              type="range"
+                              min={-0.4}
+                              max={0.4}
+                              step={0.01}
+                              value={activeClip?.trackingOffsetX || 0}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                if (applyFocusToAllClips) {
+                                  setFullVideoClip((prev) =>
+                                    prev ? { ...prev, trackingOffsetX: val } : prev
+                                  );
+                                  setGeneratedClips((prev) =>
+                                    prev.map((c) => ({ ...c, trackingOffsetX: val }))
+                                  );
+                                } else {
+                                  updateActiveTimelineClip((c) => ({
+                                    ...c,
+                                    trackingOffsetX: val,
+                                  }));
+                                }
+                              }}
+                              onDoubleClick={() =>
+                                updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: 0 }))
+                              }
+                              style={{ width: 54 }}
+                              title="Fine horizontal crop offset (double-click to reset to 0)"
+                            />
+                            <span className="badge-subtle" style={{ minWidth: 32, textAlign: 'center' }}>
+                              {((activeClip?.trackingOffsetX || 0) * 100).toFixed(0)}%
+                            </span>
+                          </div>
+
+                          <ShadcnSeparator orientation="vertical" />
+
+                          <label
                             style={{
-                              background: 'none',
-                              border: 'none',
-                              color: 'var(--text-muted)',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 4,
+                              fontSize: 11,
+                              color: 'var(--text-secondary)',
                               cursor: 'pointer',
-                              padding: 0,
+                              userSelect: 'none',
                             }}
+                            title="Apply subject focus & zoom changes across all clips"
                           >
-                            ×
-                          </button>
-                        </span>
-                      ))}
+                            <input
+                              type="checkbox"
+                              checked={applyFocusToAllClips}
+                              onChange={(e) => setApplyFocusToAllClips(e.target.checked)}
+                              style={{ accentColor: '#fafafa', width: 12, height: 12 }}
+                            />
+                            All Clips
+                          </label>
+                        </div>
+                      </ShadcnTabsContent>
 
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        onClick={() => {
-                          if (!activeSource) return;
-                          if (videoRef.current && !videoRef.current.paused) {
-                            videoRef.current.pause();
-                            setIsPlaying(false);
-                          }
-                          const nextTime = Math.min(activeSource.duration - 0.05, playheadTime + 2.0);
-                          handleSeekSourceTime(nextTime);
-                          setClickPickMode('track');
-                          setMarkerNotice(
-                            `Stepped to ${nextTime.toFixed(1)}s — click subject on Source Video to add Lock #${userFocusAnchors.length + 1}`
-                          );
-                          setTimeout(() => setMarkerNotice(null), 3200);
-                        }}
-                        title="Step forward 2 seconds to place another Focus Lock point"
-                      >
-                        +2s Add Lock
-                      </button>
-
-                      {userFocusAnchors.length > 0 && (
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          onClick={() => {
-                            userFocusAnchorsRef.current = [];
-                            liveTrackedAnchorRef.current = null;
-                            handleSelectSubjectFocusStrategy('auto-salient');
-                          }}
-                        >
-                          Clear Locks
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Right: Zoom Slider + 1:1 / Fit + Fine X Offset + All Clips Toggle */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                      <span className="section-label">Zoom</span>
-                      <input
-                        type="range"
-                        min={0.56}
-                        max={2.2}
-                        step={0.02}
-                        value={currentZoom}
-                        onChange={(e) =>
-                          applyZoomAcrossStudio(parseFloat(e.target.value), applyFocusToAllClips)
-                        }
-                        style={{ width: 68 }}
-                      />
-                      <span className="badge-subtle" style={{ minWidth: 38, textAlign: 'center' }}>
-                        {currentZoom.toFixed(2)}x
-                      </span>
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        onClick={() => applyZoomAcrossStudio(1.0, true)}
-                      >
-                        1.0x
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        onClick={() => applyZoomAcrossStudio(0.56, true)}
-                        title="Zoom out to fit wide frame inside 9:16"
-                      >
-                        Fit 16:9
-                      </button>
-                    </div>
-
-                    <div className="studio-divider-v" />
-
-                    {/* Fine X Offset Slider */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                      <span className="section-label">Fine X</span>
-                      <input
-                        type="range"
-                        min={-0.4}
-                        max={0.4}
-                        step={0.01}
-                        value={activeClip?.trackingOffsetX || 0}
-                        onChange={(e) => {
-                          const val = parseFloat(e.target.value);
-                          if (applyFocusToAllClips) {
-                            setFullVideoClip((prev) =>
-                              prev ? { ...prev, trackingOffsetX: val } : prev
-                            );
-                            setGeneratedClips((prev) =>
-                              prev.map((c) => ({ ...c, trackingOffsetX: val }))
-                            );
-                          } else {
-                            updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: val }));
-                          }
-                        }}
-                        onDoubleClick={() =>
-                          updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: 0 }))
-                        }
-                        style={{ width: 54 }}
-                        title="Fine horizontal crop offset (double-click to reset to 0)"
-                      />
-                      <span className="badge-subtle" style={{ minWidth: 32, textAlign: 'center' }}>
-                        {((activeClip?.trackingOffsetX || 0) * 100).toFixed(0)}%
-                      </span>
-                    </div>
-
-                    <div className="studio-divider-v" />
-
-                    <label
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 4,
-                        fontSize: 11,
-                        color: 'var(--text-secondary)',
-                        cursor: 'pointer',
-                        userSelect: 'none',
-                      }}
-                      title="Apply subject focus & zoom changes across all clips"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={applyFocusToAllClips}
-                        onChange={(e) => setApplyFocusToAllClips(e.target.checked)}
-                        style={{ accentColor: '#fafafa', width: 12, height: 12 }}
-                      />
-                      All Clips
-                    </label>
-                  </div>
-                </div>
-
-                {/* Control Bar 2: 2-Speaker Podcast Modes, AI Edit Skills, Captions & Fill Layout */}
-                <div
-                  style={{
-                    padding: '6px 12px',
-                    background: 'var(--bg-panel)',
-                    borderTop: '1px solid var(--border-subtle)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    flexWrap: 'wrap',
-                    gap: 8,
-                  }}
-                >
-                  {/* Left: Dedicated 2-Speaker Podcast Controls + AI Audio/Cut Tools */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
-                    <span className="section-label">2-Speaker & AI Tools</span>
-
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${
-                        activeClip?.backgroundFillStyle === 'split-screen' ? 'btn-active' : ''
-                      }`}
-                      onClick={() => handleTwoSpeakerMode('split-screen')}
-                      title="Stack Speaker A (Top) and Speaker B (Bottom) in a 9:16 Dual Split-Screen"
-                    >
-                      <Layers size={11} />
-                      2-Speaker Split-Screen
-                    </button>
-
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${
-                        activeClip?.backgroundFillStyle !== 'split-screen' &&
-                        activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
-                          ? 'btn-active'
-                          : ''
-                      }`}
-                      onClick={() => handleTwoSpeakerMode('auto-switch')}
-                      title="Automatically cut back and forth between Speaker A (Left) and Speaker B (Right)"
-                    >
-                      <UserCheck size={11} />
-                      Auto-Switch Speakers
-                    </button>
-
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={isRunningLipSyncSwitch}
-                      onClick={handleRunLipSyncSpeakerAutoSwitch}
-                      title="MediaPipe 478-point Lip-Sync Mouth Aspect Ratio (MAR) active speaker turn detection"
-                    >
-                      <Wand2 size={11} />
-                      {isRunningLipSyncSwitch ? 'Lip-Sync Scan...' : 'Lip-Sync Switch'}
-                    </button>
-
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={isAutoLayoutRunning}
-                      onClick={handleAutoDetectSplitVsFullLayout}
-                      title="Automatically switch cuts between 2-Speaker Split-Screen (when 2 faces are detected) and Full-Screen (when 1 subject is detected)"
-                    >
-                      <Maximize2 size={11} />
-                      {isAutoLayoutRunning ? 'Scanning Layout...' : 'Auto Split/Full'}
-                    </button>
-
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${
-                        activeClip?.audioMasteringPreset === 'rnnoise-isolate' ? 'btn-active' : ''
-                      }`}
-                      style={
-                        activeClip?.audioMasteringPreset === 'rnnoise-isolate'
-                          ? {
-                              borderColor: 'rgba(16, 185, 129, 0.8)',
-                              background: 'rgba(16, 185, 129, 0.22)',
-                              color: '#6ee7b7',
-                            }
-                          : undefined
-                      }
-                      onClick={() => {
-                        const isCurrentlyIsolated =
-                          activeClip?.audioMasteringPreset === 'rnnoise-isolate';
-                        const nextPreset: AudioMasteringPresetId = isCurrentlyIsolated
-                          ? 'off'
-                          : 'rnnoise-isolate';
-                        updateActiveTimelineClip((c) => ({
-                          ...c,
-                          audioMasteringPreset: nextPreset,
-                        }));
-                        setMarkerNotice(
-                          nextPreset === 'rnnoise-isolate'
-                            ? 'RNNoise Neural Voice Isolation ENABLED (Live + Export)'
-                            : 'Voice Isolation turned off'
-                        );
-                        setTimeout(() => setMarkerNotice(null), 2600);
-                      }}
-                      title="Isolate vocal speech cleanly using RNNoise WebAssembly neural denoising + high-pass de-hum"
-                    >
-                      <Volume2 size={11} />
-                      {activeClip?.audioMasteringPreset === 'rnnoise-isolate'
-                        ? 'Voice Isolated (RNNoise)'
-                        : 'Isolate Voice'}
-                    </button>
-
-                    <div className="studio-divider-v" />
-
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => {
-                        if (!activeClip || !activeSource) return;
-                        updateActiveTimelineClip((clip) => {
-                          const res = stripSilenceFromClip(clip, activeSource, 0.18);
-                          setMarkerNotice(
-                            `Stripped ${res.removedSeconds.toFixed(1)}s of dead air (${res.cutsCreated} cuts)`
-                          );
-                          setTimeout(() => setMarkerNotice(null), 2600);
-                          return res.updatedClip;
-                        });
-                      }}
-                    >
-                      <Scissors size={11} />
-                      Strip Dead Air
-                    </button>
-
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => {
-                        if (!activeClip || !activeSource) return;
-                        updateActiveTimelineClip((clip) => {
-                          const res = snapCutsToAudioBeats(clip, activeSource);
-                          setMarkerNotice(`Synced ${res.beatCutsCount} cuts to audio peaks`);
-                          setTimeout(() => setMarkerNotice(null), 2600);
-                          return res.updatedClip;
-                        });
-                      }}
-                    >
-                      <Zap size={11} />
-                      Beat-Sync Cuts
-                    </button>
-
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={isTranscribingAudio}
-                      onClick={handleRunAITranscription}
-                    >
-                      <Mic size={11} />
-                      {isTranscribingAudio
-                        ? `Transcribing ${transcriptionProgress}%`
-                        : 'Transcribe Captions'}
-                    </button>
-
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      style={{
-                        borderColor: 'rgba(168, 85, 247, 0.7)',
-                        background: 'rgba(168, 85, 247, 0.2)',
-                        color: '#f3e8ff',
-                        fontWeight: 600,
-                      }}
-                      onClick={() => setIsTranscriptEditorOpen(true)}
-                      title="Open window to edit full video transcription and caption lines"
-                    >
-                      <FileText size={11} />
-                      Edit Transcript
-                    </button>
-                  </div>
-
-                  {/* Right: Caption Style Dropdown, 9:16 Fill Mode & Playback Speed */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    {/* Radix Dropdown for Caption Style & Placement */}
-                    <DropdownMenu.Root>
-                      <DropdownMenu.Trigger asChild>
-                        <button type="button" className="btn btn-sm">
-                          <span>
-                            Captions:{' '}
-                            {activeClip?.hideCaptions
-                              ? 'Hidden'
-                              : activeClip?.captionStyle || 'Hormozi'}
-                          </span>
-                          <ChevronDown size={11} />
-                        </button>
-                      </DropdownMenu.Trigger>
-                      <DropdownMenu.Portal>
-                        <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5}>
-                          <div className="rx-dropdown-label">Caption Style</div>
-                          {(
-                            [
-                              { id: 'bold-hormozi', label: 'Bold Hormozi' },
-                              { id: 'clean-minimal', label: 'Clean Minimal' },
-                              { id: 'kinetic-neon', label: 'Kinetic Neon' },
-                              { id: 'graffiti-pop', label: 'Street / Marker' },
-                              { id: 'editorial-serif', label: 'Editorial Serif' },
-                            ] as const
-                          ).map((st) => {
-                            const isSel =
-                              !activeClip?.hideCaptions &&
-                              (activeClip?.captionStyle || 'bold-hormozi') === st.id;
-                            return (
-                              <DropdownMenu.Item
-                                key={st.id}
-                                className="rx-dropdown-item"
-                                onSelect={() => {
-                                  updateActiveTimelineClip((c) => ({
-                                    ...c,
-                                    hideCaptions: false,
-                                    captionStyle: st.id as any,
-                                  }));
-                                }}
-                              >
-                                <span>{st.label}</span>
-                                {isSel && <Check size={12} />}
-                              </DropdownMenu.Item>
-                            );
-                          })}
-                          <DropdownMenu.Separator className="rx-dropdown-separator" />
-                          <div className="rx-dropdown-label">Placement</div>
-                          {(
-                            [
-                              { label: 'Top', y: 0.14 },
-                              { label: 'Middle', y: 0.5 },
-                              { label: 'Bottom', y: 0.77 },
-                            ] as const
-                          ).map((pos) => {
-                            const curY = activeClip?.captionPositionY ?? 0.77;
-                            const isSel = !activeClip?.hideCaptions && Math.abs(curY - pos.y) < 0.08;
-                            return (
-                              <DropdownMenu.Item
-                                key={pos.label}
-                                className="rx-dropdown-item"
-                                onSelect={() => {
-                                  updateActiveTimelineClip((c) => ({
-                                    ...c,
-                                    hideCaptions: false,
-                                    captionPositionY: pos.y,
-                                  }));
-                                }}
-                              >
-                                <span>{pos.label}</span>
-                                {isSel && <Check size={12} />}
-                              </DropdownMenu.Item>
-                            );
-                          })}
-                          <DropdownMenu.Separator className="rx-dropdown-separator" />
-                          <DropdownMenu.Item
-                            className="rx-dropdown-item"
-                            onSelect={() => {
-                              updateActiveTimelineClip((c) => ({
-                                ...c,
-                                hideCaptions: !c.hideCaptions,
-                              }));
-                            }}
-                          >
-                            <span>{activeClip?.hideCaptions ? 'Show Captions' : 'Hide Captions'}</span>
-                            {activeClip?.hideCaptions && <Check size={12} />}
-                          </DropdownMenu.Item>
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Portal>
-                    </DropdownMenu.Root>
-
-                    {/* 9:16 Fill Mode Segmented Group */}
-                    <div className="seg-group">
-                      {(
-                        [
-                          { id: 'blurred', label: 'Blur Fill' },
-                          { id: 'black', label: 'Black Bars' },
-                          { id: 'split-screen', label: 'Split-Screen' },
-                        ] as Array<{ id: BackgroundFillStyle; label: string }>
-                      ).map((opt) => {
-                        const cutMode = inspectedCut?.layoutMode || 'inherit';
-                        const clipFill = activeClip?.backgroundFillStyle ?? 'blurred';
-                        const effectiveCutFill: BackgroundFillStyle =
-                          cutMode === 'split-screen'
-                            ? 'split-screen'
-                            : cutMode === 'full-single' ||
-                                cutMode === 'full-speaker-a' ||
-                                cutMode === 'full-speaker-b'
-                              ? clipFill === 'black'
-                                ? 'black'
-                                : 'blurred'
-                              : clipFill;
-                        return (
+                      {/* TAB 2: 2-SPEAKER PODCAST SPLIT-SCREEN, AUTO-SWITCH & PER-CUT LAYOUTS */}
+                      <ShadcnTabsContent value="speakers" className="shadcn-command-deck-body">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <span className="section-label">2-Speaker Modes</span>
                           <button
-                            key={opt.id}
                             type="button"
-                            className="seg-item"
-                            data-active={effectiveCutFill === opt.id}
-                            onClick={() => {
-                              if (opt.id === 'split-screen') {
-                                handleTwoSpeakerMode('split-screen');
-                              } else {
-                                const targetIdx = activeClip
-                                  ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
-                                  : 0;
+                            className={`btn btn-sm ${
+                              activeClip?.backgroundFillStyle === 'split-screen' ? 'btn-active' : ''
+                            }`}
+                            onClick={() => handleTwoSpeakerMode('split-screen')}
+                            title="Stack Speaker A (Top) and Speaker B (Bottom) in a 9:16 Dual Split-Screen"
+                          >
+                            <Layers size={11} />
+                            2-Speaker Split-Screen
+                          </button>
+
+                          <button
+                            type="button"
+                            className={`btn btn-sm ${
+                              activeClip?.backgroundFillStyle !== 'split-screen' &&
+                              activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+                                ? 'btn-active'
+                                : ''
+                            }`}
+                            onClick={() => handleTwoSpeakerMode('auto-switch')}
+                            title="Automatically cut back and forth between Speaker A (Left) and Speaker B (Right)"
+                          >
+                            <UserCheck size={11} />
+                            Auto-Switch Speakers
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={isRunningLipSyncSwitch}
+                            onClick={handleRunLipSyncSpeakerAutoSwitch}
+                            title="MediaPipe 478-point Lip-Sync Mouth Aspect Ratio (MAR) active speaker turn detection"
+                          >
+                            <Wand2 size={11} />
+                            {isRunningLipSyncSwitch ? 'Lip-Sync Scan...' : 'Lip-Sync Switch'}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={isAutoLayoutRunning}
+                            onClick={handleAutoDetectSplitVsFullLayout}
+                            title="Automatically switch cuts between 2-Speaker Split-Screen (when 2 faces are detected) and Full-Screen (when 1 subject is detected)"
+                          >
+                            <Maximize2 size={11} />
+                            {isAutoLayoutRunning ? 'Scanning Layout...' : 'Auto Split/Full'}
+                          </button>
+
+                          {inspectedCut && (
+                            <>
+                              <ShadcnSeparator orientation="vertical" />
+                              <span className="section-label">Cut #{inspectedCut.index} Layout</span>
+                              <div
+                                className="shadcn-tabs-list"
+                                title="Set Layout for Selected Cut (#1=Full, #2=Split, #3=Spk A, #4=Spk B)"
+                              >
+                                <button
+                                  type="button"
+                                  className="shadcn-tabs-trigger"
+                                  data-state={
+                                    (inspectedCut.layoutMode || 'inherit') === 'full-single' ||
+                                    ((inspectedCut.layoutMode || 'inherit') === 'inherit' &&
+                                      activeClip?.backgroundFillStyle !== 'split-screen')
+                                      ? 'active'
+                                      : 'inactive'
+                                  }
+                                  onClick={() => handleSetSelectedCutLayoutMode('full-single')}
+                                >
+                                  Full [1]
+                                </button>
+                                <button
+                                  type="button"
+                                  className="shadcn-tabs-trigger"
+                                  data-state={
+                                    inspectedCut.layoutMode === 'split-screen' ||
+                                    ((inspectedCut.layoutMode || 'inherit') === 'inherit' &&
+                                      activeClip?.backgroundFillStyle === 'split-screen')
+                                      ? 'active'
+                                      : 'inactive'
+                                  }
+                                  onClick={() => handleSetSelectedCutLayoutMode('split-screen')}
+                                >
+                                  Split [2]
+                                </button>
+                                <button
+                                  type="button"
+                                  className="shadcn-tabs-trigger"
+                                  data-state={
+                                    inspectedCut.layoutMode === 'full-speaker-a'
+                                      ? 'active'
+                                      : 'inactive'
+                                  }
+                                  onClick={() => handleSetSelectedCutLayoutMode('full-speaker-a')}
+                                >
+                                  Spk A [3]
+                                </button>
+                                <button
+                                  type="button"
+                                  className="shadcn-tabs-trigger"
+                                  data-state={
+                                    inspectedCut.layoutMode === 'full-speaker-b'
+                                      ? 'active'
+                                      : 'inactive'
+                                  }
+                                  onClick={() => handleSetSelectedCutLayoutMode('full-speaker-b')}
+                                >
+                                  Spk B [4]
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Speaker A / B Scale & Split Ratio Sliders */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span className="section-label">Spk A</span>
+                            <input
+                              type="range"
+                              min={0.5}
+                              max={2.4}
+                              step={0.05}
+                              value={activeClip?.speakerAScale ?? 1.0}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                updateActiveTimelineClip((c) => ({ ...c, speakerAScale: val }));
+                              }}
+                              style={{ width: 52 }}
+                            />
+                            <span className="badge-subtle">
+                              {(activeClip?.speakerAScale ?? 1.0).toFixed(2)}x
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span className="section-label">Spk B</span>
+                            <input
+                              type="range"
+                              min={0.5}
+                              max={2.4}
+                              step={0.05}
+                              value={activeClip?.speakerBScale ?? 1.0}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                updateActiveTimelineClip((c) => ({ ...c, speakerBScale: val }));
+                              }}
+                              style={{ width: 52 }}
+                            />
+                            <span className="badge-subtle">
+                              {(activeClip?.speakerBScale ?? 1.0).toFixed(2)}x
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span className="section-label">Split</span>
+                            <input
+                              type="range"
+                              min={0.25}
+                              max={0.75}
+                              step={0.01}
+                              value={activeClip?.splitScreenRatio ?? 0.5}
+                              onChange={(e) =>
                                 updateActiveTimelineClip((c) => ({
                                   ...c,
-                                  backgroundFillStyle:
-                                    c.subCuts.length === 1
-                                      ? opt.id
-                                      : c.backgroundFillStyle === 'split-screen'
-                                        ? 'split-screen'
-                                        : opt.id,
-                                  subCuts:
-                                    c.subCuts.length > 1
-                                      ? c.subCuts.map((sc, idx) =>
-                                          idx === targetIdx
-                                            ? {
-                                                ...sc,
-                                                layoutMode:
-                                                  sc.layoutMode === 'full-speaker-a' ||
-                                                  sc.layoutMode === 'full-speaker-b'
-                                                    ? sc.layoutMode
-                                                    : 'full-single',
-                                              }
-                                            : sc
-                                        )
-                                      : c.subCuts,
-                                }));
+                                  splitScreenRatio: parseFloat(e.target.value),
+                                }))
                               }
+                              style={{ width: 52 }}
+                            />
+                            <span className="badge-subtle">
+                              {Math.round((activeClip?.splitScreenRatio ?? 0.5) * 100)}%
+                            </span>
+                          </div>
+                        </div>
+                      </ShadcnTabsContent>
+
+                      {/* TAB 3: AI TOOLS, VOICE ISOLATION, AUDIO MASTERING, FX & SPEED */}
+                      <ShadcnTabsContent value="ai-audio" className="shadcn-command-deck-body">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <button
+                            type="button"
+                            className={`btn btn-sm ${
+                              activeClip?.audioMasteringPreset === 'rnnoise-isolate'
+                                ? 'btn-active'
+                                : ''
+                            }`}
+                            style={
+                              activeClip?.audioMasteringPreset === 'rnnoise-isolate'
+                                ? {
+                                    borderColor: 'rgba(16, 185, 129, 0.8)',
+                                    background: 'rgba(16, 185, 129, 0.22)',
+                                    color: '#6ee7b7',
+                                  }
+                                : undefined
+                            }
+                            onClick={() => {
+                              const isCurrentlyIsolated =
+                                activeClip?.audioMasteringPreset === 'rnnoise-isolate';
+                              const nextPreset: AudioMasteringPresetId = isCurrentlyIsolated
+                                ? 'off'
+                                : 'rnnoise-isolate';
+                              updateActiveTimelineClip((c) => ({
+                                ...c,
+                                audioMasteringPreset: nextPreset,
+                              }));
+                              setMarkerNotice(
+                                nextPreset === 'rnnoise-isolate'
+                                  ? 'RNNoise Neural Voice Isolation ENABLED (Live + Export)'
+                                  : 'Voice Isolation turned off'
+                              );
+                              setTimeout(() => setMarkerNotice(null), 2600);
+                            }}
+                            title="Isolate vocal speech cleanly using RNNoise WebAssembly neural denoising + high-pass de-hum"
+                          >
+                            <Volume2 size={11} />
+                            {activeClip?.audioMasteringPreset === 'rnnoise-isolate'
+                              ? 'Voice Isolated (RNNoise)'
+                              : 'Isolate Voice'}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => {
+                              if (!activeClip || !activeSource) return;
+                              updateActiveTimelineClip((clip) => {
+                                const res = stripSilenceFromClip(clip, activeSource, 0.18);
+                                setMarkerNotice(
+                                  `Stripped ${res.removedSeconds.toFixed(1)}s of dead air (${res.cutsCreated} cuts)`
+                                );
+                                setTimeout(() => setMarkerNotice(null), 2600);
+                                return res.updatedClip;
+                              });
                             }}
                           >
-                            {opt.label}
+                            <Scissors size={11} />
+                            Strip Dead Air
                           </button>
-                        );
-                      })}
-                    </div>
 
-                    {/* Radix Dropdown for Inter-Cut Transition & Color Grade LUT */}
-                    <DropdownMenu.Root>
-                      <DropdownMenu.Trigger asChild>
-                        <button type="button" className="btn btn-sm" title="Cut Transitions & Color Grade LUT">
-                          <Sliders size={11} />
-                          <span>
-                            FX:{' '}
-                            {activeClip?.transitionStyle && activeClip.transitionStyle !== 'none'
-                              ? activeClip.transitionStyle
-                              : activeClip?.colorGradeLut && activeClip.colorGradeLut !== 'none'
-                                ? activeClip.colorGradeLut
-                                : 'Clean'}
-                          </span>
-                          <ChevronDown size={11} />
-                        </button>
-                      </DropdownMenu.Trigger>
-                      <DropdownMenu.Portal>
-                        <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5}>
-                          <div className="rx-dropdown-label">Cut Transition (V1)</div>
-                          {(
-                            [
-                              { id: 'none', label: 'Hard Cut (None)' },
-                              { id: 'zoom-punch', label: 'Zoom-Punch Cut' },
-                              { id: 'whip-pan', label: 'Whip-Pan Blur' },
-                              { id: 'flash-cut', label: 'Flash Frame Cut' },
-                              { id: 'chromatic-glitch', label: 'Chromatic Glitch' },
-                            ] as Array<{ id: CutTransitionStyleId; label: string }>
-                          ).map((tr) => {
-                            const isSel = (activeClip?.transitionStyle || 'none') === tr.id;
-                            return (
-                              <DropdownMenu.Item
-                                key={tr.id}
-                                className="rx-dropdown-item"
-                                onSelect={() => {
-                                  updateActiveTimelineClip((c) => ({
-                                    ...c,
-                                    transitionStyle: tr.id,
-                                  }));
-                                }}
-                              >
-                                <span>{tr.label}</span>
-                                {isSel && <Check size={12} />}
-                              </DropdownMenu.Item>
-                            );
-                          })}
-                          <DropdownMenu.Separator className="rx-dropdown-separator" />
-                          <div className="rx-dropdown-label">Color Grade LUT</div>
-                          {(
-                            [
-                              { id: 'none', label: 'Natural (No LUT)' },
-                              { id: 'cinematic-teal-orange', label: 'Cinematic Teal & Orange' },
-                              { id: 'warm-podcast', label: 'Warm Studio Podcast' },
-                              { id: 'crisp-contrast', label: 'Crisp High Contrast' },
-                              { id: 'noir-bw', label: 'Monochrome Noir B&W' },
-                            ] as Array<{ id: ColorGradeLutId; label: string }>
-                          ).map((lut) => {
-                            const isSel = (activeClip?.colorGradeLut || 'none') === lut.id;
-                            return (
-                              <DropdownMenu.Item
-                                key={lut.id}
-                                className="rx-dropdown-item"
-                                onSelect={() => {
-                                  updateActiveTimelineClip((c) => ({
-                                    ...c,
-                                    colorGradeLut: lut.id,
-                                  }));
-                                }}
-                              >
-                                <span>{lut.label}</span>
-                                {isSel && <Check size={12} />}
-                              </DropdownMenu.Item>
-                            );
-                          })}
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Portal>
-                    </DropdownMenu.Root>
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => {
+                              if (!activeClip || !activeSource) return;
+                              updateActiveTimelineClip((clip) => {
+                                const res = snapCutsToAudioBeats(clip, activeSource);
+                                setMarkerNotice(`Synced ${res.beatCutsCount} cuts to audio peaks`);
+                                setTimeout(() => setMarkerNotice(null), 2600);
+                                return res.updatedClip;
+                              });
+                            }}
+                          >
+                            <Zap size={11} />
+                            Beat-Sync Cuts
+                          </button>
 
-                    {/* Radix Dropdown for Playback Speed */}
-                    <DropdownMenu.Root>
-                      <DropdownMenu.Trigger asChild>
-                        <button type="button" className="btn btn-sm">
-                          <span style={{ fontFamily: 'var(--font-mono)' }}>
-                            {(activeClip?.playbackSpeed ?? 1.0).toFixed(2).replace(/\.00$/, '.0')}x
-                          </span>
-                          <ChevronDown size={11} />
-                        </button>
-                      </DropdownMenu.Trigger>
-                      <DropdownMenu.Portal>
-                        <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5}>
-                          <div className="rx-dropdown-label">Playback Speed</div>
-                          {[0.75, 1.0, 1.25, 1.5].map((spd) => {
-                            const curSpd = activeClip?.playbackSpeed ?? 1.0;
-                            const isSel = Math.abs(curSpd - spd) < 0.03;
-                            return (
-                              <DropdownMenu.Item
-                                key={spd}
-                                className="rx-dropdown-item"
-                                onSelect={() => {
-                                  if (videoRef.current) videoRef.current.playbackRate = spd;
-                                  updateActiveTimelineClip((c) => ({
-                                    ...c,
-                                    playbackSpeed: spd,
-                                    subCuts: c.subCuts.map((cut) => ({ ...cut, speed: spd })),
-                                  }));
-                                }}
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={isTranscribingAudio}
+                            onClick={handleRunAITranscription}
+                          >
+                            <Mic size={11} />
+                            {isTranscribingAudio
+                              ? `Transcribing ${transcriptionProgress}%`
+                              : 'Transcribe Captions'}
+                          </button>
+
+                          <ShadcnSeparator orientation="vertical" />
+
+                          {/* Audio Mastering Preset Selector */}
+                          <div className="shadcn-tabs-list">
+                            {(
+                              [
+                                { id: 'off', label: 'Raw' },
+                                { id: 'rnnoise-isolate', label: 'RNNoise' },
+                                { id: 'podcast-clarity', label: 'Podcast 85Hz' },
+                                { id: 'broadcast-lufs', label: '-14 LUFS' },
+                                { id: 'vocal-boost', label: 'Vocal Boost' },
+                              ] as Array<{ id: AudioMasteringPresetId; label: string }>
+                            ).map((preset) => {
+                              const cur = activeClip?.audioMasteringPreset || 'off';
+                              return (
+                                <button
+                                  key={preset.id}
+                                  type="button"
+                                  className="shadcn-tabs-trigger"
+                                  style={{ padding: '0 7px', height: 22 }}
+                                  data-state={cur === preset.id ? 'active' : 'inactive'}
+                                  onClick={() =>
+                                    updateActiveTimelineClip((c) => ({
+                                      ...c,
+                                      audioMasteringPreset: preset.id,
+                                    }))
+                                  }
+                                >
+                                  {preset.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {/* Radix Dropdown for Inter-Cut Transition & Color Grade LUT */}
+                          <DropdownMenu.Root>
+                            <DropdownMenu.Trigger asChild>
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                title="Cut Transitions & Color Grade LUT"
                               >
-                                <span style={{ fontFamily: 'var(--font-mono)' }}>{spd}x</span>
-                                {isSel && <Check size={12} />}
-                              </DropdownMenu.Item>
-                            );
-                          })}
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Portal>
-                    </DropdownMenu.Root>
-                  </div>
-                </div>
+                                <Sliders size={11} />
+                                <span>
+                                  FX:{' '}
+                                  {activeClip?.transitionStyle &&
+                                  activeClip.transitionStyle !== 'none'
+                                    ? activeClip.transitionStyle
+                                    : activeClip?.colorGradeLut &&
+                                        activeClip.colorGradeLut !== 'none'
+                                      ? activeClip.colorGradeLut
+                                      : 'Clean'}
+                                </span>
+                                <ChevronDown size={11} />
+                              </button>
+                            </DropdownMenu.Trigger>
+                            <DropdownMenu.Portal>
+                              <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5}>
+                                <div className="rx-dropdown-label">Cut Transition (V1)</div>
+                                {(
+                                  [
+                                    { id: 'none', label: 'Hard Cut (None)' },
+                                    { id: 'zoom-punch', label: 'Zoom-Punch Cut' },
+                                    { id: 'whip-pan', label: 'Whip-Pan Blur' },
+                                    { id: 'flash-cut', label: 'Flash Frame Cut' },
+                                    { id: 'chromatic-glitch', label: 'Chromatic Glitch' },
+                                  ] as Array<{ id: CutTransitionStyleId; label: string }>
+                                ).map((tr) => {
+                                  const isSel = (activeClip?.transitionStyle || 'none') === tr.id;
+                                  return (
+                                    <DropdownMenu.Item
+                                      key={tr.id}
+                                      className="rx-dropdown-item"
+                                      onSelect={() => {
+                                        updateActiveTimelineClip((c) => ({
+                                          ...c,
+                                          transitionStyle: tr.id,
+                                        }));
+                                      }}
+                                    >
+                                      <span>{tr.label}</span>
+                                      {isSel && <Check size={12} />}
+                                    </DropdownMenu.Item>
+                                  );
+                                })}
+                                <DropdownMenu.Separator className="rx-dropdown-separator" />
+                                <div className="rx-dropdown-label">Color Grade LUT</div>
+                                {(
+                                  [
+                                    { id: 'none', label: 'Natural (No LUT)' },
+                                    {
+                                      id: 'cinematic-teal-orange',
+                                      label: 'Cinematic Teal & Orange',
+                                    },
+                                    { id: 'warm-podcast', label: 'Warm Studio Podcast' },
+                                    { id: 'crisp-contrast', label: 'Crisp High Contrast' },
+                                    { id: 'noir-bw', label: 'Monochrome Noir B&W' },
+                                  ] as Array<{ id: ColorGradeLutId; label: string }>
+                                ).map((lut) => {
+                                  const isSel = (activeClip?.colorGradeLut || 'none') === lut.id;
+                                  return (
+                                    <DropdownMenu.Item
+                                      key={lut.id}
+                                      className="rx-dropdown-item"
+                                      onSelect={() => {
+                                        updateActiveTimelineClip((c) => ({
+                                          ...c,
+                                          colorGradeLut: lut.id,
+                                        }));
+                                      }}
+                                    >
+                                      <span>{lut.label}</span>
+                                      {isSel && <Check size={12} />}
+                                    </DropdownMenu.Item>
+                                  );
+                                })}
+                              </DropdownMenu.Content>
+                            </DropdownMenu.Portal>
+                          </DropdownMenu.Root>
+
+                          {/* Radix Dropdown for Playback Speed */}
+                          <DropdownMenu.Root>
+                            <DropdownMenu.Trigger asChild>
+                              <button type="button" className="btn btn-sm">
+                                <span style={{ fontFamily: 'var(--font-mono)' }}>
+                                  {(activeClip?.playbackSpeed ?? 1.0)
+                                    .toFixed(2)
+                                    .replace(/\.00$/, '.0')}
+                                  x
+                                </span>
+                                <ChevronDown size={11} />
+                              </button>
+                            </DropdownMenu.Trigger>
+                            <DropdownMenu.Portal>
+                              <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5}>
+                                <div className="rx-dropdown-label">Playback Speed</div>
+                                {[0.75, 1.0, 1.25, 1.5].map((spd) => {
+                                  const curSpd = activeClip?.playbackSpeed ?? 1.0;
+                                  const isSel = Math.abs(curSpd - spd) < 0.03;
+                                  return (
+                                    <DropdownMenu.Item
+                                      key={spd}
+                                      className="rx-dropdown-item"
+                                      onSelect={() => {
+                                        if (videoRef.current) videoRef.current.playbackRate = spd;
+                                        updateActiveTimelineClip((c) => ({
+                                          ...c,
+                                          playbackSpeed: spd,
+                                          subCuts: c.subCuts.map((cut) => ({
+                                            ...cut,
+                                            speed: spd,
+                                          })),
+                                        }));
+                                      }}
+                                    >
+                                      <span style={{ fontFamily: 'var(--font-mono)' }}>{spd}x</span>
+                                      {isSel && <Check size={12} />}
+                                    </DropdownMenu.Item>
+                                  );
+                                })}
+                              </DropdownMenu.Content>
+                            </DropdownMenu.Portal>
+                          </DropdownMenu.Root>
+                        </div>
+                      </ShadcnTabsContent>
+
+                      {/* TAB 4: CAPTIONS (V3) & TEXT/LOTTIE OVERLAYS (V4) */}
+                      <ShadcnTabsContent value="layers" className="shadcn-command-deck-body">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => {
+                              if (!activeClip) return;
+                              const newId = `ov-${Date.now()}`;
+                              const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
+                              const endT = Number(
+                                Math.min(
+                                  activeClip.duration,
+                                  startT + Math.min(6, activeClip.duration)
+                                ).toFixed(2)
+                              );
+                              const newLayer: VideoOverlayLayer = {
+                                id: newId,
+                                name: `Text Layer ${(activeClip.overlayLayers?.length || 0) + 1}`,
+                                kind: 'text-banner',
+                                text: 'NEW OVERLAY TEXT',
+                                x: 0.5,
+                                y: 0.22,
+                                scale: 1.0,
+                                startTime: startT,
+                                endTime: Math.max(startT + 0.5, endT),
+                                bgColor: 'rgba(12, 12, 16, 0.88)',
+                                textColor: '#ffffff',
+                                visible: true,
+                              };
+                              updateActiveTimelineClip((c) => ({
+                                ...c,
+                                hideBannerLayer: false,
+                                overlayLayers: [...(c.overlayLayers || []), newLayer],
+                              }));
+                              setSelectedLayerTrack('v4-overlay');
+                              setSelectedOverlayLayerId(newId);
+                            }}
+                            title="Add a new movable & scalable V4 Text Overlay Layer at the playhead"
+                          >
+                            <Plus size={11} />
+                            + Text Layer (V4)
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => {
+                              if (!activeClip) return;
+                              const newId = `lottie-${Date.now()}`;
+                              const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
+                              const endT = Number(
+                                Math.min(
+                                  activeClip.duration,
+                                  startT + Math.min(6, activeClip.duration)
+                                ).toFixed(2)
+                              );
+                              const presets: LottieOverlayPresetId[] = [
+                                'viral-flame',
+                                'subscribe-pulse',
+                                'live-badge',
+                                'arrow-pointer',
+                              ];
+                              const chosenPreset =
+                                presets[(activeClip.overlayLayers?.length || 0) % presets.length];
+                              const newLayer: VideoOverlayLayer = {
+                                id: newId,
+                                name: `Lottie Sticker ${(activeClip.overlayLayers?.length || 0) + 1}`,
+                                kind: 'lottie-sticker',
+                                text: '',
+                                x: 0.78,
+                                y: 0.22,
+                                scale: 1.0,
+                                startTime: startT,
+                                endTime: Math.max(startT + 0.5, endT),
+                                bgColor: 'rgba(12, 12, 16, 0.88)',
+                                textColor: '#ffffff',
+                                visible: true,
+                                lottiePreset: chosenPreset,
+                              };
+                              updateActiveTimelineClip((c) => ({
+                                ...c,
+                                hideBannerLayer: false,
+                                overlayLayers: [...(c.overlayLayers || []), newLayer],
+                              }));
+                              setSelectedLayerTrack('v4-overlay');
+                              setSelectedOverlayLayerId(newId);
+                            }}
+                            title="Add an animated Lottie vector sticker layer on V4"
+                          >
+                            <Sparkles size={11} />
+                            + Lottie Sticker (V4)
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => {
+                              if (!activeClip) return;
+                              const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
+                              const endT = Number(
+                                Math.min(activeClip.duration, startT + 3.0).toFixed(2)
+                              );
+                              const newCapId = `cap-manual-${Date.now()}`;
+                              updateActiveTimelineClip((c) => {
+                                const existing = c.captions || [];
+                                const nextSeg = {
+                                  id: newCapId,
+                                  start: startT,
+                                  end: Math.max(startT + 0.4, endT),
+                                  text: c.captionText || 'New caption layer',
+                                  words: [
+                                    {
+                                      word: c.captionText || 'New caption layer',
+                                      start: startT,
+                                      end: Math.max(startT + 0.4, endT),
+                                    },
+                                  ],
+                                };
+                                return {
+                                  ...c,
+                                  hideCaptions: false,
+                                  captions: [...existing, nextSeg],
+                                };
+                              });
+                              setSelectedLayerTrack('v3-captions');
+                              setSelectedCaptionId(newCapId);
+                            }}
+                            title="Add a timed V3 Caption block at the playhead"
+                          >
+                            <Type size={11} />
+                            + Caption (V3)
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            disabled={isTranscribingAudio}
+                            onClick={handleRunAITranscription}
+                          >
+                            <Mic size={11} />
+                            {isTranscribingAudio
+                              ? `Transcribing ${transcriptionProgress}%`
+                              : 'Transcribe Captions'}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            style={{
+                              borderColor: 'rgba(168, 85, 247, 0.7)',
+                              background: 'rgba(168, 85, 247, 0.2)',
+                              color: '#f3e8ff',
+                              fontWeight: 600,
+                            }}
+                            onClick={() => setIsTranscriptEditorOpen(true)}
+                            title="Open window to edit full video transcription and caption lines"
+                          >
+                            <FileText size={11} />
+                            Edit Transcript
+                          </button>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          {/* Radix Dropdown for Caption Style & Placement */}
+                          <DropdownMenu.Root>
+                            <DropdownMenu.Trigger asChild>
+                              <button type="button" className="btn btn-sm">
+                                <span>
+                                  Captions:{' '}
+                                  {activeClip?.hideCaptions
+                                    ? 'Hidden'
+                                    : activeClip?.captionStyle || 'Hormozi'}
+                                </span>
+                                <ChevronDown size={11} />
+                              </button>
+                            </DropdownMenu.Trigger>
+                            <DropdownMenu.Portal>
+                              <DropdownMenu.Content className="rx-dropdown-content" sideOffset={5}>
+                                <div className="rx-dropdown-label">Caption Style</div>
+                                {(
+                                  [
+                                    { id: 'bold-hormozi', label: 'Bold Hormozi' },
+                                    { id: 'clean-minimal', label: 'Clean Minimal' },
+                                    { id: 'kinetic-neon', label: 'Kinetic Neon' },
+                                    { id: 'graffiti-pop', label: 'Street / Marker' },
+                                    { id: 'editorial-serif', label: 'Editorial Serif' },
+                                  ] as const
+                                ).map((st) => {
+                                  const isSel =
+                                    !activeClip?.hideCaptions &&
+                                    (activeClip?.captionStyle || 'bold-hormozi') === st.id;
+                                  return (
+                                    <DropdownMenu.Item
+                                      key={st.id}
+                                      className="rx-dropdown-item"
+                                      onSelect={() => {
+                                        updateActiveTimelineClip((c) => ({
+                                          ...c,
+                                          hideCaptions: false,
+                                          captionStyle: st.id as any,
+                                        }));
+                                      }}
+                                    >
+                                      <span>{st.label}</span>
+                                      {isSel && <Check size={12} />}
+                                    </DropdownMenu.Item>
+                                  );
+                                })}
+                                <DropdownMenu.Separator className="rx-dropdown-separator" />
+                                <div className="rx-dropdown-label">Placement</div>
+                                {(
+                                  [
+                                    { label: 'Top', y: 0.14 },
+                                    { label: 'Middle', y: 0.5 },
+                                    { label: 'Bottom', y: 0.77 },
+                                  ] as const
+                                ).map((pos) => {
+                                  const curY = activeClip?.captionPositionY ?? 0.77;
+                                  const isSel =
+                                    !activeClip?.hideCaptions && Math.abs(curY - pos.y) < 0.08;
+                                  return (
+                                    <DropdownMenu.Item
+                                      key={pos.label}
+                                      className="rx-dropdown-item"
+                                      onSelect={() => {
+                                        updateActiveTimelineClip((c) => ({
+                                          ...c,
+                                          hideCaptions: false,
+                                          captionPositionY: pos.y,
+                                        }));
+                                      }}
+                                    >
+                                      <span>{pos.label}</span>
+                                      {isSel && <Check size={12} />}
+                                    </DropdownMenu.Item>
+                                  );
+                                })}
+                                <DropdownMenu.Separator className="rx-dropdown-separator" />
+                                <DropdownMenu.Item
+                                  className="rx-dropdown-item"
+                                  onSelect={() => {
+                                    updateActiveTimelineClip((c) => ({
+                                      ...c,
+                                      hideCaptions: !c.hideCaptions,
+                                    }));
+                                  }}
+                                >
+                                  <span>
+                                    {activeClip?.hideCaptions ? 'Show Captions' : 'Hide Captions'}
+                                  </span>
+                                  {activeClip?.hideCaptions && <Check size={12} />}
+                                </DropdownMenu.Item>
+                              </DropdownMenu.Content>
+                            </DropdownMenu.Portal>
+                          </DropdownMenu.Root>
+                        </div>
+                      </ShadcnTabsContent>
+                    </>
+                  )}
+                </ShadcnTabs>
               </>
             )}
 
@@ -7385,20 +7961,20 @@ export const App: React.FC = () => {
               <div
                 className={`studio-splitter-h ${resizingPane === 'timeline' ? 'is-dragging' : ''}`}
                 onMouseDown={() => setResizingPane('timeline')}
-                onDoubleClick={() => setTimelineHeight(265)}
+                onDoubleClick={() => setTimelineHeight(245)}
                 title="Drag to resize Video Monitors vs Multi-Track Layer Timeline (double-click to reset)"
               />
             )}
 
-            {/* Multi-Track NLE Layer Dock: Transport, Video Layers (V4/V3/V2/V1/A1) & Active Layer Inspector */}
+            {/* Multi-Track NLE Layer Dock: Streamlined shadcn/ui Transport Bar, Video Layers (V4/V3/V2/V1/A1) & Active Layer Inspector */}
             {activeSource && activeClip && (
               <div
                 style={{
                   height: timelineHeight,
-                  minHeight: 175,
+                  minHeight: 165,
                   maxHeight: 520,
                   flexShrink: 0,
-                  padding: '8px 12px 10px',
+                  padding: '6px 10px 8px',
                   background: 'var(--bg-panel)',
                   display: 'flex',
                   flexDirection: 'column',
@@ -7406,205 +7982,38 @@ export const App: React.FC = () => {
                   overflowY: 'auto',
                 }}
               >
-                {/* Transport & Layer Actions Bar */}
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    flexWrap: 'wrap',
-                    gap: 8,
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                {/* Consolidated Single-Row CapCut Timeline Toolbar (horizontally scrollable on compact MacBook screens) */}
+                <div className="shadcn-toolbar-row">
+                  {/* Left: Transport + Cut Edit Operations + CapCut Timeline Switches */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
                     <button
-                      className="btn btn-primary"
+                      className="btn btn-primary btn-sm"
                       style={{
-                        height: 28,
-                        padding: '0 12px',
-                        fontSize: 12,
+                        height: 26,
+                        padding: '0 10px',
                         fontWeight: 600,
                       }}
                       onClick={() => handleTogglePlay(false)}
                       title="Play / Pause [Space or K]"
                     >
-                      {isPlaying && !isLoopingInOut ? <Pause size={13} /> : <Play size={13} />}
-                      {isPlaying && !isLoopingInOut ? 'Pause [Space]' : 'Play [Space]'}
+                      {isPlaying && !isLoopingInOut ? <Pause size={12} /> : <Play size={12} />}
+                      {isPlaying && !isLoopingInOut ? 'Pause' : 'Play'}
                     </button>
 
                     <button
                       type="button"
                       className="btn btn-sm"
-                      style={{ height: 28 }}
+                      style={{ height: 26 }}
                       onClick={handleStopPlayback}
                       title="Stop playback and rewind to start of clip [Shortcut: S]"
                     >
-                      <Square size={11} />
-                      Stop [S]
+                      <Square size={10} />
+                      Stop
                     </button>
 
-                    <button
-                      type="button"
-                      className={`btn ${isMuted ? 'btn-danger' : 'btn-active'}`}
-                      style={{
-                        height: 28,
-                        padding: '0 11px',
-                        fontSize: 12,
-                        fontWeight: 600,
-                        gap: 6,
-                      }}
-                      onClick={() => {
-                        const nextMute = !isMuted;
-                        setIsMuted(nextMute);
-                        if (videoRef.current) videoRef.current.muted = nextMute;
-                      }}
-                      title={isMuted ? 'Click to turn sound ON [M]' : 'Click to mute sound [M]'}
-                    >
-                      {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                      {isMuted ? 'Sound Off' : 'Sound On'}
-                    </button>
+                    <ShadcnSeparator orientation="vertical" />
 
-                    <div className="studio-divider-v" />
-
-                    {/* Undo / Redo Timeline Controls */}
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={handleUndo}
-                      disabled={undoStack.length === 0}
-                      title={
-                        undoStack.length > 0
-                          ? `Undo last timeline action (${undoStack.length} steps) [Shortcut: Ctrl+Z]`
-                          : 'Nothing to undo [Shortcut: Ctrl+Z]'
-                      }
-                    >
-                      <Undo2 size={11} />
-                      Undo{undoStack.length > 0 ? ` (${undoStack.length})` : ''}
-                    </button>
-
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={handleRedo}
-                      disabled={redoStack.length === 0}
-                      title={
-                        redoStack.length > 0
-                          ? `Redo timeline action (${redoStack.length} steps) [Shortcut: Ctrl+Y]`
-                          : 'Nothing to redo [Shortcut: Ctrl+Y]'
-                      }
-                    >
-                      <Redo2 size={11} />
-                      Redo{redoStack.length > 0 ? ` (${redoStack.length})` : ''}
-                    </button>
-
-                    <div className="studio-divider-v" />
-
-                    {/* CapCut Timeline Features: Main Track Magnet, Auto Snapping, Linkage, Preview Axis, Compound Clip */}
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${isMainTrackMagnet ? 'btn-active' : ''}`}
-                      style={
-                        !isMainTrackMagnet
-                          ? {
-                              borderColor: 'rgba(245, 158, 11, 0.7)',
-                              background: 'rgba(245, 158, 11, 0.14)',
-                              color: '#fcd34d',
-                            }
-                          : undefined
-                      }
-                      onClick={handleToggleMainTrackMagnet}
-                      title="Main Track Magnet [Shortcut: P] — ON: automatically closes gaps on V1 when cuts are deleted or moved. OFF: leaves gaps in place and lets you drag cuts freely."
-                    >
-                      <Magnet size={11} />
-                      Magnet: {isMainTrackMagnet ? 'ON' : 'OFF'} [P]
-                    </button>
-
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${isAutoSnap ? 'btn-active' : ''}`}
-                      onClick={() => {
-                        setIsAutoSnap((prev) => {
-                          const next = !prev;
-                          setMarkerNotice(
-                            next
-                              ? 'Auto Snapping: ON — playhead & cuts align to edges [N]'
-                              : 'Auto Snapping: OFF — free un-snapped positioning [N]'
-                          );
-                          setTimeout(() => setMarkerNotice(null), 2400);
-                          return next;
-                        });
-                      }}
-                      title="Auto Snapping [Shortcut: N] — Aligns playhead and clips to neighboring cut, caption, and overlay edges to prevent tiny gaps."
-                    >
-                      <Magnet size={11} />
-                      Snap: {isAutoSnap ? 'ON' : 'OFF'} [N]
-                    </button>
-
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${isTrackLinkage ? 'btn-active' : ''}`}
-                      onClick={() => {
-                        setIsTrackLinkage((prev) => {
-                          const next = !prev;
-                          setMarkerNotice(
-                            next
-                              ? 'Track Linkage: ON — V3 Captions & V4 Overlays move with main V1 cuts [L]'
-                              : 'Track Linkage: OFF — V1 cuts move independently of V3/V4 layers [L]'
-                          );
-                          setTimeout(() => setMarkerNotice(null), 2400);
-                          return next;
-                        });
-                      }}
-                      title="Linkage [Shortcut: L] — Attaches secondary elements (V3 captions, V4 overlays) to the main track so they shift together when cuts are moved or deleted."
-                    >
-                      {isTrackLinkage ? <Link2 size={11} /> : <Unlink2 size={11} />}
-                      Linkage: {isTrackLinkage ? 'ON' : 'OFF'} [L]
-                    </button>
-
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${isPreviewAxis ? 'btn-active' : ''}`}
-                      onClick={() => {
-                        setIsPreviewAxis((prev) => {
-                          const next = !prev;
-                          if (!next) setPreviewAxisClipTime(null);
-                          setMarkerNotice(
-                            next
-                              ? 'Preview Axis: ON — hover across timeline for live thumbnail scrubbing [V]'
-                              : 'Preview Axis: OFF [V]'
-                          );
-                          setTimeout(() => setMarkerNotice(null), 2400);
-                          return next;
-                        });
-                      }}
-                      title="Preview Axis [Shortcut: V] — Scrub live video thumbnail previews across the timeline on hover."
-                    >
-                      <ScanLine size={11} />
-                      Preview Axis: {isPreviewAxis ? 'ON' : 'OFF'} [V]
-                    </button>
-
-                    {(activeClip.subCuts.length > 1 || inspectedCut?.isCompoundClip) && (
-                      <button
-                        type="button"
-                        className={`btn btn-sm ${inspectedCut?.isCompoundClip ? 'btn-active' : ''}`}
-                        onClick={handleToggleCompoundClip}
-                        title={
-                          inspectedCut?.isCompoundClip
-                            ? 'Break apart this Compound Clip back into individual cuts [Shortcut: Alt+G]'
-                            : 'Group all timeline cuts into a single Compound Clip [Shortcut: Alt+G]'
-                        }
-                      >
-                        {inspectedCut?.isCompoundClip ? (
-                          <PackageOpen size={11} />
-                        ) : (
-                          <Package size={11} />
-                        )}
-                        {inspectedCut?.isCompoundClip ? 'Unpack Compound [Alt+G]' : 'Compound Clip [Alt+G]'}
-                      </button>
-                    )}
-
-                    <div className="studio-divider-v" />
-
+                    {/* Cut Editing Group */}
                     <button
                       type="button"
                       className={`btn btn-sm ${isRazorMode ? 'btn-active' : ''}`}
@@ -7622,7 +8031,7 @@ export const App: React.FC = () => {
                       title="Split Video Cut at Playhead [Shortcut: B or Ctrl+K]"
                     >
                       <Scissors size={11} />
-                      Split Cut [B]
+                      Split [B]
                     </button>
 
                     <button
@@ -7632,7 +8041,7 @@ export const App: React.FC = () => {
                       title="Copy Selected Video Cut [Shortcut: Ctrl+C]"
                     >
                       <Copy size={11} />
-                      Copy Cut [Ctrl+C]
+                      Copy
                     </button>
 
                     <button
@@ -7647,71 +8056,136 @@ export const App: React.FC = () => {
                       }
                     >
                       <ClipboardPaste size={11} />
-                      Paste Cut [Ctrl+V]
+                      Paste
                     </button>
 
-                    {/* Per-Cut Layout Mode Switcher: Switch any cut between Split-Screen and Full-Screen */}
-                    {inspectedCut && (
-                      <div className="seg-group" title="Set Layout for Selected Cut (#1=Full, #2=Split, #3=Spk A, #4=Spk B)">
+                    {activeClip.subCuts.length > 1 && inspectedCut && (
+                      <>
                         <button
                           type="button"
-                          className="seg-item"
-                          style={{ height: 22, fontSize: 10, padding: '0 6px' }}
-                          data-active={
-                            (inspectedCut.layoutMode || 'inherit') === 'full-single' ||
-                            ((inspectedCut.layoutMode || 'inherit') === 'inherit' &&
-                              activeClip.backgroundFillStyle !== 'split-screen')
-                          }
-                          onClick={() => handleSetSelectedCutLayoutMode('full-single')}
-                          title="Full-Screen Single Subject for this Cut [Shortcut: 1]"
+                          className="btn btn-sm btn-danger"
+                          onClick={handleDeleteSelectedCut}
+                          title="Delete selected cut [Delete / Backspace]"
                         >
-                          Full [1]
+                          <Trash2 size={11} />
+                          Del #{inspectedCut.index}
                         </button>
                         <button
                           type="button"
-                          className="seg-item"
-                          style={{ height: 22, fontSize: 10, padding: '0 6px' }}
-                          data-active={
-                            inspectedCut.layoutMode === 'split-screen' ||
-                            ((inspectedCut.layoutMode || 'inherit') === 'inherit' &&
-                              activeClip.backgroundFillStyle === 'split-screen')
-                          }
-                          onClick={() => handleSetSelectedCutLayoutMode('split-screen')}
-                          title="2-Speaker Split-Screen for this Cut [Shortcut: 2]"
+                          className="btn btn-sm"
+                          onClick={handleSaveSelectedCutAsClip}
+                          title="Save selected cut as a standalone clip"
                         >
-                          Split [2]
+                          <Plus size={11} />
+                          Save Cut
                         </button>
-                        <button
-                          type="button"
-                          className="seg-item"
-                          style={{ height: 22, fontSize: 10, padding: '0 6px' }}
-                          data-active={inspectedCut.layoutMode === 'full-speaker-a'}
-                          onClick={() => handleSetSelectedCutLayoutMode('full-speaker-a')}
-                          title="Full-Screen Speaker A for this Cut [Shortcut: 3]"
-                        >
-                          Spk A [3]
-                        </button>
-                        <button
-                          type="button"
-                          className="seg-item"
-                          style={{ height: 22, fontSize: 10, padding: '0 6px' }}
-                          data-active={inspectedCut.layoutMode === 'full-speaker-b'}
-                          onClick={() => handleSetSelectedCutLayoutMode('full-speaker-b')}
-                          title="Full-Screen Speaker B for this Cut [Shortcut: 4]"
-                        >
-                          Spk B [4]
-                        </button>
-                      </div>
+                      </>
                     )}
 
+                    <ShadcnSeparator orientation="vertical" />
+
+                    {/* CapCut Timeline Mode Toggle Pills (shadcn/ui TogglePill) */}
+                    <TogglePill
+                      checked={isMainTrackMagnet}
+                      onCheckedChange={() => handleToggleMainTrackMagnet()}
+                      icon={<Magnet size={11} />}
+                      label="Magnet"
+                      shortcut="P"
+                      activeColor="blue"
+                      title="Main Track Magnet [Shortcut: P] — ON: automatically closes gaps on V1 when cuts are deleted or moved. OFF: leaves gaps in place and lets you drag cuts freely."
+                    />
+
+                    <TogglePill
+                      checked={isAutoSnap}
+                      onCheckedChange={(next) => {
+                        setIsAutoSnap(next);
+                        setMarkerNotice(
+                          next
+                            ? 'Auto Snapping: ON — playhead & cuts align to edges [N]'
+                            : 'Auto Snapping: OFF — free un-snapped positioning [N]'
+                        );
+                        setTimeout(() => setMarkerNotice(null), 2400);
+                      }}
+                      icon={<Magnet size={11} />}
+                      label="Snap"
+                      shortcut="N"
+                      activeColor="emerald"
+                      title="Auto Snapping [Shortcut: N] — Aligns playhead and clips to neighboring cut, caption, and overlay edges."
+                    />
+
+                    <TogglePill
+                      checked={isTrackLinkage}
+                      onCheckedChange={(next) => {
+                        setIsTrackLinkage(next);
+                        setMarkerNotice(
+                          next
+                            ? 'Track Linkage: ON — V3 Captions & V4 Overlays move with main V1 cuts [L]'
+                            : 'Track Linkage: OFF — V1 cuts move independently of V3/V4 layers [L]'
+                        );
+                        setTimeout(() => setMarkerNotice(null), 2400);
+                      }}
+                      icon={isTrackLinkage ? <Link2 size={11} /> : <Unlink2 size={11} />}
+                      label="Linkage"
+                      shortcut="L"
+                      activeColor="purple"
+                      title="Linkage [Shortcut: L] — Attaches secondary elements (V3 captions, V4 overlays) to the main track so they shift together."
+                    />
+
+                    <TogglePill
+                      checked={isPreviewAxis}
+                      onCheckedChange={(next) => {
+                        setIsPreviewAxis(next);
+                        if (!next) setPreviewAxisClipTime(null);
+                        setMarkerNotice(
+                          next
+                            ? 'Preview Axis: ON — hover across timeline for live thumbnail scrubbing [V]'
+                            : 'Preview Axis: OFF [V]'
+                        );
+                        setTimeout(() => setMarkerNotice(null), 2400);
+                      }}
+                      icon={<ScanLine size={11} />}
+                      label="Preview Axis"
+                      shortcut="V"
+                      activeColor="amber"
+                      title="Preview Axis [Shortcut: V] — Scrub live video thumbnail previews across the timeline on hover."
+                    />
+
+                    {(activeClip.subCuts.length > 1 || inspectedCut?.isCompoundClip) && (
+                      <button
+                        type="button"
+                        className={`btn btn-sm ${inspectedCut?.isCompoundClip ? 'btn-active' : ''}`}
+                        onClick={handleToggleCompoundClip}
+                        title={
+                          inspectedCut?.isCompoundClip
+                            ? 'Break apart this Compound Clip back into individual cuts [Shortcut: Alt+G]'
+                            : 'Group all timeline cuts into a single Compound Clip [Shortcut: Alt+G]'
+                        }
+                      >
+                        {inspectedCut?.isCompoundClip ? (
+                          <PackageOpen size={11} />
+                        ) : (
+                          <Package size={11} />
+                        )}
+                        {inspectedCut?.isCompoundClip ? 'Unpack [Alt+G]' : 'Compound [Alt+G]'}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Right: Quick Layer Add + In / Out Range Bar */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
                     <button
                       type="button"
                       className="btn btn-sm"
                       onClick={() => {
+                        setStudioDeckTab('layers');
+                        setIsStudioDeckCollapsed(false);
                         const newId = `ov-${Date.now()}`;
                         const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
                         const endT = Number(
-                          Math.min(activeClip.duration, startT + Math.min(6, activeClip.duration)).toFixed(2)
+                          Math.min(
+                            activeClip.duration,
+                            startT + Math.min(6, activeClip.duration)
+                          ).toFixed(2)
                         );
                         const newLayer: VideoOverlayLayer = {
                           id: newId,
@@ -7735,62 +8209,18 @@ export const App: React.FC = () => {
                         setSelectedLayerTrack('v4-overlay');
                         setSelectedOverlayLayerId(newId);
                       }}
-                      title="Add a new movable & scalable V4 Text Overlay Layer at the playhead"
+                      title="Add V4 Text Layer at Playhead"
                     >
-                      <Plus size={11} />
-                      + Text Layer (V4)
+                      <Plus size={10} />
+                      +V4 Text
                     </button>
 
                     <button
                       type="button"
                       className="btn btn-sm"
                       onClick={() => {
-                        const newId = `lottie-${Date.now()}`;
-                        const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
-                        const endT = Number(
-                          Math.min(activeClip.duration, startT + Math.min(6, activeClip.duration)).toFixed(2)
-                        );
-                        const presets: LottieOverlayPresetId[] = [
-                          'viral-flame',
-                          'subscribe-pulse',
-                          'live-badge',
-                          'arrow-pointer',
-                        ];
-                        const chosenPreset =
-                          presets[(activeClip.overlayLayers?.length || 0) % presets.length];
-                        const newLayer: VideoOverlayLayer = {
-                          id: newId,
-                          name: `Lottie Sticker ${(activeClip.overlayLayers?.length || 0) + 1}`,
-                          kind: 'lottie-sticker',
-                          text: '',
-                          x: 0.78,
-                          y: 0.22,
-                          scale: 1.0,
-                          startTime: startT,
-                          endTime: Math.max(startT + 0.5, endT),
-                          bgColor: 'rgba(12, 12, 16, 0.88)',
-                          textColor: '#ffffff',
-                          visible: true,
-                          lottiePreset: chosenPreset,
-                        };
-                        updateActiveTimelineClip((c) => ({
-                          ...c,
-                          hideBannerLayer: false,
-                          overlayLayers: [...(c.overlayLayers || []), newLayer],
-                        }));
-                        setSelectedLayerTrack('v4-overlay');
-                        setSelectedOverlayLayerId(newId);
-                      }}
-                      title="Add an animated Lottie vector sticker layer on V4"
-                    >
-                      <Sparkles size={11} />
-                      + Lottie Sticker (V4)
-                    </button>
-
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => {
+                        setStudioDeckTab('layers');
+                        setIsStudioDeckCollapsed(false);
                         const startT = Number(Math.max(0, clipPlayheadTime).toFixed(2));
                         const endT = Number(
                           Math.min(activeClip.duration, startT + 3.0).toFixed(2)
@@ -7820,46 +8250,14 @@ export const App: React.FC = () => {
                         setSelectedLayerTrack('v3-captions');
                         setSelectedCaptionId(newCapId);
                       }}
-                      title="Add a timed V3 Caption block at the playhead"
+                      title="Add V3 Caption Block at Playhead"
                     >
-                      <Type size={11} />
-                      + Caption (V3)
+                      <Type size={10} />
+                      +V3 Caption
                     </button>
 
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => setIsTranscriptEditorOpen(true)}
-                      title="Open Transcript & Captions Editor Window"
-                    >
-                      <FileText size={11} />
-                      Edit Transcript
-                    </button>
+                    <ShadcnSeparator orientation="vertical" />
 
-                    {activeClip.subCuts.length > 1 && inspectedCut && (
-                      <>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-danger"
-                          onClick={handleDeleteSelectedCut}
-                        >
-                          <Trash2 size={11} />
-                          Delete Cut #{inspectedCut.index}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          onClick={handleSaveSelectedCutAsClip}
-                        >
-                          <Plus size={11} />
-                          Save Cut
-                        </button>
-                      </>
-                    )}
-                  </div>
-
-                  {/* In / Out Range Bar */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                     <button
                       className="btn btn-sm"
                       onClick={handleSetInMarkerAtPlayhead}
@@ -9675,6 +10073,7 @@ export const App: React.FC = () => {
             onMouseDown={() => setResizingPane('right')}
             onDoubleClick={() => setRightPanelWidth(315)}
             title="Drag to resize Right Assistant Panel (double-click to reset)"
+            style={{ display: rightSidebarOpen ? 'block' : 'none' }}
           />
 
           {/* RIGHT PANEL: Assistant */}
@@ -9694,6 +10093,7 @@ export const App: React.FC = () => {
               }
             }}
             style={{
+              display: rightSidebarOpen ? 'flex' : 'none',
               outline: isDraggingChatFile ? '1px dashed var(--border-focus)' : undefined,
               outlineOffset: -4,
             }}
@@ -9715,11 +10115,21 @@ export const App: React.FC = () => {
             <div className="studio-panel-header">
               <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Bot size={13} color="var(--text-secondary)" />
-                Assistant
+                AI Copilot
               </span>
-              <span className="badge-subtle">
-                {aiSettings.models[aiSettings.activeProvider] || aiSettings.activeProvider}
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="badge-subtle">
+                  {aiSettings.models[aiSettings.activeProvider] || aiSettings.activeProvider}
+                </span>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  style={{ height: 20, padding: '0 6px', fontSize: 10 }}
+                  onClick={() => setRightSidebarOpen(false)}
+                  title="Collapse AI Copilot panel"
+                >
+                  Hide
+                </button>
+              </div>
             </div>
 
             {/* Messages */}
