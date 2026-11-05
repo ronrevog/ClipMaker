@@ -280,7 +280,7 @@ export const App: React.FC = () => {
 
   // 3. Subject Focus & Click-to-Track State (keeps chosen subject locked in the center of 9:16!)
   const [clickPickMode, setClickPickMode] = useState<'track' | 'static'>('track');
-  const [applyFocusToAllClips, setApplyFocusToAllClips] = useState<boolean>(true);
+  const [applyFocusToAllClips, setApplyFocusToAllClips] = useState<boolean>(false);
   const [liveTrackedAnchor, setLiveTrackedAnchor] = useState<{ x: number; y: number } | null>(
     null
   );
@@ -549,52 +549,53 @@ export const App: React.FC = () => {
 
   const currentZoom = activeCut ? activeCut.zoom : activeClip?.zoomScale ?? 1.0;
   const currentCutBias = activeCut ? activeCut.cropBiasX : 0;
+  const activeCutFocus = activeCut?.subjectFocus || activeClip?.subjectFocus;
 
   // Extract sorted user Focus Lock Points along the timeline
   const userFocusAnchors = React.useMemo(() => {
-    const path = activeClip?.subjectFocus?.trackedPath;
+    const path = activeCutFocus?.trackedPath;
     if (!path || path.length === 0) return [];
     return path
       .filter((pt) => pt.isUserAnchor)
       .slice()
       .sort((a, b) => a.time - b.time);
-  }, [activeClip?.subjectFocus?.trackedPath]);
+  }, [activeCutFocus?.trackedPath]);
 
   const activeUserSplinePoint = React.useMemo(
-    () => evaluateUserAnchorSplineAtTime(activeClip?.subjectFocus?.trackedPath, playheadTime),
-    [activeClip?.subjectFocus?.trackedPath, playheadTime]
+    () => evaluateUserAnchorSplineAtTime(activeCutFocus?.trackedPath, playheadTime),
+    [activeCutFocus?.trackedPath, playheadTime]
   );
 
   // Build effective SubjectFocusConfig with real-time tracked coordinates when 'click-track' is active.
   // When 2+ user Focus Lock Points span the current playheadTime, the smooth spline between them takes priority!
-  const effectiveSubjectFocus: SubjectFocusConfig | undefined = activeClip?.subjectFocus
+  const effectiveSubjectFocus: SubjectFocusConfig | undefined = activeCutFocus
     ? {
-        ...activeClip.subjectFocus,
+        ...activeCutFocus,
         anchorX:
-          activeClip.subjectFocus.strategy === 'click-track' && activeUserSplinePoint
+          activeCutFocus.strategy === 'click-track' && activeUserSplinePoint
             ? activeUserSplinePoint.x
-            : activeClip.subjectFocus.strategy === 'click-track' && liveTrackedAnchor
+            : activeCutFocus.strategy === 'click-track' && liveTrackedAnchor
               ? liveTrackedAnchor.x
-              : activeClip.subjectFocus.anchorX,
+              : activeCutFocus.anchorX,
         anchorY:
-          activeClip.subjectFocus.strategy === 'click-track' && activeUserSplinePoint
+          activeCutFocus.strategy === 'click-track' && activeUserSplinePoint
             ? activeUserSplinePoint.y
-            : activeClip.subjectFocus.strategy === 'click-track' && liveTrackedAnchor
+            : activeCutFocus.strategy === 'click-track' && liveTrackedAnchor
               ? liveTrackedAnchor.y
-              : activeClip.subjectFocus.anchorY,
+              : activeCutFocus.anchorY,
         trackedPath:
-          activeClip.subjectFocus.strategy === 'click-track' &&
+          activeCutFocus.strategy === 'click-track' &&
           liveTrackedAnchor &&
           !activeUserSplinePoint
             ? undefined
-            : activeClip.subjectFocus.trackedPath,
+            : activeCutFocus.trackedPath,
       }
     : undefined;
 
   const currentTrack = getTrackingStateAtTime(
     activeSource?.trackingSamples || [],
     playheadTime,
-    (activeClip?.trackingOffsetX ?? 0) + currentCutBias,
+    (activeCut?.trackingOffsetX ?? activeClip?.trackingOffsetX ?? 0) + currentCutBias,
     activeClip?.manualKeyframes ?? [],
     effectiveSubjectFocus
   );
@@ -632,7 +633,8 @@ export const App: React.FC = () => {
       leftSubjectX: currentTrack.leftSubjectX,
       rightSubjectX: currentTrack.rightSubjectX,
       zoom: currentZoom,
-      backgroundFillStyle: activeClip?.backgroundFillStyle ?? 'blurred',
+      backgroundFillStyle:
+        activeCut?.backgroundFillStyle ?? activeClip?.backgroundFillStyle ?? 'blurred',
       activeClip,
       clipPlayheadTime,
     });
@@ -643,6 +645,7 @@ export const App: React.FC = () => {
     currentTrack.leftSubjectX,
     currentTrack.rightSubjectX,
     currentZoom,
+    activeCut?.backgroundFillStyle,
     activeClip,
     clipPlayheadTime,
   ]);
@@ -786,41 +789,41 @@ export const App: React.FC = () => {
   // Verify & snap the tracked object position directly on the live visible <video> frame
   const syncLiveObjectLockOnCurrentFrame = useCallback(() => {
     const vid = videoRef.current;
-    if (!vid || vid.readyState < 2 || !activeClip?.subjectFocus) return;
-    if (activeClip.subjectFocus.strategy !== 'click-track') return;
+    if (!vid || vid.readyState < 2 || !activeCutFocus) return;
+    if (activeCutFocus.strategy !== 'click-track') return;
 
     const pathHint = interpolateTrackedPathAtTime(
-      activeClip.subjectFocus.trackedPath,
+      activeCutFocus.trackedPath,
       vid.currentTime
     );
     const prevPt = liveTrackedAnchorRef.current ||
       pathHint || {
-        x: activeClip.subjectFocus.anchorX,
-        y: activeClip.subjectFocus.anchorY,
+        x: activeCutFocus.anchorX,
+        y: activeCutFocus.anchorY,
       };
 
     const nextPt = trackSubjectSignatureInVideoFrame(
       vid,
       prevPt.x,
       prevPt.y,
-      activeClip.subjectFocus.targetColorRgb,
-      activeClip.subjectFocus.templateSignature,
-      activeClip.subjectFocus.trackedPath
+      activeCutFocus.targetColorRgb,
+      activeCutFocus.templateSignature,
+      activeCutFocus.trackedPath
     );
     liveTrackedAnchorRef.current = nextPt;
     setLiveTrackedAnchor(nextPt);
-  }, [activeClip]);
+  }, [activeCutFocus]);
 
   // Run live frame object snap whenever paused frame / playhead changes
   useEffect(() => {
-    if (!isPlaying && activeClip?.subjectFocus?.strategy === 'click-track') {
+    if (!isPlaying && activeCutFocus?.strategy === 'click-track') {
       syncLiveObjectLockOnCurrentFrame();
     }
   }, [
     isPlaying,
     playheadTime,
-    activeClip?.subjectFocus?.strategy,
-    activeClip?.subjectFocus?.anchorTime,
+    activeCutFocus?.strategy,
+    activeCutFocus?.anchorTime,
     syncLiveObjectLockOnCurrentFrame,
   ]);
 
@@ -841,19 +844,22 @@ export const App: React.FC = () => {
 
       const vid = videoRef.current;
       if (vid && activeSource && activeClip) {
+        const curCut =
+          activeClip.subCuts[Math.max(0, Math.min(activeCutIdxRef.current, activeClip.subCuts.length - 1))];
+        const cutFocus = curCut?.subjectFocus || activeClip.subjectFocus;
         // Always run real-time visual + neural + rigid-object tracker on the live <video> element during playback!
-        if (activeClip.subjectFocus?.strategy === 'click-track') {
+        if (cutFocus?.strategy === 'click-track') {
           const prevPt = liveTrackedAnchorRef.current || {
-            x: activeClip.subjectFocus.anchorX,
-            y: activeClip.subjectFocus.anchorY,
+            x: cutFocus.anchorX,
+            y: cutFocus.anchorY,
           };
           const nextPt = trackSubjectSignatureInVideoFrame(
             vid,
             prevPt.x,
             prevPt.y,
-            activeClip.subjectFocus.targetColorRgb,
-            activeClip.subjectFocus.templateSignature,
-            activeClip.subjectFocus.trackedPath
+            cutFocus.targetColorRgb,
+            cutFocus.templateSignature,
+            cutFocus.trackedPath
           );
           liveTrackedAnchorRef.current = nextPt;
           setLiveTrackedAnchor(nextPt);
@@ -1151,33 +1157,83 @@ export const App: React.FC = () => {
     [timelineMode, selectedClipObj, recordUndoSnapshot]
   );
 
-  // Apply a target zoom level across every sub-cut on the timeline (and optionally all generated clips + scheme)
+  // Helper to materialize a SubCut's effective layout, fill style, subjectFocus, and speaker framing
+  // so that splitting a clip or modifying one cut NEVER leaks or overwrites any other cut!
+  const materializeSubCutState = useCallback(
+    (sc: SubCut, clip: GeneratedClip): SubCut => {
+      const effectiveLayout: CutLayoutMode =
+        sc.layoutMode && sc.layoutMode !== 'inherit'
+          ? sc.layoutMode
+          : (sc.backgroundFillStyle ?? clip.backgroundFillStyle) === 'split-screen'
+            ? 'split-screen'
+            : 'full-single';
+      const effectiveFill: BackgroundFillStyle =
+        effectiveLayout === 'split-screen'
+          ? 'split-screen'
+          : sc.backgroundFillStyle && sc.backgroundFillStyle !== 'split-screen'
+            ? sc.backgroundFillStyle
+            : clip.backgroundFillStyle === 'black'
+              ? 'black'
+              : 'blurred';
+      const clonedFocus = sc.subjectFocus
+        ? JSON.parse(JSON.stringify(sc.subjectFocus))
+        : clip.subjectFocus
+          ? JSON.parse(JSON.stringify(clip.subjectFocus))
+          : undefined;
+      return {
+        ...sc,
+        layoutMode: effectiveLayout,
+        backgroundFillStyle: effectiveFill,
+        subjectFocus: clonedFocus,
+        trackingOffsetX: sc.trackingOffsetX ?? clip.trackingOffsetX ?? 0,
+        speakerAX: sc.speakerAX ?? clip.speakerAX,
+        speakerAY: sc.speakerAY ?? clip.speakerAY,
+        speakerAScale: sc.speakerAScale ?? clip.speakerAScale,
+        speakerBX: sc.speakerBX ?? clip.speakerBX,
+        speakerBY: sc.speakerBY ?? clip.speakerBY,
+        speakerBScale: sc.speakerBScale ?? clip.speakerBScale,
+        splitScreenRatio: sc.splitScreenRatio ?? clip.splitScreenRatio,
+      };
+    },
+    []
+  );
+
+  // Apply a target zoom level to the selected cut (when split into multiple cuts) or the clip
   const applyZoomAcrossStudio = useCallback(
-    (rawZoom: number, applyToAllClips = true) => {
-      const z = Number(Math.max(0.55, Math.min(1.5, rawZoom || 1.0)).toFixed(2));
+    (rawZoom: number, applyToAllClips = false) => {
+      const z = Number(Math.max(0.55, Math.min(2.2, rawZoom || 1.0)).toFixed(2));
       const setAllCutsZoom = (clip: GeneratedClip): GeneratedClip => ({
         ...clip,
         zoomScale: z,
         subCuts: clip.subCuts.map((cut) => ({ ...cut, zoom: z })),
       });
 
-      setFullVideoClip((prev) => (prev ? setAllCutsZoom(prev) : prev));
       if (applyToAllClips) {
+        setFullVideoClip((prev) => (prev ? setAllCutsZoom(prev) : prev));
         setGeneratedClips((prev) => prev.map((c) => setAllCutsZoom(c)));
         setActiveScheme((prev) => ({
           ...prev,
           punchInZoom: Math.max(1.0, z),
         }));
-      } else if (selectedClipObj) {
-        setGeneratedClips((prev) =>
-          prev.map((c) => (c.id === selectedClipObj.id ? setAllCutsZoom(c) : c))
-        );
+        return;
       }
+
+      const targetIdx = activeClip
+        ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
+        : 0;
+
+      updateActiveTimelineClip((clip) => ({
+        ...clip,
+        zoomScale: clip.subCuts.length <= 1 ? z : clip.zoomScale,
+        subCuts: clip.subCuts.map((cut, idx) =>
+          clip.subCuts.length <= 1 || idx === targetIdx ? { ...cut, zoom: z } : cut
+        ),
+      }));
     },
-    [selectedClipObj]
+    [activeClip, selectedCutIndex, updateActiveTimelineClip]
   );
 
-  // Apply a SubjectFocusConfig to the active clip (and optionally all generated clips so the user doesn't have to re-pick!)
+  // Apply a SubjectFocusConfig isolated to the selected cut (when split) or active clip
   const applySubjectFocusConfig = useCallback(
     (focusConfig: SubjectFocusConfig, resetLiveAnchor = true) => {
       if (resetLiveAnchor) {
@@ -1186,19 +1242,47 @@ export const App: React.FC = () => {
         setLiveTrackedAnchor(pt);
       }
 
-      const patchFocusOnClip = (c: GeneratedClip): GeneratedClip => ({
-        ...c,
-        subjectFocus: focusConfig,
-        trackingOffsetX: 0,
-        manualKeyframes: [],
-        backgroundFillStyle:
-          c.backgroundFillStyle === 'split-screen'
-            ? 'blurred'
-            : c.backgroundFillStyle || 'blurred',
-        subCuts: c.subCuts.map((sc) =>
-          sc.layoutMode === 'split-screen' ? { ...sc, layoutMode: 'full-single' } : sc
-        ),
-      });
+      const targetIdx = activeClip
+        ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
+        : 0;
+
+      const patchFocusOnClip = (c: GeneratedClip): GeneratedClip => {
+        if (c.subCuts.length > 1) {
+          return {
+            ...c,
+            subCuts: c.subCuts.map((sc, idx) => {
+              const mat = materializeSubCutState(sc, c);
+              if (idx !== targetIdx) return mat;
+              return {
+                ...mat,
+                subjectFocus: focusConfig,
+                trackingOffsetX: 0,
+                layoutMode: 'full-single',
+                backgroundFillStyle:
+                  mat.backgroundFillStyle === 'black' ? 'black' : 'blurred',
+              };
+            }),
+          };
+        }
+        return {
+          ...c,
+          subjectFocus: focusConfig,
+          trackingOffsetX: 0,
+          manualKeyframes: [],
+          backgroundFillStyle:
+            c.backgroundFillStyle === 'split-screen'
+              ? 'blurred'
+              : c.backgroundFillStyle || 'blurred',
+          subCuts: c.subCuts.map((sc) => ({
+            ...sc,
+            subjectFocus: focusConfig,
+            trackingOffsetX: 0,
+            layoutMode: 'full-single',
+            backgroundFillStyle:
+              sc.backgroundFillStyle === 'black' ? 'black' : 'blurred',
+          })),
+        };
+      };
 
       if (applyFocusToAllClips) {
         setFullVideoClip((prev) => (prev ? patchFocusOnClip(prev) : prev));
@@ -1207,13 +1291,26 @@ export const App: React.FC = () => {
         updateActiveTimelineClip(patchFocusOnClip);
       }
     },
-    [applyFocusToAllClips, updateActiveTimelineClip]
+    [
+      activeClip,
+      selectedCutIndex,
+      applyFocusToAllClips,
+      materializeSubCutState,
+      updateActiveTimelineClip,
+    ]
   );
 
   // Quick Subject Focus Preset Selector (Auto Target, Lock Subject, Center Lock, Auto Face, Left Speaker, Right Speaker, Motion)
+  // Strictly isolated to the selected cut when a clip has multiple cuts!
   const handleSelectSubjectFocusStrategy = useCallback(
     (strategy: SubjectFocusStrategy) => {
       const isVerticalSource = nativeDims.width < nativeDims.height;
+      const targetIdx = activeClip
+        ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
+        : 0;
+      const currentCutObj = activeClip?.subCuts[targetIdx];
+      const existingCutFocus = currentCutObj?.subjectFocus || activeClip?.subjectFocus;
+
       let anchorX = 0.5;
       let anchorY = isVerticalSource ? 0.41 : 0.48;
       let label = 'Auto Target Subject';
@@ -1223,8 +1320,8 @@ export const App: React.FC = () => {
         anchorY = currentTrack.cropY ?? (isVerticalSource ? 0.41 : 0.48);
         label = 'Auto Target Subject';
       } else if (strategy === 'click-track') {
-        anchorX = activeClip?.subjectFocus?.anchorX ?? currentTrack.cropX ?? 0.5;
-        anchorY = activeClip?.subjectFocus?.anchorY ?? currentTrack.cropY ?? 0.46;
+        anchorX = existingCutFocus?.anchorX ?? currentTrack.cropX ?? 0.5;
+        anchorY = existingCutFocus?.anchorY ?? currentTrack.cropY ?? 0.46;
         label =
           userFocusAnchorsRef.current.length > 0
             ? `Tracked Subject (${userFocusAnchorsRef.current.length} Locks)`
@@ -1273,17 +1370,14 @@ export const App: React.FC = () => {
         anchorY,
         anchorTime: playheadTime,
         trackedPath:
-          strategy === 'click-track' ? activeClip?.subjectFocus?.trackedPath : undefined,
+          strategy === 'click-track' ? existingCutFocus?.trackedPath : undefined,
         templateSignature:
-          strategy === 'click-track' ? activeClip?.subjectFocus?.templateSignature : undefined,
+          strategy === 'click-track' ? existingCutFocus?.templateSignature : undefined,
         targetColorRgb:
-          strategy === 'click-track' ? activeClip?.subjectFocus?.targetColorRgb : undefined,
+          strategy === 'click-track' ? existingCutFocus?.targetColorRgb : undefined,
         label,
       };
 
-      const targetIdx = activeClip
-        ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
-        : 0;
       const targetCutLayout: CutLayoutMode =
         strategy === 'left-subject'
           ? 'full-speaker-a'
@@ -1292,9 +1386,6 @@ export const App: React.FC = () => {
             : 'full-single';
 
       const patchClipForFocus = (c: GeneratedClip): GeneratedClip => {
-        const wasTwoSpeaker =
-          c.backgroundFillStyle === 'split-screen' ||
-          c.subjectFocus?.label === '2-Speaker Auto-Switch';
         const speakerZoom =
           isVerticalSource && (strategy === 'left-subject' || strategy === 'right-subject')
             ? Math.max(1.85, currentZoom)
@@ -1306,6 +1397,40 @@ export const App: React.FC = () => {
               ? 0.24
               : 0;
 
+        // When clip has multiple cuts, isolate the action strictly to `targetIdx`!
+        if (c.subCuts.length > 1) {
+          return {
+            ...c,
+            subCuts: c.subCuts.map((sc, idx) => {
+              const mat = materializeSubCutState(sc, c);
+              if (idx !== targetIdx) return mat;
+              const wasCutTwoSpeaker =
+                mat.layoutMode === 'split-screen' ||
+                mat.subjectFocus?.label === '2-Speaker Auto-Switch';
+              return {
+                ...mat,
+                subjectFocus: newFocusConfig,
+                trackingOffsetX: 0,
+                zoom:
+                  wasCutTwoSpeaker && strategy !== 'left-subject' && strategy !== 'right-subject'
+                    ? 1.0
+                    : isVerticalSource &&
+                        (strategy === 'left-subject' || strategy === 'right-subject')
+                      ? speakerZoom
+                      : mat.zoom,
+                cropBiasX: targetBiasX,
+                layoutMode: targetCutLayout,
+                backgroundFillStyle:
+                  mat.backgroundFillStyle === 'black' ? 'black' : 'blurred',
+              };
+            }),
+          };
+        }
+
+        const wasTwoSpeaker =
+          c.backgroundFillStyle === 'split-screen' ||
+          c.subjectFocus?.label === '2-Speaker Auto-Switch';
+
         return {
           ...c,
           subjectFocus: newFocusConfig,
@@ -1316,28 +1441,25 @@ export const App: React.FC = () => {
               ? 'blurred'
               : c.backgroundFillStyle || 'blurred',
           zoomScale:
-            c.subCuts.length === 1
-              ? wasTwoSpeaker && strategy !== 'left-subject' && strategy !== 'right-subject'
+            wasTwoSpeaker && strategy !== 'left-subject' && strategy !== 'right-subject'
+              ? 1.0
+              : speakerZoom,
+          subCuts: c.subCuts.map((sc) => ({
+            ...sc,
+            subjectFocus: newFocusConfig,
+            trackingOffsetX: 0,
+            zoom:
+              wasTwoSpeaker && strategy !== 'left-subject' && strategy !== 'right-subject'
                 ? 1.0
-                : speakerZoom
-              : c.zoomScale,
-          subCuts: c.subCuts.map((sc, idx) => {
-            const shouldUpdateCut =
-              c.subCuts.length === 1 || wasTwoSpeaker || idx === targetIdx;
-            if (!shouldUpdateCut) return sc;
-            return {
-              ...sc,
-              zoom:
-                wasTwoSpeaker && strategy !== 'left-subject' && strategy !== 'right-subject'
-                  ? 1.0
-                  : isVerticalSource &&
-                      (strategy === 'left-subject' || strategy === 'right-subject')
-                    ? speakerZoom
-                    : sc.zoom,
-              cropBiasX: targetBiasX,
-              layoutMode: c.subCuts.length > 1 ? targetCutLayout : 'inherit',
-            };
-          }),
+                : isVerticalSource &&
+                    (strategy === 'left-subject' || strategy === 'right-subject')
+                  ? speakerZoom
+                  : sc.zoom,
+            cropBiasX: targetBiasX,
+            layoutMode: targetCutLayout,
+            backgroundFillStyle:
+              sc.backgroundFillStyle === 'black' ? 'black' : 'blurred',
+          })),
         };
       };
 
@@ -1351,9 +1473,11 @@ export const App: React.FC = () => {
 
       setMarkerNotice(
         strategy === 'click-track'
-          ? 'Lock Subject active — click any person or object on the Input Video to lock & track'
+          ? activeClip && activeClip.subCuts.length > 1
+            ? `Cut #${targetIdx + 1}: Lock Subject active — click any person or object on the Input Video`
+            : 'Lock Subject active — click any person or object on the Input Video to lock & track'
           : activeClip && activeClip.subCuts.length > 1
-            ? `Cut #${targetIdx + 1} set to: ${label}`
+            ? `Cut #${targetIdx + 1} set to: ${label} (other cuts unchanged)`
             : `9:16 Subject Focus set to: ${label}`
       );
       setTimeout(() => setMarkerNotice(null), 2600);
@@ -1364,6 +1488,7 @@ export const App: React.FC = () => {
       nativeDims,
       currentZoom,
       applyFocusToAllClips,
+      materializeSubCutState,
       recordUndoSnapshot,
       updateActiveTimelineClip,
       activeClip,
@@ -1372,6 +1497,7 @@ export const App: React.FC = () => {
   );
 
   // Dedicated 2-Speaker Podcast Director (Toggles Split-Screen OR Auto-Switch Speaker Cuts ON and OFF)
+  // Strictly isolated to the selected cut when `subCuts.length > 1`!
   const handleTwoSpeakerMode = useCallback(
     (mode: 'split-screen' | 'auto-switch') => {
       if (!activeClip || !activeSource) return;
@@ -1388,51 +1514,84 @@ export const App: React.FC = () => {
         const isCutCurrentlySplit =
           targetCut?.layoutMode === 'split-screen' ||
           ((targetCut?.layoutMode || 'inherit') === 'inherit' &&
-            activeClip.backgroundFillStyle === 'split-screen');
+            (targetCut?.backgroundFillStyle ?? activeClip.backgroundFillStyle) === 'split-screen');
 
-        // TOGGLE OFF if already in 2-Speaker Split-Screen!
+        // TOGGLE OFF if selected cut is already in 2-Speaker Split-Screen!
         if (isCutCurrentlySplit) {
+          const singleFocus: SubjectFocusConfig = {
+            strategy: 'auto-salient',
+            anchorX: 0.5,
+            anchorY: isVerticalSource ? 0.41 : 0.48,
+            anchorTime: playheadTime,
+            label: 'Auto Target Subject',
+          };
+
+          if (activeClip.subCuts.length > 1) {
+            updateActiveTimelineClip((clip) => ({
+              ...clip,
+              subCuts: clip.subCuts.map((sc, idx) => {
+                const mat = materializeSubCutState(sc, clip);
+                if (idx !== targetIdx) return mat;
+                return {
+                  ...mat,
+                  layoutMode: 'full-single',
+                  backgroundFillStyle: 'blurred',
+                  subjectFocus:
+                    !mat.subjectFocus || mat.subjectFocus.label === '2-Speaker Auto-Switch'
+                      ? singleFocus
+                      : mat.subjectFocus,
+                };
+              }),
+            }));
+            setMarkerNotice(
+              `Cut #${targetIdx + 1}: 2-Speaker Split-Screen OFF → Single 9:16 (other cuts unchanged)`
+            );
+            setTimeout(() => setMarkerNotice(null), 2600);
+            return;
+          }
+
           updateActiveTimelineClip((clip) => ({
             ...clip,
             backgroundFillStyle: 'blurred',
             subjectFocus:
               clip.subjectFocus?.label === '2-Speaker Auto-Switch' || !clip.subjectFocus
-                ? {
-                    strategy: 'auto-salient',
-                    anchorX: 0.5,
-                    anchorY: isVerticalSource ? 0.41 : 0.48,
-                    anchorTime: playheadTime,
-                    label: 'Auto Target Subject',
-                  }
+                ? singleFocus
                 : clip.subjectFocus,
-            subCuts: clip.subCuts.map((sc, idx) =>
-              clip.subCuts.length === 1 || idx === targetIdx || sc.layoutMode === 'split-screen'
-                ? { ...sc, layoutMode: 'full-single' }
-                : sc
-            ),
+            subCuts: clip.subCuts.map((sc) => ({
+              ...sc,
+              layoutMode: 'full-single',
+              backgroundFillStyle: 'blurred',
+            })),
           }));
           setMarkerNotice('2-Speaker Split-Screen: OFF (Returned to Single-Subject 9:16)');
           setTimeout(() => setMarkerNotice(null), 2600);
           return;
         }
 
-        // TOGGLE ON 2-Speaker Split-Screen!
+        // TOGGLE ON 2-Speaker Split-Screen (isolated to Cut #targetIdx when split into multiple cuts)!
         if (activeClip.subCuts.length > 1) {
           updateActiveTimelineClip((clip) => ({
             ...clip,
-            backgroundFillStyle: 'split-screen',
             speakerAX: clip.speakerAX ?? 0.26,
             speakerAY: clip.speakerAY ?? defaultY,
             speakerBX: clip.speakerBX ?? 0.74,
             speakerBY: clip.speakerBY ?? defaultY,
-            subCuts: clip.subCuts.map((sc, idx) =>
-              idx === targetIdx || !sc.layoutMode || sc.layoutMode === 'inherit'
-                ? { ...sc, layoutMode: 'split-screen' }
-                : sc
-            ),
+            subCuts: clip.subCuts.map((sc, idx) => {
+              const mat = materializeSubCutState(sc, clip);
+              if (idx !== targetIdx) return mat;
+              return {
+                ...mat,
+                layoutMode: 'split-screen',
+                backgroundFillStyle: 'split-screen',
+                speakerAX: mat.speakerAX ?? clip.speakerAX ?? 0.26,
+                speakerAY: mat.speakerAY ?? clip.speakerAY ?? defaultY,
+                speakerBX: mat.speakerBX ?? clip.speakerBX ?? 0.74,
+                speakerBY: mat.speakerBY ?? clip.speakerBY ?? defaultY,
+              };
+            }),
           }));
           setMarkerNotice(
-            `2-Speaker Split-Screen: ON for Cut #${targetIdx + 1} (Click again to toggle OFF)`
+            `Cut #${targetIdx + 1}: 2-Speaker Split-Screen ON (other cuts unchanged)`
           );
           setTimeout(() => setMarkerNotice(null), 2800);
           return;
@@ -1466,6 +1625,7 @@ export const App: React.FC = () => {
             zoom: 1.0,
             cropBiasX: 0,
             layoutMode: 'full-single',
+            backgroundFillStyle: 'blurred',
           })),
         }));
         setMarkerNotice('2-Speaker Auto-Switch: OFF (Returned to Single-Subject 9:16)');
@@ -1477,7 +1637,14 @@ export const App: React.FC = () => {
       setMarkerNotice('2-Speaker Auto-Switch: ON (Alternating Speaker A & Speaker B cuts)');
       setTimeout(() => setMarkerNotice(null), 3000);
     },
-    [activeClip, activeSource, selectedCutIndex, playheadTime, updateActiveTimelineClip]
+    [
+      activeClip,
+      activeSource,
+      selectedCutIndex,
+      playheadTime,
+      materializeSubCutState,
+      updateActiveTimelineClip,
+    ]
   );
 
   // Programmatically or interactively place a Focus Lock Point at normalized (0..1) coordinates on the source video
@@ -1642,23 +1809,60 @@ export const App: React.FC = () => {
       const clampedX = Number(Math.max(0.06, Math.min(0.94, rawNormX)).toFixed(3));
       const clampedY = Number(Math.max(0.06, Math.min(0.94, rawNormY)).toFixed(3));
       const defaultY = nativeDims.width < nativeDims.height ? 0.39 : 0.44;
+      const targetIdx = activeClip
+        ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
+        : 0;
 
       const patchClip = (c: GeneratedClip): GeneratedClip => {
-        const nextAX = speaker === 'A' ? clampedX : (c.speakerAX ?? 0.26);
-        const nextAY = speaker === 'A' ? clampedY : (c.speakerAY ?? defaultY);
-        const nextBX = speaker === 'B' ? clampedX : (c.speakerBX ?? 0.74);
-        const nextBY = speaker === 'B' ? clampedY : (c.speakerBY ?? defaultY);
+        const curCut = c.subCuts[targetIdx];
+        const nextAX =
+          speaker === 'A' ? clampedX : (curCut?.speakerAX ?? c.speakerAX ?? 0.26);
+        const nextAY =
+          speaker === 'A' ? clampedY : (curCut?.speakerAY ?? c.speakerAY ?? defaultY);
+        const nextBX =
+          speaker === 'B' ? clampedX : (curCut?.speakerBX ?? c.speakerBX ?? 0.74);
+        const nextBY =
+          speaker === 'B' ? clampedY : (curCut?.speakerBY ?? c.speakerBY ?? defaultY);
+
+        if (c.subCuts.length > 1 && c.subjectFocus?.label !== '2-Speaker Auto-Switch') {
+          return {
+            ...c,
+            subCuts: c.subCuts.map((sc, idx) => {
+              const mat = materializeSubCutState(sc, c);
+              if (idx !== targetIdx) return mat;
+              return {
+                ...mat,
+                speakerAX: nextAX,
+                speakerAY: nextAY,
+                speakerBX: nextBX,
+                speakerBY: nextBY,
+              };
+            }),
+          };
+        }
 
         const isAutoSwitch = c.subjectFocus?.label === '2-Speaker Auto-Switch';
         const nextSubCuts = isAutoSwitch
           ? c.subCuts.map((sc, idx) => {
-              const isSpkA = sc.label.includes('Speaker A') || (!sc.label.includes('Speaker B') && idx % 2 === 0);
+              const isSpkA =
+                sc.label.includes('Speaker A') ||
+                (!sc.label.includes('Speaker B') && idx % 2 === 0);
               return {
                 ...sc,
+                speakerAX: nextAX,
+                speakerAY: nextAY,
+                speakerBX: nextBX,
+                speakerBY: nextBY,
                 cropBiasX: Number(((isSpkA ? nextAX : nextBX) - 0.5).toFixed(3)),
               };
             })
-          : c.subCuts;
+          : c.subCuts.map((sc) => ({
+              ...sc,
+              speakerAX: nextAX,
+              speakerAY: nextAY,
+              speakerBX: nextBX,
+              speakerBY: nextBY,
+            }));
 
         return {
           ...c,
@@ -1666,12 +1870,13 @@ export const App: React.FC = () => {
           speakerAY: nextAY,
           speakerBX: nextBX,
           speakerBY: nextBY,
-          subjectFocus: isAutoSwitch && c.subjectFocus
-            ? {
-                ...c.subjectFocus,
-                anchorY: Number(((nextAY + nextBY) / 2).toFixed(3)),
-              }
-            : c.subjectFocus,
+          subjectFocus:
+            isAutoSwitch && c.subjectFocus
+              ? {
+                  ...c.subjectFocus,
+                  anchorY: Number(((nextAY + nextBY) / 2).toFixed(3)),
+                }
+              : c.subjectFocus,
           subCuts: nextSubCuts,
         };
       };
@@ -1683,7 +1888,14 @@ export const App: React.FC = () => {
         updateActiveTimelineClip(patchClip);
       }
     },
-    [applyFocusToAllClips, nativeDims, updateActiveTimelineClip]
+    [
+      activeClip,
+      selectedCutIndex,
+      applyFocusToAllClips,
+      nativeDims,
+      materializeSubCutState,
+      updateActiveTimelineClip,
+    ]
   );
 
   // MediaPipe 478-Point FaceLandmarker Lip-Sync Active Speaker Auto-Switch
@@ -1749,12 +1961,12 @@ export const App: React.FC = () => {
     const isCurrentCutSplit =
       curCut?.layoutMode === 'split-screen' ||
       ((curCut?.layoutMode || 'inherit') === 'inherit' &&
-        activeClip.backgroundFillStyle === 'split-screen');
+        (curCut?.backgroundFillStyle ?? activeClip.backgroundFillStyle) === 'split-screen');
     const isTwoSpeakerActive =
       isCurrentCutSplit ||
       (!isCurrentCutSplit &&
         (curCut?.layoutMode || 'inherit') === 'inherit' &&
-        activeClip.subjectFocus?.label === '2-Speaker Auto-Switch');
+        (curCut?.subjectFocus || activeClip.subjectFocus)?.label === '2-Speaker Auto-Switch');
 
     if (isTwoSpeakerActive) {
       const targetSpk = draggingSpeaker || selectedSpeakerTarget;
@@ -1771,7 +1983,7 @@ export const App: React.FC = () => {
       const sourceAnchors =
         userFocusAnchorsRef.current.length > 0
           ? userFocusAnchorsRef.current
-          : (activeClip?.subjectFocus?.trackedPath || []).filter((pt) => pt.isUserAnchor);
+          : (activeCutFocus?.trackedPath || []).filter((pt) => pt.isUserAnchor);
 
       const remainingAnchors = sourceAnchors
         .filter((pt) => pt.isUserAnchor && Math.abs(pt.time - anchorTime) > 0.08)
@@ -1779,7 +1991,7 @@ export const App: React.FC = () => {
 
       userFocusAnchorsRef.current = remainingAnchors;
 
-      if (remainingAnchors.length === 0 || !activeClip?.subjectFocus) {
+      if (remainingAnchors.length === 0 || !activeCutFocus) {
         liveTrackedAnchorRef.current = null;
         handleSelectSubjectFocusStrategy('auto-salient');
         return;
@@ -1793,7 +2005,7 @@ export const App: React.FC = () => {
 
       applySubjectFocusConfig(
         {
-          ...activeClip.subjectFocus,
+          ...activeCutFocus,
           anchorX: primary.x,
           anchorY: primary.y,
           anchorTime: primary.time,
@@ -1807,10 +2019,11 @@ export const App: React.FC = () => {
       );
       setTimeout(() => setMarkerNotice(null), 2600);
     },
-    [activeClip, applySubjectFocusConfig, handleSelectSubjectFocusStrategy]
+    [activeCutFocus, applySubjectFocusConfig, handleSelectSubjectFocusStrategy]
   );
 
   // Razor Cut at any specific clip timeline time (`targetClipTime` in 0 .. activeClip.duration)
+  // Materializes independent state on both Part 1 and Part 2 so subsequent actions on either cut stay 100% isolated!
   const handleRazorSplitAtClipTime = useCallback(
     (targetClipTime: number) => {
       if (!activeClip) return;
@@ -1822,7 +2035,8 @@ export const App: React.FC = () => {
       let splitSrcTime = sourceTime;
 
       for (let i = 0; i < activeClip.subCuts.length; i++) {
-        const cut = activeClip.subCuts[i];
+        const rawCut = activeClip.subCuts[i];
+        const cut = materializeSubCutState(rawCut, activeClip);
         if (
           !didSplit &&
           targetClipTime > cut.timelineStart + 0.03 &&
@@ -1855,10 +2069,9 @@ export const App: React.FC = () => {
             timelineStart: splitTl,
             timelineEnd: cut.timelineEnd,
             label: `${baseLabel} (Part 2)`,
-            zoom: cut.zoom,
-            cropBiasX: cut.cropBiasX,
-            layoutMode: cut.layoutMode,
-            speed: cut.speed,
+            subjectFocus: cut.subjectFocus
+              ? JSON.parse(JSON.stringify(cut.subjectFocus))
+              : undefined,
           });
         } else {
           nextSubCuts.push(cut);
@@ -1895,11 +2108,17 @@ export const App: React.FC = () => {
         videoRef.current.currentTime = splitSrcTime;
       }
       setMarkerNotice(
-        `Split into ${recalc.subCuts.length} active cuts at ${targetClipTime.toFixed(2)}s (Cut #${newCutIdx + 1} selected)`
+        `Split into ${recalc.subCuts.length} independent cuts at ${targetClipTime.toFixed(2)}s (Cut #${newCutIdx + 1} selected)`
       );
       setTimeout(() => setMarkerNotice(null), 2600);
     },
-    [activeClip, selectedCutIndex, isMainTrackMagnet, updateActiveTimelineClip]
+    [
+      activeClip,
+      selectedCutIndex,
+      isMainTrackMagnet,
+      materializeSubCutState,
+      updateActiveTimelineClip,
+    ]
   );
 
   // Split Active Clip at current playhead position
@@ -2035,9 +2254,28 @@ export const App: React.FC = () => {
       setSelectedLayerTrack('v1-video');
       updateActiveTimelineClip((clip) => ({
         ...clip,
-        subCuts: clip.subCuts.map((sc, idx) =>
-          idx === targetIdx ? { ...sc, layoutMode: mode } : sc
-        ),
+        backgroundFillStyle:
+          clip.subCuts.length <= 1
+            ? mode === 'split-screen'
+              ? 'split-screen'
+              : clip.backgroundFillStyle === 'black'
+                ? 'black'
+                : 'blurred'
+            : clip.backgroundFillStyle,
+        subCuts: clip.subCuts.map((sc, idx) => {
+          const mat = materializeSubCutState(sc, clip);
+          if (idx !== targetIdx) return mat;
+          return {
+            ...mat,
+            layoutMode: mode,
+            backgroundFillStyle:
+              mode === 'split-screen'
+                ? 'split-screen'
+                : mat.backgroundFillStyle === 'black'
+                  ? 'black'
+                  : 'blurred',
+          };
+        }),
       }));
       const modeName =
         mode === 'split-screen'
@@ -2049,10 +2287,14 @@ export const App: React.FC = () => {
               : mode === 'full-speaker-b'
                 ? 'Full-Screen (Speaker B)'
                 : 'Clip Default Layout';
-      setMarkerNotice(`Cut #${targetIdx + 1} layout set to ${modeName}`);
+      setMarkerNotice(
+        activeClip.subCuts.length > 1
+          ? `Cut #${targetIdx + 1} layout set to ${modeName} (other cuts unchanged)`
+          : `Layout set to ${modeName}`
+      );
       setTimeout(() => setMarkerNotice(null), 2400);
     },
-    [activeClip, selectedCutIndex, updateActiveTimelineClip]
+    [activeClip, selectedCutIndex, materializeSubCutState, updateActiveTimelineClip]
   );
 
   // Delete the currently selected cut on the timeline:
@@ -4962,20 +5204,25 @@ export const App: React.FC = () => {
   const inspectedCut =
     activeClip?.subCuts[Math.min(selectedCutIndex, (activeClip?.subCuts.length || 1) - 1)] ||
     activeCut;
+  const inspectedCutFocus = inspectedCut?.subjectFocus || activeClip?.subjectFocus;
 
   const activeFocusStrategy: SubjectFocusStrategy =
-    activeClip?.subjectFocus?.strategy || 'auto-salient';
+    inspectedCut?.layoutMode === 'full-speaker-a'
+      ? 'left-subject'
+      : inspectedCut?.layoutMode === 'full-speaker-b'
+        ? 'right-subject'
+        : inspectedCutFocus?.strategy || 'auto-salient';
 
   const isCurrentCutSplitScreen = Boolean(
     activeClip &&
       (inspectedCut?.layoutMode === 'split-screen' ||
         ((inspectedCut?.layoutMode || 'inherit') === 'inherit' &&
-          activeClip.backgroundFillStyle === 'split-screen'))
+          (inspectedCut?.backgroundFillStyle ?? activeClip.backgroundFillStyle) === 'split-screen'))
   );
   const isTwoSpeakerAutoSwitch = Boolean(
     !isCurrentCutSplitScreen &&
       (inspectedCut?.layoutMode || 'inherit') === 'inherit' &&
-      activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+      inspectedCutFocus?.label === '2-Speaker Auto-Switch'
   );
   const isTwoSpeakerModeActive = isCurrentCutSplitScreen || isTwoSpeakerAutoSwitch;
 
@@ -6381,18 +6628,32 @@ export const App: React.FC = () => {
                           const baseW = isVert ? 0.46 : 0.44;
                           const centerX =
                             scalingSpeaker === 'A'
-                              ? activeClip.speakerAX ?? 0.26
-                              : activeClip.speakerBX ?? 0.74;
+                              ? inspectedCut?.speakerAX ?? activeClip.speakerAX ?? 0.26
+                              : inspectedCut?.speakerBX ?? activeClip.speakerBX ?? 0.74;
                           const halfSpan = Math.max(0.09, Math.min(0.45, Math.abs(nx - centerX)));
                           const desiredBoxW = halfSpan * 2;
                           const computedScale = Number(
                             Math.max(0.5, Math.min(2.4, baseW / desiredBoxW)).toFixed(2)
                           );
-                          updateActiveTimelineClip((c) =>
-                            scalingSpeaker === 'A'
-                              ? { ...c, speakerAScale: computedScale }
-                              : { ...c, speakerBScale: computedScale }
+                          const targetIdx = Math.min(
+                            selectedCutIndex,
+                            Math.max(0, activeClip.subCuts.length - 1)
                           );
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            ...(c.subCuts.length <= 1
+                              ? scalingSpeaker === 'A'
+                                ? { speakerAScale: computedScale }
+                                : { speakerBScale: computedScale }
+                              : {}),
+                            subCuts: c.subCuts.map((sc, idx) =>
+                              c.subCuts.length <= 1 || idx === targetIdx
+                                ? scalingSpeaker === 'A'
+                                  ? { ...sc, speakerAScale: computedScale }
+                                  : { ...sc, speakerBScale: computedScale }
+                                : sc
+                            ),
+                          }));
                           return;
                         }
                         if (draggingSpeaker && sourceOverlayWrapRef.current) {
@@ -6521,26 +6782,39 @@ export const App: React.FC = () => {
                         (() => {
                           const isVert = nativeDims.width < nativeDims.height;
                           const defaultY = isVert ? 0.39 : 0.44;
-                          const fineX = activeClip?.trackingOffsetX || 0;
+                          const fineX =
+                            inspectedCut?.trackingOffsetX ?? activeClip?.trackingOffsetX ?? 0;
                           const spkAX = Math.max(
                             0.06,
-                            Math.min(0.94, (activeClip?.speakerAX ?? 0.26) + fineX)
+                            Math.min(
+                              0.94,
+                              (inspectedCut?.speakerAX ?? activeClip?.speakerAX ?? 0.26) + fineX
+                            )
                           );
                           const spkAY = Math.max(
                             0.06,
-                            Math.min(0.94, activeClip?.speakerAY ?? defaultY)
+                            Math.min(0.94, inspectedCut?.speakerAY ?? activeClip?.speakerAY ?? defaultY)
                           );
-                          const scaleA = Math.max(0.5, Math.min(2.4, activeClip?.speakerAScale ?? 1.0));
+                          const scaleA = Math.max(
+                            0.5,
+                            Math.min(2.4, inspectedCut?.speakerAScale ?? activeClip?.speakerAScale ?? 1.0)
+                          );
 
                           const spkBX = Math.max(
                             0.06,
-                            Math.min(0.94, (activeClip?.speakerBX ?? 0.74) + fineX)
+                            Math.min(
+                              0.94,
+                              (inspectedCut?.speakerBX ?? activeClip?.speakerBX ?? 0.74) + fineX
+                            )
                           );
                           const spkBY = Math.max(
                             0.06,
-                            Math.min(0.94, activeClip?.speakerBY ?? defaultY)
+                            Math.min(0.94, inspectedCut?.speakerBY ?? activeClip?.speakerBY ?? defaultY)
                           );
-                          const scaleB = Math.max(0.5, Math.min(2.4, activeClip?.speakerBScale ?? 1.0));
+                          const scaleB = Math.max(
+                            0.5,
+                            Math.min(2.4, inspectedCut?.speakerBScale ?? activeClip?.speakerBScale ?? 1.0)
+                          );
 
                           const baseW = isVert ? 0.46 : 0.44;
                           const baseH = isVert ? 0.24 : 0.68;
@@ -6753,7 +7027,7 @@ export const App: React.FC = () => {
                               }}
                             >
                               {currentZoom.toFixed(2)}x ·{' '}
-                              {activeClip?.subjectFocus?.label || 'Auto Target'}
+                              {inspectedCutFocus?.label || 'Auto Target'}
                             </div>
                           </div>
                           {/* Live Locked Subject Target Reticle on Source Video */}
@@ -6852,9 +7126,9 @@ export const App: React.FC = () => {
 
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span className="badge-subtle" title="Drag or scale layers directly on the 9:16 Output Monitor">
-                          {activeClip?.backgroundFillStyle === 'split-screen'
-                            ? `Split ${Math.round((activeClip?.splitScreenRatio ?? 0.5) * 100)}/${Math.round((1 - (activeClip?.splitScreenRatio ?? 0.5)) * 100)}`
-                            : activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+                          {isCurrentCutSplitScreen
+                            ? `Split ${Math.round(((inspectedCut?.splitScreenRatio ?? activeClip?.splitScreenRatio) ?? 0.5) * 100)}/${Math.round((1 - ((inspectedCut?.splitScreenRatio ?? activeClip?.splitScreenRatio) ?? 0.5)) * 100)}`
+                            : isTwoSpeakerAutoSwitch
                               ? 'Auto-Switch'
                               : 'Single 9:16'}
                         </span>
@@ -6931,7 +7205,20 @@ export const App: React.FC = () => {
 
                         if (draggingOutputLayer === 'split-divider') {
                           const ratio = Number(Math.max(0.25, Math.min(0.75, normY)).toFixed(2));
-                          updateActiveTimelineClip((c) => ({ ...c, splitScreenRatio: ratio }));
+                          const targetIdx = Math.min(
+                            selectedCutIndex,
+                            Math.max(0, activeClip.subCuts.length - 1)
+                          );
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            splitScreenRatio:
+                              c.subCuts.length <= 1 ? ratio : c.splitScreenRatio,
+                            subCuts: c.subCuts.map((sc, idx) =>
+                              c.subCuts.length <= 1 || idx === targetIdx
+                                ? { ...sc, splitScreenRatio: ratio }
+                                : sc
+                            ),
+                          }));
                         } else if (draggingOutputLayer === 'captions') {
                           updateActiveTimelineClip((c) => ({
                             ...c,
@@ -6980,7 +7267,7 @@ export const App: React.FC = () => {
                       />
 
                       {/* Interactive Split-Screen Divider Handle on 9:16 Output */}
-                      {activeClip?.backgroundFillStyle === 'split-screen' && (
+                      {activeClip && isCurrentCutSplitScreen && (
                         <div
                           onMouseDown={(e) => {
                             e.stopPropagation();
@@ -6992,7 +7279,7 @@ export const App: React.FC = () => {
                             position: 'absolute',
                             left: 0,
                             right: 0,
-                            top: `${(activeClip.splitScreenRatio ?? 0.5) * 100}%`,
+                            top: `${((inspectedCut?.splitScreenRatio ?? activeClip.splitScreenRatio) ?? 0.5) * 100}%`,
                             height: 12,
                             transform: 'translateY(-50%)',
                             cursor: 'ns-resize',
@@ -7014,7 +7301,7 @@ export const App: React.FC = () => {
                               letterSpacing: '0.03em',
                             }}
                           >
-                            SPLIT {Math.round((activeClip.splitScreenRatio ?? 0.5) * 100)}%
+                            SPLIT {Math.round(((inspectedCut?.splitScreenRatio ?? activeClip.splitScreenRatio) ?? 0.5) * 100)}%
                           </div>
                         </div>
                       )}
@@ -7441,17 +7728,20 @@ export const App: React.FC = () => {
                         ] as Array<{ id: BackgroundFillStyle; label: string }>
                       ).map((opt) => {
                         const cutMode = inspectedCut?.layoutMode || 'inherit';
-                        const clipFill = activeClip?.backgroundFillStyle ?? 'blurred';
+                        const cutFill =
+                          inspectedCut?.backgroundFillStyle ??
+                          activeClip?.backgroundFillStyle ??
+                          'blurred';
                         const effectiveCutFill: BackgroundFillStyle =
                           cutMode === 'split-screen'
                             ? 'split-screen'
                             : cutMode === 'full-single' ||
                                 cutMode === 'full-speaker-a' ||
                                 cutMode === 'full-speaker-b'
-                              ? clipFill === 'black'
+                              ? cutFill === 'black'
                                 ? 'black'
                                 : 'blurred'
-                              : clipFill;
+                              : cutFill;
                         return (
                           <button
                             key={opt.id}
@@ -7471,21 +7761,21 @@ export const App: React.FC = () => {
                                   : 0;
                                 updateActiveTimelineClip((c) => ({
                                   ...c,
-                                  backgroundFillStyle: opt.id,
-                                  subCuts: c.subCuts.map((sc, idx) =>
-                                    c.subCuts.length === 1 ||
-                                    idx === targetIdx ||
-                                    sc.layoutMode === 'split-screen'
-                                      ? {
-                                          ...sc,
-                                          layoutMode:
-                                            sc.layoutMode === 'full-speaker-a' ||
-                                            sc.layoutMode === 'full-speaker-b'
-                                              ? sc.layoutMode
-                                              : 'full-single',
-                                        }
-                                      : sc
-                                  ),
+                                  backgroundFillStyle:
+                                    c.subCuts.length <= 1 ? opt.id : c.backgroundFillStyle,
+                                  subCuts: c.subCuts.map((sc, idx) => {
+                                    const mat = materializeSubCutState(sc, c);
+                                    if (c.subCuts.length > 1 && idx !== targetIdx) return mat;
+                                    return {
+                                      ...mat,
+                                      backgroundFillStyle: opt.id,
+                                      layoutMode:
+                                        mat.layoutMode === 'full-speaker-a' ||
+                                        mat.layoutMode === 'full-speaker-b'
+                                          ? mat.layoutMode
+                                          : 'full-single',
+                                    };
+                                  }),
                                 }));
                               }
                             }}
@@ -7521,14 +7811,14 @@ export const App: React.FC = () => {
                       <button
                         type="button"
                         className="btn btn-sm"
-                        onClick={() => applyZoomAcrossStudio(1.0, true)}
+                        onClick={() => applyZoomAcrossStudio(1.0, applyFocusToAllClips)}
                       >
                         1.0x
                       </button>
                       <button
                         type="button"
                         className="btn btn-sm"
-                        onClick={() => applyZoomAcrossStudio(0.56, true)}
+                        onClick={() => applyZoomAcrossStudio(0.56, applyFocusToAllClips)}
                         title="Zoom out to fit wide frame inside 9:16"
                       >
                         Fit 16:9
@@ -7545,9 +7835,15 @@ export const App: React.FC = () => {
                         min={-0.4}
                         max={0.4}
                         step={0.01}
-                        value={activeClip?.trackingOffsetX || 0}
+                        value={inspectedCut?.trackingOffsetX ?? activeClip?.trackingOffsetX ?? 0}
                         onChange={(e) => {
                           const val = parseFloat(e.target.value);
+                          const targetIdx = activeClip
+                            ? Math.min(
+                                selectedCutIndex,
+                                Math.max(0, activeClip.subCuts.length - 1)
+                              )
+                            : 0;
                           if (applyFocusToAllClips) {
                             setFullVideoClip((prev) =>
                               prev ? { ...prev, trackingOffsetX: val } : prev
@@ -7558,18 +7854,41 @@ export const App: React.FC = () => {
                           } else {
                             updateActiveTimelineClip((c) => ({
                               ...c,
-                              trackingOffsetX: val,
+                              trackingOffsetX:
+                                c.subCuts.length <= 1 ? val : c.trackingOffsetX,
+                              subCuts: c.subCuts.map((sc, idx) =>
+                                c.subCuts.length <= 1 || idx === targetIdx
+                                  ? { ...sc, trackingOffsetX: val }
+                                  : sc
+                              ),
                             }));
                           }
                         }}
-                        onDoubleClick={() =>
-                          updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: 0 }))
-                        }
+                        onDoubleClick={() => {
+                          const targetIdx = activeClip
+                            ? Math.min(
+                                selectedCutIndex,
+                                Math.max(0, activeClip.subCuts.length - 1)
+                              )
+                            : 0;
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            trackingOffsetX: c.subCuts.length <= 1 ? 0 : c.trackingOffsetX,
+                            subCuts: c.subCuts.map((sc, idx) =>
+                              c.subCuts.length <= 1 || idx === targetIdx
+                                ? { ...sc, trackingOffsetX: 0 }
+                                : sc
+                            ),
+                          }));
+                        }}
                         style={{ width: 48 }}
                         title="Fine horizontal crop offset (double-click to reset to 0)"
                       />
                       <span className="badge-subtle" style={{ minWidth: 32, textAlign: 'center' }}>
-                        {((activeClip?.trackingOffsetX || 0) * 100).toFixed(0)}%
+                        {(
+                          (inspectedCut?.trackingOffsetX ?? activeClip?.trackingOffsetX ?? 0) * 100
+                        ).toFixed(0)}
+                        %
                       </span>
                     </div>
 
@@ -7739,15 +8058,30 @@ export const App: React.FC = () => {
                               min={0.5}
                               max={2.4}
                               step={0.05}
-                              value={activeClip?.speakerAScale ?? 1.0}
+                              value={inspectedCut?.speakerAScale ?? activeClip?.speakerAScale ?? 1.0}
                               onChange={(e) => {
                                 const val = parseFloat(e.target.value);
-                                updateActiveTimelineClip((c) => ({ ...c, speakerAScale: val }));
+                                const targetIdx = activeClip
+                                  ? Math.min(
+                                      selectedCutIndex,
+                                      Math.max(0, activeClip.subCuts.length - 1)
+                                    )
+                                  : 0;
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  speakerAScale:
+                                    c.subCuts.length <= 1 ? val : c.speakerAScale,
+                                  subCuts: c.subCuts.map((sc, idx) =>
+                                    c.subCuts.length <= 1 || idx === targetIdx
+                                      ? { ...sc, speakerAScale: val }
+                                      : sc
+                                  ),
+                                }));
                               }}
                               style={{ width: 48 }}
                             />
                             <span className="badge-subtle">
-                              {(activeClip?.speakerAScale ?? 1.0).toFixed(2)}x
+                              {(inspectedCut?.speakerAScale ?? activeClip?.speakerAScale ?? 1.0).toFixed(2)}x
                             </span>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -7757,15 +8091,30 @@ export const App: React.FC = () => {
                               min={0.5}
                               max={2.4}
                               step={0.05}
-                              value={activeClip?.speakerBScale ?? 1.0}
+                              value={inspectedCut?.speakerBScale ?? activeClip?.speakerBScale ?? 1.0}
                               onChange={(e) => {
                                 const val = parseFloat(e.target.value);
-                                updateActiveTimelineClip((c) => ({ ...c, speakerBScale: val }));
+                                const targetIdx = activeClip
+                                  ? Math.min(
+                                      selectedCutIndex,
+                                      Math.max(0, activeClip.subCuts.length - 1)
+                                    )
+                                  : 0;
+                                updateActiveTimelineClip((c) => ({
+                                  ...c,
+                                  speakerBScale:
+                                    c.subCuts.length <= 1 ? val : c.speakerBScale,
+                                  subCuts: c.subCuts.map((sc, idx) =>
+                                    c.subCuts.length <= 1 || idx === targetIdx
+                                      ? { ...sc, speakerBScale: val }
+                                      : sc
+                                  ),
+                                }));
                               }}
                               style={{ width: 48 }}
                             />
                             <span className="badge-subtle">
-                              {(activeClip?.speakerBScale ?? 1.0).toFixed(2)}x
+                              {(inspectedCut?.speakerBScale ?? activeClip?.speakerBScale ?? 1.0).toFixed(2)}x
                             </span>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -7775,17 +8124,32 @@ export const App: React.FC = () => {
                               min={0.25}
                               max={0.75}
                               step={0.01}
-                              value={activeClip?.splitScreenRatio ?? 0.5}
-                              onChange={(e) =>
+                              value={inspectedCut?.splitScreenRatio ?? activeClip?.splitScreenRatio ?? 0.5}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                const targetIdx = activeClip
+                                  ? Math.min(
+                                      selectedCutIndex,
+                                      Math.max(0, activeClip.subCuts.length - 1)
+                                    )
+                                  : 0;
                                 updateActiveTimelineClip((c) => ({
                                   ...c,
-                                  splitScreenRatio: parseFloat(e.target.value),
-                                }))
-                              }
+                                  splitScreenRatio:
+                                    c.subCuts.length <= 1 ? val : c.splitScreenRatio,
+                                  subCuts: c.subCuts.map((sc, idx) =>
+                                    c.subCuts.length <= 1 || idx === targetIdx
+                                      ? { ...sc, splitScreenRatio: val }
+                                      : sc
+                                  ),
+                                }));
+                              }}
                               style={{ width: 48 }}
                             />
                             <span className="badge-subtle">
-                              {Math.round((activeClip?.splitScreenRatio ?? 0.5) * 100)}%
+                              {Math.round(
+                                (inspectedCut?.splitScreenRatio ?? activeClip?.splitScreenRatio ?? 0.5) * 100
+                              )}%
                             </span>
                           </div>
                         </div>
@@ -9529,15 +9893,26 @@ export const App: React.FC = () => {
                                 pointerEvents: 'none',
                               }}
                             >
-                              {cut.layoutMode === 'split-screen'
-                                ? '[SPLIT] '
-                                : cut.layoutMode === 'full-single'
-                                  ? '[FULL] '
-                                  : cut.layoutMode === 'full-speaker-a'
-                                    ? '[SPK A] '
-                                    : cut.layoutMode === 'full-speaker-b'
-                                      ? '[SPK B] '
-                                      : ''}
+                              {cut.layoutMode === 'split-screen' ||
+                              ((!cut.layoutMode || cut.layoutMode === 'inherit') &&
+                                (cut.backgroundFillStyle ?? activeClip.backgroundFillStyle) ===
+                                  'split-screen')
+                                ? '[2-SPK SPLIT] '
+                                : cut.layoutMode === 'full-speaker-a'
+                                  ? '[SPK A] '
+                                  : cut.layoutMode === 'full-speaker-b'
+                                    ? '[SPK B] '
+                                    : cut.subjectFocus?.strategy === 'click-track'
+                                      ? '[LOCK] '
+                                      : cut.subjectFocus?.strategy === 'static-lock'
+                                        ? '[CENTER] '
+                                        : cut.subjectFocus?.strategy === 'face-speaker'
+                                          ? '[FACE] '
+                                          : cut.subjectFocus?.strategy === 'action-motion'
+                                            ? '[MOTION] '
+                                            : cut.layoutMode === 'full-single'
+                                              ? '[SINGLE] '
+                                              : ''}
                               {timelineMode === 'full-source' && activeClip.subCuts.length === 1 && !cut.isCompoundClip
                                 ? activeSource.name
                                 : `${cut.label} (${cutDur.toFixed(1)}s)`}
@@ -10421,17 +10796,27 @@ export const App: React.FC = () => {
                         min={0.55}
                         max={2.4}
                         step={0.05}
-                        value={activeClip.speakerAScale ?? 1.0}
-                        onChange={(e) =>
+                        value={inspectedCut?.speakerAScale ?? activeClip.speakerAScale ?? 1.0}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          const targetIdx = Math.min(
+                            selectedCutIndex,
+                            Math.max(0, activeClip.subCuts.length - 1)
+                          );
                           updateActiveTimelineClip((c) => ({
                             ...c,
-                            speakerAScale: parseFloat(e.target.value),
-                          }))
-                        }
+                            speakerAScale: c.subCuts.length <= 1 ? val : c.speakerAScale,
+                            subCuts: c.subCuts.map((sc, idx) =>
+                              c.subCuts.length <= 1 || idx === targetIdx
+                                ? { ...sc, speakerAScale: val }
+                                : sc
+                            ),
+                          }));
+                        }}
                         style={{ width: 68 }}
                       />
                       <span className="badge-subtle">
-                        {(activeClip.speakerAScale ?? 1.0).toFixed(2)}x
+                        {(inspectedCut?.speakerAScale ?? activeClip.speakerAScale ?? 1.0).toFixed(2)}x
                       </span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -10441,17 +10826,27 @@ export const App: React.FC = () => {
                         min={0.55}
                         max={2.4}
                         step={0.05}
-                        value={activeClip.speakerBScale ?? 1.0}
-                        onChange={(e) =>
+                        value={inspectedCut?.speakerBScale ?? activeClip.speakerBScale ?? 1.0}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          const targetIdx = Math.min(
+                            selectedCutIndex,
+                            Math.max(0, activeClip.subCuts.length - 1)
+                          );
                           updateActiveTimelineClip((c) => ({
                             ...c,
-                            speakerBScale: parseFloat(e.target.value),
-                          }))
-                        }
+                            speakerBScale: c.subCuts.length <= 1 ? val : c.speakerBScale,
+                            subCuts: c.subCuts.map((sc, idx) =>
+                              c.subCuts.length <= 1 || idx === targetIdx
+                                ? { ...sc, speakerBScale: val }
+                                : sc
+                            ),
+                          }));
+                        }}
                         style={{ width: 68 }}
                       />
                       <span className="badge-subtle">
-                        {(activeClip.speakerBScale ?? 1.0).toFixed(2)}x
+                        {(inspectedCut?.speakerBScale ?? activeClip.speakerBScale ?? 1.0).toFixed(2)}x
                       </span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -10461,18 +10856,34 @@ export const App: React.FC = () => {
                         min={0.25}
                         max={0.75}
                         step={0.01}
-                        value={activeClip.splitScreenRatio ?? 0.5}
-                        onChange={(e) =>
+                        value={inspectedCut?.splitScreenRatio ?? activeClip.splitScreenRatio ?? 0.5}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          const targetIdx = Math.min(
+                            selectedCutIndex,
+                            Math.max(0, activeClip.subCuts.length - 1)
+                          );
                           updateActiveTimelineClip((c) => ({
                             ...c,
-                            splitScreenRatio: parseFloat(e.target.value),
-                          }))
-                        }
+                            splitScreenRatio: c.subCuts.length <= 1 ? val : c.splitScreenRatio,
+                            subCuts: c.subCuts.map((sc, idx) =>
+                              c.subCuts.length <= 1 || idx === targetIdx
+                                ? { ...sc, splitScreenRatio: val }
+                                : sc
+                            ),
+                          }));
+                        }}
                         style={{ width: 68 }}
                       />
                       <span className="badge-subtle">
-                        {Math.round((activeClip.splitScreenRatio ?? 0.5) * 100)}% /{' '}
-                        {Math.round((1 - (activeClip.splitScreenRatio ?? 0.5)) * 100)}%
+                        {Math.round(
+                          (inspectedCut?.splitScreenRatio ?? activeClip.splitScreenRatio ?? 0.5) * 100
+                        )}
+                        % /{' '}
+                        {Math.round(
+                          (1 - (inspectedCut?.splitScreenRatio ?? activeClip.splitScreenRatio ?? 0.5)) * 100
+                        )}
+                        %
                       </span>
                     </div>
                   </div>

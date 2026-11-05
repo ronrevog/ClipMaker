@@ -190,6 +190,16 @@ export interface SubCut {
   isBeatCut?: boolean;
   speed?: number;
   layoutMode?: CutLayoutMode;
+  backgroundFillStyle?: BackgroundFillStyle;
+  subjectFocus?: SubjectFocusConfig;
+  trackingOffsetX?: number;
+  speakerAX?: number;
+  speakerAY?: number;
+  speakerAScale?: number;
+  speakerBX?: number;
+  speakerBY?: number;
+  speakerBScale?: number;
+  splitScreenRatio?: number;
   isCompoundClip?: boolean;
   compoundSubCuts?: SubCut[];
   audioDeleted?: boolean;

@@ -1070,53 +1070,64 @@ export function renderComposite9x16Frame(params: {
   const isTimelineGap =
     Boolean(activeClip?.subCuts && activeClip.subCuts.length > 0) && !activeCutAtPlayhead;
   const cutLayout = activeCutAtPlayhead?.layoutMode || 'inherit';
+  const baseFill = activeCutAtPlayhead?.backgroundFillStyle ?? backgroundFillStyle;
   const effectiveFillStyle: BackgroundFillStyle =
     cutLayout === 'split-screen'
       ? 'split-screen'
       : cutLayout === 'full-single' ||
           cutLayout === 'full-speaker-a' ||
           cutLayout === 'full-speaker-b'
-        ? backgroundFillStyle === 'black'
+        ? baseFill === 'black'
           ? 'black'
           : 'blurred'
-        : backgroundFillStyle;
+        : baseFill;
 
   const defaultYForSpeakers = vw < vh ? 0.39 : Math.min(0.48, Math.max(0.34, cropY));
-  const fineOffsetXForSpeakers = activeClip?.trackingOffsetX || 0;
+  const fineOffsetXForSpeakers =
+    activeCutAtPlayhead?.trackingOffsetX ?? activeClip?.trackingOffsetX ?? 0;
+  const cutSpkAX = activeCutAtPlayhead?.speakerAX ?? activeClip?.speakerAX ?? 0.26;
+  const cutSpkAY = activeCutAtPlayhead?.speakerAY ?? activeClip?.speakerAY ?? defaultYForSpeakers;
+  const cutSpkAScale = activeCutAtPlayhead?.speakerAScale ?? activeClip?.speakerAScale ?? 1.0;
+  const cutSpkBX = activeCutAtPlayhead?.speakerBX ?? activeClip?.speakerBX ?? 0.74;
+  const cutSpkBY = activeCutAtPlayhead?.speakerBY ?? activeClip?.speakerBY ?? defaultYForSpeakers;
+  const cutSpkBScale = activeCutAtPlayhead?.speakerBScale ?? activeClip?.speakerBScale ?? 1.0;
+  const cutSplitRatio =
+    activeCutAtPlayhead?.splitScreenRatio ?? activeClip?.splitScreenRatio ?? 0.5;
+
   const effectiveCropX =
     cutLayout === 'full-speaker-a'
-      ? Math.max(0.06, Math.min(0.94, (activeClip?.speakerAX ?? 0.26) + fineOffsetXForSpeakers))
+      ? Math.max(0.06, Math.min(0.94, cutSpkAX + fineOffsetXForSpeakers))
       : cutLayout === 'full-speaker-b'
-        ? Math.max(0.06, Math.min(0.94, (activeClip?.speakerBX ?? 0.74) + fineOffsetXForSpeakers))
+        ? Math.max(0.06, Math.min(0.94, cutSpkBX + fineOffsetXForSpeakers))
         : cropX;
   const effectiveCropY =
     cutLayout === 'full-speaker-a'
-      ? Math.max(0.06, Math.min(0.94, activeClip?.speakerAY ?? defaultYForSpeakers))
+      ? Math.max(0.06, Math.min(0.94, cutSpkAY))
       : cutLayout === 'full-speaker-b'
-        ? Math.max(0.06, Math.min(0.94, activeClip?.speakerBY ?? defaultYForSpeakers))
+        ? Math.max(0.06, Math.min(0.94, cutSpkBY))
         : cropY;
 
   // MODE A: 2-Speaker Top/Bottom 9:16 Podcast Split-Screen (skipped when playhead is inside an empty timeline gap)
   if (!isTimelineGap && effectiveFillStyle === 'split-screen') {
-    const splitRatio = Math.max(0.25, Math.min(0.75, activeClip?.splitScreenRatio ?? 0.5));
+    const splitRatio = Math.max(0.25, Math.min(0.75, cutSplitRatio));
     const topH = Math.floor(outH * splitRatio);
     const bottomH = outH - topH;
 
     const defaultY = vw < vh ? 0.39 : Math.min(0.48, Math.max(0.34, cropY));
-    const fineOffsetX = activeClip?.trackingOffsetX || 0;
+    const fineOffsetX = fineOffsetXForSpeakers;
     const leftX = Math.max(
       0.06,
-      Math.min(0.94, (activeClip?.speakerAX ?? 0.26) + fineOffsetX)
+      Math.min(0.94, cutSpkAX + fineOffsetX)
     );
-    const leftY = Math.max(0.06, Math.min(0.94, activeClip?.speakerAY ?? defaultY));
-    const leftScale = Math.max(0.5, Math.min(2.5, activeClip?.speakerAScale ?? 1.0));
+    const leftY = Math.max(0.06, Math.min(0.94, activeCutAtPlayhead?.speakerAY ?? activeClip?.speakerAY ?? defaultY));
+    const leftScale = Math.max(0.5, Math.min(2.5, cutSpkAScale));
 
     const rightX = Math.max(
       0.06,
-      Math.min(0.94, (activeClip?.speakerBX ?? 0.74) + fineOffsetX)
+      Math.min(0.94, cutSpkBX + fineOffsetX)
     );
-    const rightY = Math.max(0.06, Math.min(0.94, activeClip?.speakerBY ?? defaultY));
-    const rightScale = Math.max(0.5, Math.min(2.5, activeClip?.speakerBScale ?? 1.0));
+    const rightY = Math.max(0.06, Math.min(0.94, activeCutAtPlayhead?.speakerBY ?? activeClip?.speakerBY ?? defaultY));
+    const rightScale = Math.max(0.5, Math.min(2.5, cutSpkBScale));
 
     const drawSpeakerPanel = (
       centerX: number,

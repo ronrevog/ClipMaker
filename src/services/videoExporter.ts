@@ -204,8 +204,9 @@ export async function exportClipTo9x16Video(
   const draw9x16Frame = (sourceTime: number, clipRelTime: number, activeCut: SubCut) => {
     const cutZoom = activeCut ? activeCut.zoom : clip.zoomScale;
     const cutBias = activeCut ? activeCut.cropBiasX : 0;
+    const cutOffsetX = activeCut?.trackingOffsetX ?? clip.trackingOffsetX;
 
-    let activeFocus = clip.subjectFocus;
+    let activeFocus = activeCut?.subjectFocus || clip.subjectFocus;
     if (activeFocus?.strategy === 'click-track') {
       const splinePt = evaluateUserAnchorSplineAtTime(activeFocus.trackedPath, sourceTime);
       if (splinePt && splinePt.userAnchorCount >= 2 && splinePt.isBetweenUserAnchors) {
@@ -239,7 +240,7 @@ export async function exportClipTo9x16Video(
     const track = getTrackingStateAtTime(
       source.trackingSamples,
       sourceTime,
-      clip.trackingOffsetX + cutBias,
+      cutOffsetX + cutBias,
       clip.manualKeyframes,
       activeFocus
     );
@@ -256,7 +257,8 @@ export async function exportClipTo9x16Video(
       leftSubjectX: track.leftSubjectX,
       rightSubjectX: track.rightSubjectX,
       zoom: cutZoom,
-      backgroundFillStyle: clip.backgroundFillStyle ?? 'blurred',
+      backgroundFillStyle:
+        activeCut?.backgroundFillStyle ?? clip.backgroundFillStyle ?? 'blurred',
       activeClip: clip,
       clipPlayheadTime: clipRelTime,
     });
