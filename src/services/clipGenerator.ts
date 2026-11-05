@@ -226,7 +226,7 @@ export function clipTimeToSourceTime(
   const clampedClipTime = Math.max(0, Math.min(clip.duration, clipTime));
   if (!clip.subCuts || clip.subCuts.length === 0) {
     return {
-      sourceTime: Number((clip.sourceStart + clampedClipTime).toFixed(3)),
+      sourceTime: Number((clip.sourceStart + clampedClipTime).toFixed(4)),
       activeCut: undefined,
       cutIndex: -1,
       isInGap: false,
@@ -253,7 +253,7 @@ export function clipTimeToSourceTime(
           if (offsetInCut <= localCursor + childDur + 0.02) {
             const childOffset = Math.max(0, Math.min(childDur, offsetInCut - localCursor));
             return {
-              sourceTime: Number((child.sourceStart + childOffset).toFixed(3)),
+              sourceTime: Number((child.sourceStart + childOffset).toFixed(4)),
               activeCut: cut,
               cutIndex: i,
               isInGap: false,
@@ -263,7 +263,7 @@ export function clipTimeToSourceTime(
         }
       }
       return {
-        sourceTime: Number((cut.sourceStart + offsetInCut).toFixed(3)),
+        sourceTime: Number((cut.sourceStart + offsetInCut).toFixed(4)),
         activeCut: cut,
         cutIndex: i,
         isInGap: false,
@@ -307,7 +307,7 @@ export function sourceTimeToClipTime(clip: GeneratedClip, sourceTime: number): n
         0,
         Math.min(cut.sourceEnd - cut.sourceStart, sourceTime - cut.sourceStart)
       );
-      return Number((cut.timelineStart + offset).toFixed(3));
+      return Number((cut.timelineStart + offset).toFixed(4));
     }
   }
 
@@ -1121,9 +1121,9 @@ export async function generateClipsWithMultimodalAI(
 
 export function formatSMPTETimecode(seconds: number, fps = 30): string {
   const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
-  const totalFrames = Math.floor(safe * fps);
+  const totalFrames = Math.floor(safe * fps + 1e-4);
   const frames = totalFrames % fps;
-  const totalSeconds = Math.floor(safe);
+  const totalSeconds = Math.floor(totalFrames / fps);
   const secs = totalSeconds % 60;
   const mins = Math.floor(totalSeconds / 60) % 60;
   const hrs = Math.floor(totalSeconds / 3600);

@@ -7,6 +7,8 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   ClipboardPaste,
   Columns,
@@ -716,6 +718,7 @@ export const App: React.FC = () => {
         activeCutIdxRef.current = cutIndex;
         setSelectedCutIndex(cutIndex);
       }
+      clipPlayheadTimeRef.current = clampedClipTime;
       setClipPlayheadTime(clampedClipTime);
       setPlayheadTime(sourceTime);
       if (videoRef.current) {
@@ -723,6 +726,36 @@ export const App: React.FC = () => {
       }
     },
     [activeSource, activeClip]
+  );
+
+  // Frame-by-frame stepping (Shortcuts: ArrowLeft / ArrowRight = ±1 frame, Shift+ArrowLeft / Shift+ArrowRight = ±10 frames)
+  const handleStepFrames = useCallback(
+    (frameDelta: number) => {
+      if (!activeSource || !activeClip) return;
+      const vid = videoRef.current;
+      if (vid && !vid.paused) {
+        vid.pause();
+      }
+      if (isPlaying) {
+        setIsPlaying(false);
+        setIsLoopingInOut(false);
+      }
+
+      const fps = 30;
+      const totalFrames = Math.max(1, Math.round(activeClip.duration * fps));
+      const currentFrameIndex = Math.round(clipPlayheadTimeRef.current * fps);
+      const targetFrameIndex = Math.max(
+        0,
+        Math.min(totalFrames, currentFrameIndex + frameDelta)
+      );
+      const targetClipTime = Number(
+        Math.max(0, Math.min(activeClip.duration, targetFrameIndex / fps)).toFixed(4)
+      );
+
+      clipPlayheadTimeRef.current = targetClipTime;
+      handleSeekClipTime(targetClipTime);
+    },
+    [activeSource, activeClip, isPlaying, handleSeekClipTime]
   );
 
   // Seek to a specific source video time (and sync clipPlayheadTime)
@@ -1788,15 +1821,15 @@ export const App: React.FC = () => {
         const cut = activeClip.subCuts[i];
         if (
           !didSplit &&
-          targetClipTime > cut.timelineStart + 0.08 &&
-          targetClipTime < cut.timelineEnd - 0.08 &&
-          sourceTime > cut.sourceStart + 0.08 &&
-          sourceTime < cut.sourceEnd - 0.08
+          targetClipTime > cut.timelineStart + 0.03 &&
+          targetClipTime < cut.timelineEnd - 0.03 &&
+          sourceTime > cut.sourceStart + 0.03 &&
+          sourceTime < cut.sourceEnd - 0.03
         ) {
           didSplit = true;
           newCutIdx = nextSubCuts.length + 1;
-          const splitSrc = Number(sourceTime.toFixed(2));
-          const splitTl = Number(targetClipTime.toFixed(2));
+          const splitSrc = Number(sourceTime.toFixed(3));
+          const splitTl = Number(targetClipTime.toFixed(3));
           splitSrcTime = splitSrc;
           const baseLabel =
             cut.label
@@ -2808,12 +2841,29 @@ export const App: React.FC = () => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
-      if (
-        tag === 'INPUT' ||
+      const inputType =
+        tag === 'INPUT' ? ((target as HTMLInputElement).type || '').toLowerCase() : '';
+      const isTextInput =
         tag === 'TEXTAREA' ||
         tag === 'SELECT' ||
-        target?.isContentEditable
-      ) {
+        Boolean(target?.isContentEditable) ||
+        (tag === 'INPUT' &&
+          inputType !== 'range' &&
+          inputType !== 'checkbox' &&
+          inputType !== 'radio' &&
+          inputType !== 'button');
+      if (isTextInput) {
+        return;
+      }
+
+      // Frame-by-frame stepping with Left / Right Arrow keys (Shift + Arrow = ±10 frames)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        e.preventDefault();
+        if (tag === 'INPUT' && inputType === 'range') {
+          (target as HTMLInputElement).blur();
+        }
+        const step = e.shiftKey ? 10 : 1;
+        handleStepFrames(e.code === 'ArrowLeft' ? -step : step);
         return;
       }
 
@@ -2951,6 +3001,7 @@ export const App: React.FC = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [
+    handleStepFrames,
     handleUndo,
     handleRedo,
     handleToggleCompoundClip,
@@ -8177,6 +8228,17 @@ export const App: React.FC = () => {
                   {/* Left: Transport + Cut Edit Operations + CapCut Timeline Switches */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
                     <button
+                      type="button"
+                      className="btn btn-sm"
+                      style={{ height: 26, padding: '0 7px' }}
+                      onClick={(e) => handleStepFrames(e.shiftKey ? -10 : -1)}
+                      title="Step Backward 1 Frame [Left Arrow | Shift+Left Arrow = -10 Frames]"
+                    >
+                      <ChevronLeft size={12} />
+                      -1f
+                    </button>
+
+                    <button
                       className="btn btn-primary btn-sm"
                       style={{
                         height: 26,
@@ -8188,6 +8250,17 @@ export const App: React.FC = () => {
                     >
                       {isPlaying && !isLoopingInOut ? <Pause size={12} /> : <Play size={12} />}
                       {isPlaying && !isLoopingInOut ? 'Pause' : 'Play'}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      style={{ height: 26, padding: '0 7px' }}
+                      onClick={(e) => handleStepFrames(e.shiftKey ? 10 : 1)}
+                      title="Step Forward 1 Frame [Right Arrow | Shift+Right Arrow = +10 Frames]"
+                    >
+                      +1f
+                      <ChevronRight size={12} />
                     </button>
 
                     <button
