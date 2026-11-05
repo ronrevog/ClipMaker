@@ -1229,20 +1229,27 @@ export function interpolateTrackedPathAtTime(
 }
 
 export function trackSubjectSignatureInVideoFrame(
-  videoEl: HTMLVideoElement | null,
+  videoEl: HTMLVideoElement | HTMLCanvasElement | OffscreenCanvas | null,
   prevX: number,
   prevY: number,
   targetColorRgb?: [number, number, number],
   templateSig?: ObjectTemplateSignature,
-  trackedPath?: TrackedObjectPoint[]
+  trackedPath?: TrackedObjectPoint[],
+  explicitCurrentTime?: number
 ): { x: number; y: number; boxW?: number; boxH?: number } {
-  if (!videoEl || videoEl.readyState < 2) {
+  if (!videoEl || ('readyState' in videoEl && videoEl.readyState < 2)) {
     return { x: prevX, y: prevY };
   }
+  const curTime =
+    explicitCurrentTime !== undefined
+      ? explicitCurrentTime
+      : 'currentTime' in videoEl
+        ? videoEl.currentTime
+        : 0;
 
   // 1. Check if the user has placed 2+ Focus Lock Points that span this timestamp:
   // If so, follow the silky-smooth Monotone Cubic Hermite Spline between their Focus Lock Points!
-  const userSpline = evaluateUserAnchorSplineAtTime(trackedPath, videoEl.currentTime);
+  const userSpline = evaluateUserAnchorSplineAtTime(trackedPath, curTime);
   if (userSpline && userSpline.userAnchorCount >= 2 && userSpline.isBetweenUserAnchors) {
     liveSmoothPos = { x: userSpline.x, y: userSpline.y };
     return {
@@ -1263,9 +1270,9 @@ export function trackSubjectSignatureInVideoFrame(
     const data = ctx.getImageData(0, 0, w, h).data;
 
     // Reset velocity if video jumped/looped
-    const jumped = Math.abs(videoEl.currentTime - liveVelocity.lastTime) > 0.6;
+    const jumped = Math.abs(curTime - liveVelocity.lastTime) > 0.6;
     if (jumped) {
-      liveVelocity = { vx: 0, vy: 0, lastTime: videoEl.currentTime };
+      liveVelocity = { vx: 0, vy: 0, lastTime: curTime };
       livePrevFrameData = null;
       liveSmoothPos = { x: prevX, y: prevY };
     }
@@ -1286,7 +1293,7 @@ export function trackSubjectSignatureInVideoFrame(
       livePrevFrameData
     );
 
-    liveVelocity = { vx: res.vx, vy: res.vy, lastTime: videoEl.currentTime };
+    liveVelocity = { vx: res.vx, vy: res.vy, lastTime: curTime };
     livePrevFrameData = new Uint8ClampedArray(data);
     if (res.adaptedTemplate) {
       liveRunningTemplate = res.adaptedTemplate;

@@ -1022,7 +1022,7 @@ export function buildWordLevelCaptionsFromText(
  */
 export function renderComposite9x16Frame(params: {
   ctx: CanvasRenderingContext2D;
-  videoEl: HTMLVideoElement;
+  videoEl: HTMLVideoElement | HTMLCanvasElement | OffscreenCanvas;
   outW: number;
   outH: number;
   vw: number;

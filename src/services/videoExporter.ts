@@ -1,3 +1,4 @@
+import { ALL_FORMATS, BlobSource, CanvasSink, Input } from 'mediabunny';
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
 import { AudioMasteringPresetId, GeneratedClip, SourceVideoAsset, SubCut } from '../types/editor';
 import { renderComposite9x16Frame } from './aiVideoEditorTools';
@@ -15,6 +16,7 @@ import {
 function getSupportedMp4MimeType(): string | null {
   if (typeof MediaRecorder === 'undefined') return null;
   const mp4Candidates = [
+    'video/mp4;codecs=avc1.64002a,mp4a.40.2',
     'video/mp4;codecs=avc1.640029,mp4a.40.2',
     'video/mp4;codecs=avc1.640028,mp4a.40.2',
     'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
@@ -36,21 +38,19 @@ function getSupportedMp4MimeType(): string | null {
  * (100% silent — never plays through the user's speakers).
  */
 async function extractOfflineClipAudioBuffer(
-  sourceUrl: string,
+  sourceArrayBuffer: ArrayBuffer,
   cutsToRender: SubCut[],
   defaultSpeed: number,
   fps: number,
   masteringPreset: AudioMasteringPresetId = 'off'
 ): Promise<AudioBuffer | null> {
   try {
-    const resp = await fetch(sourceUrl);
-    const arrayBuf = await resp.arrayBuffer();
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioCtx) return null;
     const tempCtx = new AudioCtx();
     let decoded: AudioBuffer;
     try {
-      decoded = await tempCtx.decodeAudioData(arrayBuf.slice(0));
+      decoded = await tempCtx.decodeAudioData(sourceArrayBuffer.slice(0));
     } finally {
       try {
         await tempCtx.close();
@@ -125,14 +125,15 @@ async function extractOfflineClipAudioBuffer(
 }
 
 /**
- * Discreet (100% silent), frame-accurate 9:16 MP4 exporter.
+ * Deterministic, Zero-Drop, Frame-Accurate 9:16 MP4 Exporter powered by `mediabunny` + WebCodecs.
  *
- * Why previous exports glitched or cut off early:
- * 1. Seeking (`videoEl.currentTime = t`) on every single frame flushes the browser's H.264 GOP
- *    decoder buffer on inter-frame videos, causing stale/half-decoded frames and skipped segments.
- * 2. Instead, we seek ONCE to `cut.sourceStart`, wait until the decoder frame is ready (`readyState >= 2`),
- *    and stream forward sequentially through each cut (`cut.sourceStart -> cut.sourceEnd`) with
- *    `videoEl.muted = true` (zero speaker output!) while locking output frames to exact 30fps timestamps.
+ * Why this eliminates dropped frames and stuttering:
+ * 1. Instead of playing a `<video>` element in real-time and polling with `setInterval` (which drops
+ *    intermediate frames and duplicates stale frames whenever a 9:16 composite render takes >20ms),
+ *    we use `mediabunny`'s `Input` demuxer + `CanvasSink.canvasesAtTimestamps(cutTimestamps)`.
+ * 2. `canvasesAtTimestamps` is an offline pull generator over monotonically increasing timestamps:
+ *    each compressed packet is decoded at most once in exact presentation order, and the decoder
+ *    waits for our 9:16 canvas render + hardware H.264 encode before advancing to frame `f + 1`.
  */
 export async function exportClipTo9x16Video(
   source: SourceVideoAsset,
@@ -143,8 +144,8 @@ export async function exportClipTo9x16Video(
     throw new Error('Please upload a video first before exporting.');
   }
 
-  const outWidth = 720;
-  const outHeight = 1280;
+  let outWidth = 1080;
+  let outHeight = 1920;
   const fps = 30;
   const frameDurationUs = Math.round(1_000_000 / fps);
 
@@ -154,7 +155,7 @@ export async function exportClipTo9x16Video(
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('Could not initialize 9:16 export canvas');
 
-  // Offscreen hidden video element — strictly muted so zero audio ever plays through speakers
+  // Offscreen hidden video element — used for metadata fallback or if container requires DOM fallback
   const videoEl = document.createElement('video');
   videoEl.src = source.url;
   videoEl.muted = true;
@@ -172,8 +173,8 @@ export async function exportClipTo9x16Video(
     videoEl.load();
   });
 
-  const vw = videoEl.videoWidth || source.width || 1920;
-  const vh = videoEl.videoHeight || source.height || 1080;
+  let vw = videoEl.videoWidth || source.width || 1920;
+  let vh = videoEl.videoHeight || source.height || 1080;
   const defaultSpeed = clip.playbackSpeed ?? 1.0;
 
   const cutsToRender: SubCut[] =
@@ -201,7 +202,12 @@ export async function exportClipTo9x16Video(
     y: liveTrackedY,
   });
 
-  const draw9x16Frame = (sourceTime: number, clipRelTime: number, activeCut: SubCut) => {
+  const draw9x16Frame = (
+    frameSource: HTMLVideoElement | HTMLCanvasElement | OffscreenCanvas,
+    sourceTime: number,
+    clipRelTime: number,
+    activeCut: SubCut
+  ) => {
     const cutZoom = activeCut ? activeCut.zoom : clip.zoomScale;
     const cutBias = activeCut ? activeCut.cropBiasX : 0;
     const cutOffsetX = activeCut?.trackingOffsetX ?? clip.trackingOffsetX;
@@ -219,12 +225,13 @@ export async function exportClipTo9x16Video(
         };
       } else if (activeFocus.templateSignature || activeFocus.targetColorRgb) {
         const tracked = trackSubjectSignatureInVideoFrame(
-          videoEl,
+          frameSource,
           liveTrackedX,
           liveTrackedY,
           activeFocus.targetColorRgb,
           activeFocus.templateSignature,
-          activeFocus.trackedPath
+          activeFocus.trackedPath,
+          sourceTime
         );
         liveTrackedX = tracked.x;
         liveTrackedY = tracked.y;
@@ -247,7 +254,7 @@ export async function exportClipTo9x16Video(
 
     renderComposite9x16Frame({
       ctx,
-      videoEl,
+      videoEl: frameSource,
       outW: outWidth,
       outH: outHeight,
       vw,
@@ -266,14 +273,13 @@ export async function exportClipTo9x16Video(
   };
 
   /**
-   * Seeks `videoEl` cleanly to the start of a cut and waits until the frame is fully decoded (`readyState >= 2`).
-   * Never used mid-cut so the H.264 GOP buffer is never flushed during a cut.
+   * Seeks `videoEl` deterministically to a specific frame timestamp and waits until decoded.
    */
-  const seekToCutStart = async (targetTime: number) => {
-    const maxDur = Math.max(0.1, (videoEl.duration || source.duration) - 0.01);
+  const seekVideoToTime = async (targetTime: number) => {
+    const maxDur = Math.max(0.1, (videoEl.duration || source.duration) - 0.005);
     const clamped = Math.max(0, Math.min(maxDur, targetTime));
     videoEl.pause();
-    if (Math.abs(videoEl.currentTime - clamped) > 0.02) {
+    if (Math.abs(videoEl.currentTime - clamped) > 0.004) {
       await new Promise<void>((res) => {
         let done = false;
         const finish = () => {
@@ -284,13 +290,12 @@ export async function exportClipTo9x16Video(
         };
         videoEl.addEventListener('seeked', finish);
         videoEl.currentTime = clamped;
-        setTimeout(finish, 2500);
+        setTimeout(finish, 1500);
       });
     }
-    // Wait until the decoded frame at `clamped` is ready to be drawn
     let waitReady = 0;
-    while (videoEl.readyState < 2 && waitReady < 50) {
-      await new Promise<void>((r) => setTimeout(r, 20));
+    while (videoEl.readyState < 2 && waitReady < 40) {
+      await new Promise<void>((r) => setTimeout(r, 15));
       waitReady++;
     }
   };
@@ -308,16 +313,21 @@ export async function exportClipTo9x16Video(
   );
 
   // ============================================================================
-  // PATH A (PRIMARY): WEBCODECS + MP4-MUXER (100% Silent, Fast Sequential Stream)
+  // PATH A (PRIMARY): MEDIABUNNY OFFLINE HARDWARE DECODE + WEBCODECS MP4 MUXER
   // ============================================================================
   if (typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
     let encoderFailed = false;
+    let mbInput: Input | null = null;
     try {
       onProgress?.(2);
 
+      // Fetch source binary once in memory for both Mediabunny demuxing and sample-locked audio stitching
+      const sourceResp = await fetch(source.url);
+      const sourceArrayBuffer = await sourceResp.arrayBuffer();
+
       // 1. Decode and stitch audio offline in memory (100% silent, sample-locked to cutPlans)
       const stitchedAudio = await extractOfflineClipAudioBuffer(
-        source.url,
+        sourceArrayBuffer,
         cutsToRender,
         defaultSpeed,
         fps,
@@ -338,7 +348,7 @@ export async function exportClipTo9x16Video(
           codec: 'mp4a.40.2',
           sampleRate: sr,
           numberOfChannels: ch,
-          bitrate: 128_000,
+          bitrate: 192_000,
         }).catch(() => ({ supported: false }));
 
         if (aacCheck.supported) {
@@ -353,7 +363,7 @@ export async function exportClipTo9x16Video(
             codec: 'opus',
             sampleRate: sr,
             numberOfChannels: ch,
-            bitrate: 128_000,
+            bitrate: 192_000,
           }).catch(() => ({ supported: false }));
           if (opusCheck.supported) {
             audioCodecConfig = {
@@ -366,31 +376,62 @@ export async function exportClipTo9x16Video(
         }
       }
 
-      // 2. Configure H.264 Level 4.1 / 4.0 VideoEncoder + MP4 Muxer
-      // Note: Level 4.1 (avc1.640029 / avc1.4d0029 / avc1.420029) officially supports 720x1280 vertical height!
+      // 2. Probe 1080x1920 Full HD H.264 High Profile (10 Mbps), with automatic fallback to 720x1280 (8 Mbps)
       const codecCandidates = [
-        'avc1.640029',
-        'avc1.4d0029',
-        'avc1.420029',
-        'avc1.640028',
+        'avc1.64002a', // High Profile Level 4.2 (1080p60 / 1080x1920)
+        'avc1.640029', // High Profile Level 4.1 (1080x1920 @ 30fps)
+        'avc1.4d002a', // Main Profile Level 4.2
+        'avc1.4d0029', // Main Profile Level 4.1
+        'avc1.42002a', // Baseline Level 4.2
+        'avc1.420029', // Baseline Level 4.1
+        'avc1.640028', // High Profile Level 4.0
         'avc1.4d0028',
         'avc1.420028',
         'avc1.42001f',
       ];
-      let selectedVideoCodec = 'avc1.420029';
+
+      let selectedVideoCodec = '';
+      let targetBitrate = 10_000_000;
+
       for (const c of codecCandidates) {
         const sup = await VideoEncoder.isConfigSupported({
           codec: c,
-          width: outWidth,
-          height: outHeight,
-          bitrate: 6_000_000,
+          width: 1080,
+          height: 1920,
+          bitrate: targetBitrate,
           framerate: fps,
+          hardwareAcceleration: 'prefer-hardware',
         }).catch(() => ({ supported: false }));
         if (sup.supported) {
           selectedVideoCodec = c;
+          outWidth = 1080;
+          outHeight = 1920;
           break;
         }
       }
+
+      if (!selectedVideoCodec) {
+        outWidth = 720;
+        outHeight = 1280;
+        targetBitrate = 8_000_000;
+        selectedVideoCodec = 'avc1.420029';
+        for (const c of codecCandidates) {
+          const sup = await VideoEncoder.isConfigSupported({
+            codec: c,
+            width: outWidth,
+            height: outHeight,
+            bitrate: targetBitrate,
+            framerate: fps,
+          }).catch(() => ({ supported: false }));
+          if (sup.supported) {
+            selectedVideoCodec = c;
+            break;
+          }
+        }
+      }
+
+      canvas.width = outWidth;
+      canvas.height = outHeight;
 
       const target = new ArrayBufferTarget();
       const mp4Muxer = new Muxer({
@@ -425,8 +466,9 @@ export async function exportClipTo9x16Video(
         codec: selectedVideoCodec,
         width: outWidth,
         height: outHeight,
-        bitrate: 6_000_000,
+        bitrate: targetBitrate,
         framerate: fps,
+        hardwareAcceleration: 'prefer-hardware',
       });
 
       // 3. Encode full stitched audio track offline
@@ -442,7 +484,7 @@ export async function exportClipTo9x16Video(
             codec: audioCodecConfig.encoderCodec,
             sampleRate: audioCodecConfig.sampleRate,
             numberOfChannels: audioCodecConfig.numberOfChannels,
-            bitrate: 128_000,
+            bitrate: 192_000,
           });
 
           const totalSamples = stitchedAudio.length;
@@ -481,7 +523,7 @@ export async function exportClipTo9x16Video(
 
       onProgress?.(6);
 
-      // 4. Sequential Forward Hardware Decoding per SubCut (Zero Mid-Cut Seeks, Zero Glitches, Full Duration)
+      // 4. Deterministic Frame-by-Frame Pull Decoding via Mediabunny CanvasSink
       let globalFrameIndex = 0;
 
       const encodeCurrentCanvasFrame = async () => {
@@ -496,8 +538,8 @@ export async function exportClipTo9x16Video(
         globalFrameIndex++;
 
         // Prevent GPU surface queue overflow on Windows MediaFoundation / macOS VideoToolbox
-        while (videoEncoder.encodeQueueSize > 4 && !encoderFailed) {
-          await new Promise<void>((r) => setTimeout(r, 5));
+        while (videoEncoder.encodeQueueSize > 3 && !encoderFailed) {
+          await new Promise<void>((r) => setTimeout(r, 4));
         }
 
         if (globalFrameIndex % 3 === 0 || globalFrameIndex === totalClipFrames) {
@@ -509,100 +551,101 @@ export async function exportClipTo9x16Video(
         }
       };
 
-      for (const plan of cutPlans) {
-        if (encoderFailed) break;
-        const { cut, spd, cutFrames } = plan;
-
-        // Seek ONCE to the start of this cut and wait for decoded frame readiness
-        await seekToCutStart(cut.sourceStart);
-
-        // Draw and encode the initial frame of this cut immediately
-        let encodedInCut = 0;
-        draw9x16Frame(cut.sourceStart, cut.timelineStart, cut);
-        await encodeCurrentCanvasFrame();
-        encodedInCut = 1;
-
-        if (cutFrames > 1) {
-          // Stream forward sequentially at 1.6x muted speed so the H.264 decoder never drops a P/B frame
-          // and never flushes its reference buffer mid-cut!
-          const renderPlaybackRate = Math.min(2.0, Math.max(1.0, spd * 1.6));
-          videoEl.muted = true;
-          videoEl.volume = 0;
-          videoEl.playbackRate = renderPlaybackRate;
-
-          try {
-            await videoEl.play();
-          } catch {}
-
-          await new Promise<void>((resolveCut) => {
-            let busy = false;
-            const timer = setInterval(async () => {
-              if (busy) return;
-              busy = true;
-              try {
-                if (encoderFailed) {
-                  clearInterval(timer);
-                  resolveCut();
-                  return;
-                }
-
-                const curSourceTime = videoEl.currentTime;
-                const elapsedSrc = Math.max(0, curSourceTime - cut.sourceStart);
-                const elapsedOutSec = elapsedSrc / spd;
-                const targetFramesNow = Math.min(
-                  cutFrames,
-                  Math.floor(elapsedOutSec * fps) + 1
-                );
-
-                if (targetFramesNow > encodedInCut) {
-                  const relClipTime =
-                    cut.timelineStart + Math.min(cut.timelineEnd - cut.timelineStart, elapsedOutSec);
-                  draw9x16Frame(curSourceTime, relClipTime, cut);
-
-                  while (encodedInCut < targetFramesNow && !encoderFailed) {
-                    await encodeCurrentCanvasFrame();
-                    encodedInCut++;
-                  }
-                }
-
-                // Resume playback if browser paused it before reaching cut.sourceEnd
-                if (
-                  videoEl.paused &&
-                  !videoEl.ended &&
-                  curSourceTime < cut.sourceEnd - 0.03 &&
-                  encodedInCut < cutFrames
-                ) {
-                  videoEl.play().catch(() => {});
-                }
-
-                // Cut is complete when we have reached cut.sourceEnd or encoded all frames for this cut
-                if (
-                  encodedInCut >= cutFrames ||
-                  curSourceTime >= cut.sourceEnd - 0.015 ||
-                  videoEl.ended
-                ) {
-                  clearInterval(timer);
-                  resolveCut();
-                }
-              } finally {
-                busy = false;
-              }
-            }, 10);
+      let decodedWithMediabunny = false;
+      try {
+        const sourceBlob = new Blob([sourceArrayBuffer]);
+        mbInput = new Input({
+          source: new BlobSource(sourceBlob),
+          formats: ALL_FORMATS,
+        });
+        const videoTrack = await mbInput.getPrimaryVideoTrack();
+        if (videoTrack && (await videoTrack.canDecode())) {
+          vw = videoTrack.displayWidth || vw;
+          vh = videoTrack.displayHeight || vh;
+          const canvasSink = new CanvasSink(videoTrack, {
+            poolSize: 2,
+            fit: 'fill',
           });
 
-          videoEl.pause();
+          let lastValidCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
 
-          // Ensure exact frame count for this cut so audio/video stay 100% sample-locked
-          if (encodedInCut < cutFrames && !encoderFailed) {
-            draw9x16Frame(
-              Math.min(cut.sourceEnd, videoEl.currentTime),
-              cut.timelineEnd,
-              cut
-            );
-            while (encodedInCut < cutFrames && !encoderFailed) {
-              await encodeCurrentCanvasFrame();
-              encodedInCut++;
+          for (const plan of cutPlans) {
+            if (encoderFailed) break;
+            const { cut, spd, cutFrames } = plan;
+
+            // Monotonically sorted timestamps for this cut so Mediabunny's pipeline decodes each packet once
+            const cutTimestamps: number[] = [];
+            for (let f = 0; f < cutFrames; f++) {
+              const srcT = Math.min(
+                cut.sourceEnd,
+                Math.max(0, cut.sourceStart + (f / fps) * spd)
+              );
+              cutTimestamps.push(srcT);
             }
+
+            let frameInCut = 0;
+            for await (const wrapped of canvasSink.canvasesAtTimestamps(cutTimestamps)) {
+              if (encoderFailed) break;
+              const reqSourceTime =
+                cutTimestamps[frameInCut] ??
+                Math.min(cut.sourceEnd, cut.sourceStart + (frameInCut / fps) * spd);
+              const relClipTime =
+                cut.timelineStart +
+                Math.min(cut.timelineEnd - cut.timelineStart, frameInCut / fps);
+
+              if (wrapped?.canvas) {
+                lastValidCanvas = wrapped.canvas;
+              }
+              const frameSource = lastValidCanvas || videoEl;
+              draw9x16Frame(frameSource, reqSourceTime, relClipTime, cut);
+              await encodeCurrentCanvasFrame();
+              frameInCut++;
+            }
+
+            // Guarantee exact sample-locked frame count if the video stream ended slightly early
+            while (frameInCut < cutFrames && !encoderFailed) {
+              const reqSourceTime =
+                cutTimestamps[frameInCut] ?? cut.sourceEnd;
+              const relClipTime =
+                cut.timelineStart +
+                Math.min(cut.timelineEnd - cut.timelineStart, frameInCut / fps);
+              const frameSource = lastValidCanvas || videoEl;
+              draw9x16Frame(frameSource, reqSourceTime, relClipTime, cut);
+              await encodeCurrentCanvasFrame();
+              frameInCut++;
+            }
+          }
+
+          decodedWithMediabunny = true;
+        }
+      } catch (mbErr) {
+        console.warn('Mediabunny CanvasSink decode fallback triggered:', mbErr);
+      } finally {
+        if (mbInput) {
+          try {
+            mbInput.dispose();
+          } catch {}
+          mbInput = null;
+        }
+      }
+
+      // Deterministic Frame-Stepped Fallback (if Mediabunny did not decode all frames)
+      if (!decodedWithMediabunny && !encoderFailed) {
+        for (const plan of cutPlans) {
+          if (encoderFailed) break;
+          const { cut, spd, cutFrames } = plan;
+          for (let f = 0; f < cutFrames; f++) {
+            if (encoderFailed) break;
+            const reqSourceTime = Math.min(
+              cut.sourceEnd,
+              Math.max(0, cut.sourceStart + (f / fps) * spd)
+            );
+            const relClipTime =
+              cut.timelineStart +
+              Math.min(cut.timelineEnd - cut.timelineStart, f / fps);
+            await seekVideoToTime(reqSourceTime);
+            draw9x16Frame(videoEl, reqSourceTime, relClipTime, cut);
+            await encodeCurrentCanvasFrame();
           }
         }
       }
@@ -634,6 +677,12 @@ export async function exportClipTo9x16Video(
       }
     } catch (webCodecsErr) {
       console.warn('WebCodecs export fallback triggered:', webCodecsErr);
+    } finally {
+      if (mbInput) {
+        try {
+          mbInput.dispose();
+        } catch {}
+      }
     }
   }
 
@@ -650,8 +699,6 @@ export async function exportClipTo9x16Video(
   const canvasStream = canvas.captureStream(fps);
   const combinedTracks: MediaStreamTrack[] = [...canvasStream.getVideoTracks()];
 
-  // Route audio into MediaStreamDestination WITHOUT connecting to audioCtx.destination
-  // so the export captures full audio while remaining 100% silent on the user's speakers!
   let silentAudioCtx: AudioContext | null = null;
   try {
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
@@ -661,13 +708,13 @@ export async function exportClipTo9x16Video(
       videoEl.volume = 1.0;
       const sourceNode = silentAudioCtx.createMediaElementSource(videoEl);
       const streamDest = silentAudioCtx.createMediaStreamDestination();
-      sourceNode.connect(streamDest); // Intentionally NOT connected to silentAudioCtx.destination!
+      sourceNode.connect(streamDest);
       const audioTracks = streamDest.stream.getAudioTracks();
       if (audioTracks.length > 0) {
         combinedTracks.push(audioTracks[0]);
       }
     }
-  } catch (e) {
+  } catch {
     videoEl.muted = true;
   }
 
@@ -675,13 +722,13 @@ export async function exportClipTo9x16Video(
   const chunks: BlobPart[] = [];
   const recorder = new MediaRecorder(finalStream, {
     mimeType: recorderMime,
-    videoBitsPerSecond: 6_500_000,
+    videoBitsPerSecond: 8_000_000,
   });
   recorder.ondataavailable = (e) => {
     if (e.data && e.data.size > 0) chunks.push(e.data);
   };
 
-  await seekToCutStart(cutsToRender[0].sourceStart);
+  await seekVideoToTime(cutsToRender[0].sourceStart);
   recorder.start(100);
 
   for (let i = 0; i < cutsToRender.length; i++) {
@@ -692,7 +739,7 @@ export async function exportClipTo9x16Video(
           recorder.pause();
         } catch {}
       }
-      await seekToCutStart(cut.sourceStart);
+      await seekVideoToTime(cut.sourceStart);
       if (recorder.state === 'paused') {
         try {
           recorder.resume();
@@ -712,7 +759,7 @@ export async function exportClipTo9x16Video(
           Math.max(1, Math.round((clipRelTime / Math.max(0.5, clip.duration)) * 100))
         );
         onProgress?.(pct);
-        draw9x16Frame(t, clipRelTime, cut);
+        draw9x16Frame(videoEl, t, clipRelTime, cut);
 
         if (t >= cut.sourceEnd - 0.015 || videoEl.ended) {
           clearInterval(timer);

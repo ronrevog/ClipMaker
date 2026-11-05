@@ -22,6 +22,7 @@
     "firebase": "^13.2.0",
     "lottie-web": "^5.13.0",
     "lucide-react": "^0.468.0",
+    "mediabunny": "^1.65.2",
     "mp4-muxer": "^5.2.2",
     "mp4box": "^2.5.0",
     "react": "^18.3.1",
