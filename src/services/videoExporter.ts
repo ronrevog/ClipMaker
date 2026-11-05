@@ -68,7 +68,7 @@ async function extractOfflineClipAudioBuffer(
       const exactOutSec = cutFrames / fps;
       const startSample = Math.max(0, Math.floor(cut.sourceStart * sampleRate));
       const outLen = Math.max(1, Math.round(exactOutSec * sampleRate));
-      return { startSample, outLen, spd };
+      return { startSample, outLen, spd, audioDeleted: Boolean(cut.audioDeleted) };
     });
 
     const totalOutSamples = cutRanges.reduce((acc, r) => acc + r.outLen, 0);
@@ -83,7 +83,12 @@ async function extractOfflineClipAudioBuffer(
       let writeOffset = 0;
 
       for (const range of cutRanges) {
-        const { startSample, outLen, spd } = range;
+        const { startSample, outLen, spd, audioDeleted } = range;
+        if (audioDeleted) {
+          // Audio segment was removed on A1 track — keep silence for this cut's duration
+          writeOffset += outLen;
+          continue;
+        }
         if (Math.abs(spd - 1.0) < 0.01) {
           const safeEnd = Math.min(srcChannel.length, startSample + outLen);
           const slice = srcChannel.subarray(startSample, safeEnd);

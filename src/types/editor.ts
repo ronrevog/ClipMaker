@@ -192,6 +192,7 @@ export interface SubCut {
   layoutMode?: CutLayoutMode;
   isCompoundClip?: boolean;
   compoundSubCuts?: SubCut[];
+  audioDeleted?: boolean;
 }
 
 export interface CaptionWordTiming {

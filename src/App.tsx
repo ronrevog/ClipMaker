@@ -887,7 +887,7 @@ export const App: React.FC = () => {
           if (curClipT < currentCut.timelineStart - 0.03) {
             const nextClipT = curClipT + dtSec * (activeClip.playbackSpeed ?? 1.0);
             if (nextClipT >= currentCut.timelineStart) {
-              vid.muted = isMuted;
+              vid.muted = Boolean(isMuted || currentCut.audioDeleted);
               if (Math.abs(vid.currentTime - currentCut.sourceStart) > 0.08) {
                 vid.currentTime = currentCut.sourceStart;
               }
@@ -913,7 +913,7 @@ export const App: React.FC = () => {
                 setClipPlayheadTime(currentCut.timelineEnd + 0.01);
                 clipPlayheadTimeRef.current = currentCut.timelineEnd + 0.01;
               } else {
-                vid.muted = isMuted;
+                vid.muted = Boolean(isMuted || nextCut.audioDeleted);
                 if (Math.abs(vid.currentTime - nextCut.sourceStart) > 0.08) {
                   vid.currentTime = nextCut.sourceStart;
                 }
@@ -926,7 +926,7 @@ export const App: React.FC = () => {
               activeCutIdxRef.current = 0;
               setSelectedCutIndex(0);
               const firstCut = cuts[0];
-              vid.muted = isMuted;
+              vid.muted = Boolean(isMuted || firstCut.audioDeleted);
               vid.currentTime = firstCut.sourceStart;
               setPlayheadTime(firstCut.sourceStart);
               setClipPlayheadTime(firstCut.timelineStart);
@@ -934,6 +934,10 @@ export const App: React.FC = () => {
               if (vid.paused) vid.play().catch(() => {});
             }
           } else {
+            const shouldMute = Boolean(isMuted || currentCut.audioDeleted);
+            if (vid.muted !== shouldMute) {
+              vid.muted = shouldMute;
+            }
             const offsetInCut = Math.max(0, vid.currentTime - currentCut.sourceStart);
             const cTime = Math.min(
               activeClip.duration,
@@ -2129,6 +2133,50 @@ export const App: React.FC = () => {
     setTimeout(() => setMarkerNotice(null), 2800);
   }, [activeClip, selectedCutIndex, isMainTrackMagnet, isTrackLinkage, updateActiveTimelineClip]);
 
+  // Remove or Restore an individual Audio Segment on the A1 track separately from the V1 Video track!
+  const handleToggleAudioCutDeleted = useCallback(
+    (targetCutIndex?: number, forceDeleted?: boolean) => {
+      if (!activeClip || activeClip.subCuts.length === 0) return;
+      const idx = Math.max(
+        0,
+        Math.min(activeClip.subCuts.length - 1, targetCutIndex ?? selectedCutIndex)
+      );
+      const targetCut = activeClip.subCuts[idx];
+      if (!targetCut) return;
+
+      const nextDeleted =
+        typeof forceDeleted === 'boolean' ? forceDeleted : !targetCut.audioDeleted;
+      const segDur = Math.max(0.1, targetCut.timelineEnd - targetCut.timelineStart);
+
+      updateActiveTimelineClip((clip) => ({
+        ...clip,
+        subCuts: clip.subCuts.map((c, i) =>
+          i === idx ? { ...c, audioDeleted: nextDeleted } : c
+        ),
+      }));
+
+      setSelectedCutIndex(idx);
+      activeCutIdxRef.current = idx;
+      setSelectedLayerTrack('a1-audio');
+
+      if (
+        videoRef.current &&
+        clipPlayheadTime >= targetCut.timelineStart - 0.05 &&
+        clipPlayheadTime <= targetCut.timelineEnd + 0.05
+      ) {
+        videoRef.current.muted = Boolean(isMuted || nextDeleted);
+      }
+
+      setMarkerNotice(
+        nextDeleted
+          ? `Removed Audio Segment #${idx + 1} (${segDur.toFixed(1)}s) — V1 video cut kept intact`
+          : `Restored Audio Segment #${idx + 1} (${segDur.toFixed(1)}s) on A1 track`
+      );
+      setTimeout(() => setMarkerNotice(null), 2800);
+    },
+    [activeClip, selectedCutIndex, clipPlayheadTime, isMuted, updateActiveTimelineClip]
+  );
+
   // Toggle CapCut Main Track Magnet (Shortcut: P)
   const handleToggleMainTrackMagnet = useCallback(() => {
     setIsMainTrackMagnet((prev) => {
@@ -2991,11 +3039,15 @@ export const App: React.FC = () => {
         handleSetOutMarkerAtPlayhead();
       } else if (
         (e.code === 'Delete' || e.code === 'Backspace') &&
-        activeClip &&
-        activeClip.subCuts.length > 1
+        activeClip
       ) {
-        e.preventDefault();
-        handleDeleteSelectedCut();
+        if (selectedLayerTrack === 'a1-audio') {
+          e.preventDefault();
+          handleToggleAudioCutDeleted(selectedCutIndex, true);
+        } else if (activeClip.subCuts.length > 1) {
+          e.preventDefault();
+          handleDeleteSelectedCut();
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -3015,6 +3067,9 @@ export const App: React.FC = () => {
     handleSetInMarkerAtPlayhead,
     handleSetOutMarkerAtPlayhead,
     handleDeleteSelectedCut,
+    handleToggleAudioCutDeleted,
+    selectedLayerTrack,
+    selectedCutIndex,
     activeClip,
   ]);
 
@@ -8402,10 +8457,43 @@ export const App: React.FC = () => {
                           type="button"
                           className="btn btn-sm btn-danger"
                           onClick={handleDeleteSelectedCut}
-                          title="Delete selected cut [Delete / Backspace]"
+                          title="Delete selected video + audio cut [Delete / Backspace on V1]"
                         >
                           <Trash2 size={11} />
                           Del #{inspectedCut.index}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          style={{
+                            borderColor: inspectedCut.audioDeleted
+                              ? 'rgba(16, 185, 129, 0.45)'
+                              : 'rgba(239, 68, 68, 0.45)',
+                            color: inspectedCut.audioDeleted ? '#34d399' : '#fca5a5',
+                            background: inspectedCut.audioDeleted
+                              ? 'rgba(16, 185, 129, 0.12)'
+                              : 'rgba(239, 68, 68, 0.12)',
+                          }}
+                          onClick={() =>
+                            handleToggleAudioCutDeleted(
+                              inspectedCut.index - 1,
+                              !inspectedCut.audioDeleted
+                            )
+                          }
+                          title={
+                            inspectedCut.audioDeleted
+                              ? `Restore audio for Cut #${inspectedCut.index}`
+                              : `Remove only the audio segment for Cut #${inspectedCut.index} while keeping the video cut`
+                          }
+                        >
+                          {inspectedCut.audioDeleted ? (
+                            <Volume2 size={11} />
+                          ) : (
+                            <VolumeX size={11} />
+                          )}
+                          {inspectedCut.audioDeleted
+                            ? `Restore Audio #${inspectedCut.index}`
+                            : `Del Audio #${inspectedCut.index}`}
                         </button>
                         <button
                           type="button"
@@ -9629,81 +9717,203 @@ export const App: React.FC = () => {
                       className="nle-layer-track"
                       style={{
                         position: 'relative',
+                        cursor: isRazorMode ? 'crosshair' : 'pointer',
                       }}
                       onMouseDown={(e) => {
                         setSelectedLayerTrack('a1-audio');
+                        if (isRazorMode) {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+                          const clickTime = ratio * Math.max(0.1, activeClip.duration);
+                          handleRazorSplitAtClipTime(clickTime);
+                          return;
+                        }
                         updateTimelineDragAtClientX(e.clientX, 'playhead');
                       }}
                     >
-                      {activeClip.subCuts.length === 1 && timelineGaps.length === 0 && activeSource.url ? (
-                        <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-                          <WavesurferAudioTrack
-                            audioUrl={activeSource.url}
-                            clipStartTime={activeClip.sourceStart}
-                            clipDuration={activeClip.duration}
-                            sourceDuration={activeSource.duration}
-                            clipPlayheadTime={clipPlayheadTime}
-                            isMuted={isMuted}
-                          />
-                        </div>
-                      ) : (
-                        activeClip.subCuts.map((cut, idx) => {
-                          const totalDur = Math.max(0.5, activeClip.duration);
-                          const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
-                          const leftPct = Math.max(0, Math.min(99.5, (cut.timelineStart / totalDur) * 100));
-                          const widthPct = Math.max(
-                            0.5,
-                            Math.min(100 - leftPct, (cutDur / totalDur) * 100)
-                          );
-                          const totalBuckets = activeSource.waveformPeaks.length;
-                          const bStart = Math.max(
-                            0,
-                            Math.floor(
-                              (cut.sourceStart / Math.max(1, activeSource.duration)) * totalBuckets
-                            )
-                          );
-                          const bEnd = Math.max(
-                            bStart + 2,
-                            Math.ceil((cut.sourceEnd / Math.max(1, activeSource.duration)) * totalBuckets)
-                          );
-                          const slicePeaks = activeSource.waveformPeaks.slice(bStart, bEnd);
-                          return (
-                            <div
-                              key={`audio-${cut.id}`}
-                              style={{
-                                position: 'absolute',
-                                left: `${leftPct}%`,
-                                width: `${widthPct}%`,
-                                top: 0,
-                                bottom: 0,
-                                display: 'flex',
-                                alignItems: 'flex-end',
-                                gap: 1,
-                                padding: '0 2px',
-                                opacity: isMuted ? 0.3 : 1,
-                                borderRight:
-                                  idx < activeClip.subCuts.length - 1
-                                    ? '1px solid rgba(16, 185, 129, 0.45)'
-                                    : 'none',
-                              }}
-                            >
-                              {slicePeaks.map((pk, pIdx) => (
-                                <div
-                                  key={pIdx}
-                                  style={{
-                                    flex: 1,
-                                    height: `${Math.max(12, Math.round(pk * 82))}%`,
-                                    background: isMuted
-                                      ? 'rgba(239, 68, 68, 0.35)'
-                                      : 'rgba(16, 185, 129, 0.55)',
-                                    pointerEvents: 'none',
+                      {activeClip.subCuts.map((cut, idx) => {
+                        const totalDur = Math.max(0.5, activeClip.duration);
+                        const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
+                        const leftPct = Math.max(0, Math.min(99.5, (cut.timelineStart / totalDur) * 100));
+                        const widthPct = Math.max(
+                          0.5,
+                          Math.min(100 - leftPct, (cutDur / totalDur) * 100)
+                        );
+                        const sourceCutDur = Math.max(0.1, cut.sourceEnd - cut.sourceStart);
+                        const localPlayhead = Math.max(
+                          0,
+                          Math.min(sourceCutDur, clipPlayheadTime - cut.timelineStart)
+                        );
+                        const isSelectedAudioCut =
+                          selectedLayerTrack === 'a1-audio' &&
+                          selectedCutIndex === idx;
+                        const isDeletedAudio = Boolean(cut.audioDeleted);
+
+                        return (
+                          <div
+                            key={`audio-${cut.id}`}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              setSelectedLayerTrack('a1-audio');
+                              setSelectedCutIndex(idx);
+                              activeCutIdxRef.current = idx;
+                              if (isRazorMode && timelineBarRef.current) {
+                                const rect = timelineBarRef.current.getBoundingClientRect();
+                                const ratio = Math.max(
+                                  0,
+                                  Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width))
+                                );
+                                handleRazorSplitAtClipTime(ratio * Math.max(0.1, activeClip.duration));
+                                return;
+                              }
+                              updateTimelineDragAtClientX(e.clientX, 'playhead');
+                            }}
+                            title={
+                              isDeletedAudio
+                                ? `Audio Segment #${idx + 1} removed (Video #${idx + 1} kept) — Click to select or restore`
+                                : `Audio Segment #${idx + 1} (${cutDur.toFixed(1)}s) — Click to select, press Delete or × to remove audio separately from video`
+                            }
+                            style={{
+                              position: 'absolute',
+                              left: `${leftPct}%`,
+                              width: `${widthPct}%`,
+                              top: 0,
+                              bottom: 0,
+                              overflow: 'hidden',
+                              borderRadius: 3,
+                              background: isDeletedAudio
+                                ? 'repeating-linear-gradient(-45deg, rgba(24,24,27,0.7), rgba(24,24,27,0.7) 5px, rgba(239,68,68,0.12) 5px, rgba(239,68,68,0.12) 10px)'
+                                : isSelectedAudioCut
+                                ? 'rgba(16, 185, 129, 0.16)'
+                                : 'rgba(16, 185, 129, 0.06)',
+                              boxShadow: isSelectedAudioCut
+                                ? 'inset 0 0 0 1.5px #34d399'
+                                : 'inset 0 0 0 1px rgba(16, 185, 129, 0.28)',
+                              borderRight:
+                                idx < activeClip.subCuts.length - 1
+                                  ? '1.5px solid rgba(16, 185, 129, 0.65)'
+                                  : 'none',
+                              transition: 'box-shadow 0.12s ease, background 0.12s ease',
+                            }}
+                          >
+                            {!isDeletedAudio && activeSource.url ? (
+                              <WavesurferAudioTrack
+                                audioUrl={activeSource.url}
+                                clipStartTime={cut.sourceStart}
+                                clipDuration={sourceCutDur}
+                                sourceDuration={activeSource.duration}
+                                clipPlayheadTime={localPlayhead}
+                                isMuted={isMuted}
+                              />
+                            ) : (
+                              <div
+                                style={{
+                                  width: '100%',
+                                  height: '100%',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: 6,
+                                  fontSize: 9.5,
+                                  fontWeight: 600,
+                                  color: '#fca5a5',
+                                  padding: '0 4px',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                <VolumeX size={10} />
+                                {widthPct > 12 && <span>Audio #{idx + 1} Removed</span>}
+                                <button
+                                  type="button"
+                                  onMouseDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleToggleAudioCutDeleted(idx, false);
                                   }}
-                                />
-                              ))}
-                            </div>
-                          );
-                        })
-                      )}
+                                  style={{
+                                    background: 'rgba(16, 185, 129, 0.22)',
+                                    border: '1px solid rgba(16, 185, 129, 0.55)',
+                                    color: '#6ee7b7',
+                                    borderRadius: 3,
+                                    padding: '1px 5px',
+                                    fontSize: 9,
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                  }}
+                                  title={`Restore Audio Segment #${idx + 1}`}
+                                >
+                                  + Restore
+                                </button>
+                              </div>
+                            )}
+
+                            {/* Segment badge + independent audio remove button */}
+                            {!isDeletedAudio && widthPct > 6 && (
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  top: 2,
+                                  left: 4,
+                                  right: 4,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  pointerEvents: 'none',
+                                  zIndex: 6,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    fontSize: 8.5,
+                                    fontWeight: 700,
+                                    color: isSelectedAudioCut ? '#ecfdf5' : '#6ee7b7',
+                                    background: isSelectedAudioCut
+                                      ? 'rgba(5, 150, 105, 0.85)'
+                                      : 'rgba(9, 9, 11, 0.65)',
+                                    padding: '0px 4px',
+                                    borderRadius: 2,
+                                    lineHeight: '13px',
+                                  }}
+                                >
+                                  A1 #{idx + 1}
+                                </span>
+                                <button
+                                  type="button"
+                                  onMouseDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedLayerTrack('a1-audio');
+                                    setSelectedCutIndex(idx);
+                                    handleToggleAudioCutDeleted(idx, true);
+                                  }}
+                                  title={`Remove Audio Segment #${idx + 1} separately from video`}
+                                  style={{
+                                    pointerEvents: 'auto',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    width: 15,
+                                    height: 14,
+                                    borderRadius: 3,
+                                    border: '1px solid rgba(239, 68, 68, 0.5)',
+                                    background: isSelectedAudioCut
+                                      ? 'rgba(220, 38, 38, 0.85)'
+                                      : 'rgba(9, 9, 11, 0.72)',
+                                    color: '#fecaca',
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    lineHeight: 1,
+                                    cursor: 'pointer',
+                                    padding: 0,
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
 
                       {/* Playhead needle */}
                       <div
@@ -10147,14 +10357,46 @@ export const App: React.FC = () => {
                         })}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={() => setIsTranscriptEditorOpen(true)}
-                    >
-                      <FileText size={11} />
-                      Edit Transcript
-                    </button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      {inspectedCut && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          style={{
+                            borderColor: inspectedCut.audioDeleted
+                              ? 'rgba(16, 185, 129, 0.45)'
+                              : 'rgba(239, 68, 68, 0.45)',
+                            color: inspectedCut.audioDeleted ? '#34d399' : '#fca5a5',
+                            background: inspectedCut.audioDeleted
+                              ? 'rgba(16, 185, 129, 0.12)'
+                              : 'rgba(239, 68, 68, 0.12)',
+                          }}
+                          onClick={() =>
+                            handleToggleAudioCutDeleted(
+                              inspectedCut.index - 1,
+                              !inspectedCut.audioDeleted
+                            )
+                          }
+                        >
+                          {inspectedCut.audioDeleted ? (
+                            <Volume2 size={11} />
+                          ) : (
+                            <Trash2 size={11} />
+                          )}
+                          {inspectedCut.audioDeleted
+                            ? `Restore Audio Segment #${inspectedCut.index}`
+                            : `Remove Audio Segment #${inspectedCut.index} (Keep Video)`}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => setIsTranscriptEditorOpen(true)}
+                      >
+                        <FileText size={11} />
+                        Edit Transcript
+                      </button>
+                    </div>
                   </div>
                 ) : selectedLayerTrack === 'v2-speaker' ? (
                   <div
