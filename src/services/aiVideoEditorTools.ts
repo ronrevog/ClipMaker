@@ -1090,8 +1090,7 @@ export function renderComposite9x16Frame(params: {
       centerY: number,
       speakerScale: number,
       destY: number,
-      destH: number,
-      badgeText: string
+      destH: number
     ) => {
       const panelAspect = outW / Math.max(1, destH);
       const widthFraction = vw < vh ? 0.50 : 0.46;
@@ -1122,24 +1121,12 @@ export function renderComposite9x16Frame(params: {
       } else {
         ctx.drawImage(videoEl, sx, sy, sw, sh, panelDx, destY, outW, destH);
       }
-
-      // Clean monochrome speaker label pill in corner
-      ctx.save();
-      ctx.font = `600 ${Math.max(10, Math.round(outW * 0.026))}px Inter, sans-serif`;
-      ctx.fillStyle = 'rgba(9, 9, 11, 0.78)';
-      ctx.fillRect(8, destY + 8, Math.round(outW * 0.25), Math.round(outW * 0.052));
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(8, destY + 8, Math.round(outW * 0.25), Math.round(outW * 0.052));
-      ctx.fillStyle = '#f4f4f5';
-      ctx.fillText(badgeText, 14, destY + 8 + Math.round(outW * 0.037));
-      ctx.restore();
     };
 
     // Top Panel: Speaker A
-    drawSpeakerPanel(leftX, leftY, leftScale, 0, topH, 'SPEAKER A');
+    drawSpeakerPanel(leftX, leftY, leftScale, 0, topH);
     // Bottom Panel: Speaker B
-    drawSpeakerPanel(rightX, rightY, rightScale, topH, bottomH, 'SPEAKER B');
+    drawSpeakerPanel(rightX, rightY, rightScale, topH, bottomH);
 
     // Clean divider line between Top & Bottom speaker panels
     ctx.save();
