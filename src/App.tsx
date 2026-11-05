@@ -979,34 +979,74 @@ export const App: React.FC = () => {
         label,
       });
 
+      // When the video has been split into multiple cuts, apply Left/Right/Center focus to the selected cut!
+      const targetIdx = activeClip
+        ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
+        : 0;
+      const targetCutLayout: CutLayoutMode =
+        strategy === 'left-subject'
+          ? 'full-speaker-a'
+          : strategy === 'right-subject'
+            ? 'full-speaker-b'
+            : 'full-single';
+
       // On vertical 2-speaker videos (e.g. 720x1280), isolating Left Speaker or Right Speaker requires ~1.85x zoom
       if (isVerticalSource && (strategy === 'left-subject' || strategy === 'right-subject')) {
         const speakerZoom = Math.max(1.85, currentZoom);
         updateActiveTimelineClip((c) => ({
           ...c,
-          backgroundFillStyle: c.backgroundFillStyle === 'split-screen' ? 'blurred' : c.backgroundFillStyle,
-          zoomScale: speakerZoom,
-          subCuts: c.subCuts.map((sc) => ({
-            ...sc,
-            zoom: speakerZoom,
-            cropBiasX: strategy === 'left-subject' ? -0.24 : 0.24,
-          })),
+          backgroundFillStyle:
+            c.subCuts.length === 1 && c.backgroundFillStyle === 'split-screen'
+              ? 'blurred'
+              : c.backgroundFillStyle,
+          zoomScale: c.subCuts.length === 1 ? speakerZoom : c.zoomScale,
+          subCuts: c.subCuts.map((sc, idx) =>
+            c.subCuts.length === 1 || idx === targetIdx
+              ? {
+                  ...sc,
+                  zoom: speakerZoom,
+                  cropBiasX: strategy === 'left-subject' ? -0.24 : 0.24,
+                  layoutMode: c.subCuts.length > 1 ? targetCutLayout : sc.layoutMode,
+                }
+              : sc
+          ),
         }));
       } else {
         updateActiveTimelineClip((c) => ({
           ...c,
-          backgroundFillStyle: c.backgroundFillStyle === 'split-screen' ? 'blurred' : c.backgroundFillStyle,
-          subCuts: c.subCuts.map((sc) => ({
-            ...sc,
-            cropBiasX: 0,
-          })),
+          backgroundFillStyle:
+            c.subCuts.length === 1 && c.backgroundFillStyle === 'split-screen'
+              ? 'blurred'
+              : c.backgroundFillStyle,
+          subCuts: c.subCuts.map((sc, idx) =>
+            c.subCuts.length === 1 || idx === targetIdx
+              ? {
+                  ...sc,
+                  cropBiasX: 0,
+                  layoutMode: c.subCuts.length > 1 ? targetCutLayout : sc.layoutMode,
+                }
+              : sc
+          ),
         }));
       }
 
-      setMarkerNotice(`9:16 Subject Focus set to: ${label}`);
+      setMarkerNotice(
+        activeClip && activeClip.subCuts.length > 1
+          ? `Cut #${targetIdx + 1} set to: ${label}`
+          : `9:16 Subject Focus set to: ${label}`
+      );
       setTimeout(() => setMarkerNotice(null), 2400);
     },
-    [currentTrack, playheadTime, applySubjectFocusConfig, nativeDims, currentZoom, updateActiveTimelineClip]
+    [
+      currentTrack,
+      playheadTime,
+      applySubjectFocusConfig,
+      nativeDims,
+      currentZoom,
+      updateActiveTimelineClip,
+      activeClip,
+      selectedCutIndex,
+    ]
   );
 
   // Dedicated 2-Speaker Podcast Director (Split-Screen OR Auto-Switch Speaker Cuts)
@@ -1017,6 +1057,27 @@ export const App: React.FC = () => {
       liveTrackedAnchorRef.current = null;
       setLiveTrackedAnchor(null);
 
+      if (mode === 'split-screen' && activeClip.subCuts.length > 1) {
+        const targetIdx = Math.min(selectedCutIndex, activeClip.subCuts.length - 1);
+        const isVerticalSource = (activeSource.width || 1920) < (activeSource.height || 1080);
+        const defaultY = isVerticalSource ? 0.39 : 0.44;
+        updateActiveTimelineClip((clip) => ({
+          ...clip,
+          speakerAX: clip.speakerAX ?? 0.26,
+          speakerAY: clip.speakerAY ?? defaultY,
+          speakerBX: clip.speakerBX ?? 0.74,
+          speakerBY: clip.speakerBY ?? defaultY,
+          subCuts: clip.subCuts.map((sc, idx) =>
+            idx === targetIdx ? { ...sc, layoutMode: 'split-screen' } : sc
+          ),
+        }));
+        setMarkerNotice(
+          `Cut #${targetIdx + 1} set to 2-Speaker Split-Screen (other cuts preserved)`
+        );
+        setTimeout(() => setMarkerNotice(null), 2800);
+        return;
+      }
+
       updateActiveTimelineClip((clip) => applyTwoSpeakerEditMode(clip, activeSource, mode));
 
       if (mode === 'split-screen') {
@@ -1026,7 +1087,7 @@ export const App: React.FC = () => {
       }
       setTimeout(() => setMarkerNotice(null), 3000);
     },
-    [activeClip, activeSource, updateActiveTimelineClip]
+    [activeClip, activeSource, selectedCutIndex, updateActiveTimelineClip]
   );
 
   // Programmatically or interactively place a Focus Lock Point at normalized (0..1) coordinates on the source video
@@ -1357,60 +1418,80 @@ export const App: React.FC = () => {
       if (!activeClip) return;
       const { sourceTime } = clipTimeToSourceTime(activeClip, targetClipTime);
 
+      const nextSubCuts: SubCut[] = [];
       let didSplit = false;
       let newCutIdx = selectedCutIndex;
+      let splitSrcTime = sourceTime;
 
-      updateActiveTimelineClip((clip) => {
-        const nextSubCuts: SubCut[] = [];
-        for (let i = 0; i < clip.subCuts.length; i++) {
-          const cut = clip.subCuts[i];
-          if (
-            !didSplit &&
-            targetClipTime > cut.timelineStart + 0.2 &&
-            targetClipTime < cut.timelineEnd - 0.2 &&
-            sourceTime > cut.sourceStart + 0.2 &&
-            sourceTime < cut.sourceEnd - 0.2
-          ) {
-            didSplit = true;
-            newCutIdx = nextSubCuts.length + 1;
-            const splitSrc = Number(sourceTime.toFixed(2));
-            nextSubCuts.push({
-              ...cut,
-              id: `${cut.id}-a-${Date.now()}`,
-              sourceEnd: splitSrc,
-              label: `${cut.label.replace(/\s*\(Part.*\)/, '')} (Part 1)`,
-            });
-            nextSubCuts.push({
-              ...cut,
-              id: `${cut.id}-b-${Date.now()}`,
-              sourceStart: splitSrc,
-              label: `Cut @ ${formatSMPTETimecode(splitSrc).slice(3, 8)}`,
-              zoom: cut.zoom,
-            });
-          } else {
-            nextSubCuts.push(cut);
-          }
+      for (let i = 0; i < activeClip.subCuts.length; i++) {
+        const cut = activeClip.subCuts[i];
+        if (
+          !didSplit &&
+          targetClipTime > cut.timelineStart + 0.08 &&
+          targetClipTime < cut.timelineEnd - 0.08 &&
+          sourceTime > cut.sourceStart + 0.08 &&
+          sourceTime < cut.sourceEnd - 0.08
+        ) {
+          didSplit = true;
+          newCutIdx = nextSubCuts.length + 1;
+          const splitSrc = Number(sourceTime.toFixed(2));
+          splitSrcTime = splitSrc;
+          const baseLabel = cut.label
+            .replace(/\s*\(Part\s*\d+\)/gi, '')
+            .replace(/^Cut\s*@\s*[\d:.]+\s*/i, '')
+            .trim() || 'Video Cut';
+          nextSubCuts.push({
+            ...cut,
+            id: `${cut.id}-a-${Date.now()}`,
+            sourceEnd: splitSrc,
+            label: `${baseLabel} (Part 1)`,
+          });
+          nextSubCuts.push({
+            ...cut,
+            id: `${cut.id}-b-${Date.now()}`,
+            sourceStart: splitSrc,
+            label: `${baseLabel} (Part 2)`,
+            zoom: cut.zoom,
+            cropBiasX: cut.cropBiasX,
+            layoutMode: cut.layoutMode,
+            speed: cut.speed,
+          });
+        } else {
+          nextSubCuts.push(cut);
         }
-        if (!didSplit) return clip;
-        const recalc = recalculateClipTimeline(nextSubCuts);
-        return {
-          ...clip,
-          subCuts: recalc.subCuts,
-          duration: recalc.duration,
-          sourceStart: recalc.sourceStart,
-          sourceEnd: recalc.sourceEnd,
-        };
-      });
-
-      if (didSplit) {
-        setSelectedCutIndex(newCutIdx);
-        activeCutIdxRef.current = newCutIdx;
-        handleSeekClipTime(targetClipTime);
-        setMarkerNotice(`Split cut at ${targetClipTime.toFixed(2)}s`);
-        setTimeout(() => setMarkerNotice(null), 2200);
       }
+
+      if (!didSplit) {
+        setMarkerNotice(
+          'Move the playhead inside a cut (away from the start/end edge) to split [B]'
+        );
+        setTimeout(() => setMarkerNotice(null), 2400);
+        return;
+      }
+
+      const recalc = recalculateClipTimeline(nextSubCuts);
+      updateActiveTimelineClip((clip) => ({
+        ...clip,
+        subCuts: recalc.subCuts,
+        duration: recalc.duration,
+        sourceStart: recalc.sourceStart,
+        sourceEnd: recalc.sourceEnd,
+      }));
+
+      setSelectedLayerTrack('v1-video');
+      setSelectedCutIndex(newCutIdx);
+      activeCutIdxRef.current = newCutIdx;
+      setClipPlayheadTime(targetClipTime);
+      setPlayheadTime(splitSrcTime);
+      if (videoRef.current) {
+        videoRef.current.currentTime = splitSrcTime;
+      }
+      setMarkerNotice(
+        `Split into ${recalc.subCuts.length} active cuts at ${targetClipTime.toFixed(2)}s (Cut #${newCutIdx + 1} selected)`
+      );
+      setTimeout(() => setMarkerNotice(null), 2600);
     },
-    [activeClip, selectedCutIndex, updateActiveTimelineClip, handleSeekClipTime]
+    [activeClip, selectedCutIndex, updateActiveTimelineClip]
   );
 
   // Split Active Clip at current playhead position
@@ -1480,6 +1561,7 @@ export const App: React.FC = () => {
     });
 
     const newIdx = insertAfterIdx + 1;
+    setSelectedLayerTrack('v1-video');
     setSelectedCutIndex(newIdx);
     activeCutIdxRef.current = newIdx;
     const dur = (copiedCut.sourceEnd - copiedCut.sourceStart).toFixed(1);
@@ -1492,6 +1574,7 @@ export const App: React.FC = () => {
     (mode: CutLayoutMode) => {
       if (!activeClip || activeClip.subCuts.length === 0) return;
       const targetIdx = Math.min(selectedCutIndex, activeClip.subCuts.length - 1);
+      setSelectedLayerTrack('v1-video');
       updateActiveTimelineClip((clip) => ({
         ...clip,
         subCuts: clip.subCuts.map((sc, idx) =>
@@ -6324,20 +6407,54 @@ export const App: React.FC = () => {
                           { id: 'split-screen', label: 'Split-Screen' },
                         ] as Array<{ id: BackgroundFillStyle; label: string }>
                       ).map((opt) => {
-                        const activeFill = activeClip?.backgroundFillStyle ?? 'blurred';
+                        const cutMode = inspectedCut?.layoutMode || 'inherit';
+                        const clipFill = activeClip?.backgroundFillStyle ?? 'blurred';
+                        const effectiveCutFill: BackgroundFillStyle =
+                          cutMode === 'split-screen'
+                            ? 'split-screen'
+                            : cutMode === 'full-single' ||
+                                cutMode === 'full-speaker-a' ||
+                                cutMode === 'full-speaker-b'
+                              ? clipFill === 'black'
+                                ? 'black'
+                                : 'blurred'
+                              : clipFill;
                         return (
                           <button
                             key={opt.id}
                             type="button"
                             className="seg-item"
-                            data-active={activeFill === opt.id}
+                            data-active={effectiveCutFill === opt.id}
                             onClick={() => {
                               if (opt.id === 'split-screen') {
                                 handleTwoSpeakerMode('split-screen');
                               } else {
+                                const targetIdx = activeClip
+                                  ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
+                                  : 0;
                                 updateActiveTimelineClip((c) => ({
                                   ...c,
-                                  backgroundFillStyle: opt.id,
+                                  backgroundFillStyle:
+                                    c.subCuts.length === 1
+                                      ? opt.id
+                                      : c.backgroundFillStyle === 'split-screen'
+                                        ? 'split-screen'
+                                        : opt.id,
+                                  subCuts:
+                                    c.subCuts.length > 1
+                                      ? c.subCuts.map((sc, idx) =>
+                                          idx === targetIdx
+                                            ? {
+                                                ...sc,
+                                                layoutMode:
+                                                  sc.layoutMode === 'full-speaker-a' ||
+                                                  sc.layoutMode === 'full-speaker-b'
+                                                    ? sc.layoutMode
+                                                    : 'full-single',
+                                              }
+                                            : sc
+                                        )
+                                      : c.subCuts,
                                 }));
                               }
                             }}
@@ -7123,7 +7240,16 @@ export const App: React.FC = () => {
                         style={{ width: 20, height: 20 }}
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (activeClip.backgroundFillStyle === 'split-screen') {
+                          if (activeClip.subCuts.length > 1) {
+                            const curMode = inspectedCut?.layoutMode || 'inherit';
+                            const isCurrentlySplit =
+                              curMode === 'split-screen' ||
+                              (curMode === 'inherit' &&
+                                activeClip.backgroundFillStyle === 'split-screen');
+                            handleSetSelectedCutLayoutMode(
+                              isCurrentlySplit ? 'full-single' : 'split-screen'
+                            );
+                          } else if (activeClip.backgroundFillStyle === 'split-screen') {
                             updateActiveTimelineClip((c) => ({
                               ...c,
                               backgroundFillStyle: 'blurred',
@@ -7139,13 +7265,84 @@ export const App: React.FC = () => {
                     </div>
                     <div
                       className="nle-layer-track"
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'row',
+                        alignItems: 'stretch',
+                        flexWrap: 'nowrap',
+                      }}
                       onMouseDown={(e) => {
                         setSelectedLayerTrack('v2-speaker');
                         updateTimelineDragAtClientX(e.clientX, 'playhead');
                       }}
                     >
-                      {activeClip.backgroundFillStyle === 'split-screen' ||
-                      activeClip.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
+                      {activeClip.subCuts.length > 1 ? (
+                        activeClip.subCuts.map((cut, idx) => {
+                          const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
+                          const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
+                          const cMode = cut.layoutMode || 'inherit';
+                          const isSplit =
+                            cMode === 'split-screen' ||
+                            (cMode === 'inherit' &&
+                              activeClip.backgroundFillStyle === 'split-screen');
+                          const isSelectedCut = idx === selectedCutIndex;
+                          return (
+                            <div
+                              key={`v2-${cut.id}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedCutIndex(idx);
+                                activeCutIdxRef.current = idx;
+                                setSelectedLayerTrack('v2-speaker');
+                                updateTimelineDragAtClientX(e.clientX, 'playhead');
+                              }}
+                              style={{
+                                width: `${widthPct}%`,
+                                height: '100%',
+                                flexShrink: 0,
+                                display: 'flex',
+                                alignItems: 'center',
+                                padding: '0 6px',
+                                overflow: 'hidden',
+                                background: isSplit
+                                  ? isSelectedCut
+                                    ? 'rgba(249, 115, 22, 0.38)'
+                                    : 'rgba(249, 115, 22, 0.24)'
+                                  : 'rgba(39, 39, 42, 0.35)',
+                                borderRight:
+                                  idx < activeClip.subCuts.length - 1
+                                    ? '1px solid rgba(255, 255, 255, 0.14)'
+                                    : 'none',
+                                boxShadow: isSelectedCut
+                                  ? 'inset 0 0 0 1px rgba(249, 115, 22, 0.85)'
+                                  : 'none',
+                              }}
+                              title={`Cut #${idx + 1}: ${isSplit ? '2-Speaker Split-Screen' : 'Full-Screen (1 Subject)'}`}
+                            >
+                              <span
+                                style={{
+                                  fontSize: 9,
+                                  fontFamily: 'var(--font-mono)',
+                                  color: isSplit ? '#ffedd5' : 'var(--text-muted)',
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  pointerEvents: 'none',
+                                }}
+                              >
+                                {isSplit
+                                  ? `Cut #${idx + 1}: 2-Speaker Split`
+                                  : cMode === 'full-speaker-a'
+                                    ? `Cut #${idx + 1}: Full (Speaker A)`
+                                    : cMode === 'full-speaker-b'
+                                      ? `Cut #${idx + 1}: Full (Speaker B)`
+                                      : `Cut #${idx + 1}: Full Screen`}
+                              </span>
+                            </div>
+                          );
+                        })
+                      ) : activeClip.backgroundFillStyle === 'split-screen' ||
+                        activeClip.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
                         <div
                           className={`nle-layer-block ${selectedLayerTrack === 'v2-speaker' ? 'is-active' : ''}`}
                           style={{
@@ -7211,6 +7408,10 @@ export const App: React.FC = () => {
                       className="nle-layer-track"
                       style={{
                         cursor: isRazorMode ? 'crosshair' : 'pointer',
+                        display: 'flex',
+                        flexDirection: 'row',
+                        alignItems: 'stretch',
+                        flexWrap: 'nowrap',
                       }}
                       onMouseDown={(e) => {
                         setSelectedLayerTrack('v1-video');
@@ -7253,7 +7454,7 @@ export const App: React.FC = () => {
                         return (
                           <div
                             key={cut.id}
-                            onClick={(e) => {
+                            onMouseDown={(e) => {
                               e.stopPropagation();
                               setSelectedLayerTrack('v1-video');
                               if (isRazorMode && timelineBarRef.current) {
@@ -7267,35 +7468,58 @@ export const App: React.FC = () => {
                               }
                               setSelectedCutIndex(idx);
                               activeCutIdxRef.current = idx;
+                              setDraggingHandle('playhead');
                               updateTimelineDragAtClientX(e.clientX, 'playhead');
                             }}
                             style={{
                               width: `${widthPct}%`,
                               height: '100%',
+                              flexShrink: 0,
                               position: 'relative',
                               background: isSelectedCut
-                                ? 'rgba(59, 130, 246, 0.26)'
+                                ? 'linear-gradient(180deg, rgba(59, 130, 246, 0.46) 0%, rgba(37, 99, 235, 0.32) 100%)'
                                 : isCurrentCut
-                                  ? 'rgba(59, 130, 246, 0.14)'
-                                  : 'rgba(24, 24, 30, 0.9)',
+                                  ? 'linear-gradient(180deg, rgba(37, 99, 235, 0.34) 0%, rgba(29, 78, 216, 0.24) 100%)'
+                                  : 'linear-gradient(180deg, rgba(30, 64, 175, 0.28) 0%, rgba(23, 37, 84, 0.32) 100%)',
                               borderRight:
                                 idx < activeClip.subCuts.length - 1
-                                  ? '1px solid var(--border-strong)'
+                                  ? '2px solid #60a5fa'
                                   : 'none',
                               boxShadow: isSelectedCut
-                                ? 'inset 0 0 0 1px rgba(59, 130, 246, 0.75)'
-                                : 'none',
+                                ? 'inset 0 0 0 1.5px #93c5fd'
+                                : 'inset 0 0 0 1px rgba(59, 130, 246, 0.32)',
                               display: 'flex',
                               alignItems: 'center',
+                              gap: 5,
                               padding: '0 6px',
                               overflow: 'hidden',
                             }}
                           >
+                            {activeClip.subCuts.length > 1 && (
+                              <span
+                                style={{
+                                  fontSize: 8.5,
+                                  fontFamily: 'var(--font-mono)',
+                                  fontWeight: 700,
+                                  padding: '1px 4px',
+                                  borderRadius: 3,
+                                  background: isSelectedCut
+                                    ? '#3b82f6'
+                                    : 'rgba(59, 130, 246, 0.28)',
+                                  color: '#ffffff',
+                                  flexShrink: 0,
+                                  pointerEvents: 'none',
+                                }}
+                              >
+                                #{idx + 1}
+                              </span>
+                            )}
                             <span
                               style={{
                                 fontSize: 9.5,
                                 fontFamily: 'var(--font-mono)',
-                                color: isSelectedCut ? '#fafafa' : 'var(--text-secondary)',
+                                fontWeight: isSelectedCut ? 600 : 500,
+                                color: isSelectedCut ? '#ffffff' : '#e4e4e7',
                                 whiteSpace: 'nowrap',
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis',
@@ -7319,69 +7543,76 @@ export const App: React.FC = () => {
                         );
                       })}
 
-                      {/* In / Out Shaded Region */}
-                      {inMarkerPct !== null && outMarkerPct !== null && outMarkerPct >= inMarkerPct && (
-                        <>
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: `${inMarkerPct}%`,
-                              width: `${Math.max(0.5, outMarkerPct - inMarkerPct)}%`,
-                              top: 0,
-                              bottom: 0,
-                              background: 'rgba(250, 250, 250, 0.08)',
-                              borderTop: '1px solid rgba(250, 250, 250, 0.5)',
-                              borderBottom: '1px solid rgba(250, 250, 250, 0.5)',
-                              pointerEvents: 'none',
-                              zIndex: 5,
-                            }}
-                          />
-                          <div
-                            onMouseDown={(e) => {
-                              if (isRazorMode) return;
-                              e.stopPropagation();
-                              setDraggingHandle('in');
-                            }}
-                            style={{
-                              position: 'absolute',
-                              left: `${inMarkerPct}%`,
-                              top: 0,
-                              bottom: 0,
-                              width: 10,
-                              transform: 'translateX(-50%)',
-                              cursor: 'ew-resize',
-                              zIndex: 12,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: 'center',
-                            }}
-                          >
-                            <div style={{ flex: 1, width: 2, background: '#e4e4e7' }} />
-                          </div>
-                          <div
-                            onMouseDown={(e) => {
-                              if (isRazorMode) return;
-                              e.stopPropagation();
-                              setDraggingHandle('out');
-                            }}
-                            style={{
-                              position: 'absolute',
-                              left: `${outMarkerPct}%`,
-                              top: 0,
-                              bottom: 0,
-                              width: 10,
-                              transform: 'translateX(-50%)',
-                              cursor: 'ew-resize',
-                              zIndex: 12,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: 'center',
-                            }}
-                          >
-                            <div style={{ flex: 1, width: 2, background: '#e4e4e7' }} />
-                          </div>
-                        </>
-                      )}
+                      {/* In / Out Shaded Region (shown when custom In/Out range or loop is active) */}
+                      {inMarkerPct !== null &&
+                        outMarkerPct !== null &&
+                        outMarkerPct >= inMarkerPct &&
+                        ((inMarker !== null && inMarker > 0.05) ||
+                          (outMarker !== null && outMarker < activeSource.duration - 0.05) ||
+                          isLoopingInOut ||
+                          draggingHandle === 'in' ||
+                          draggingHandle === 'out') && (
+                          <>
+                            <div
+                              style={{
+                                position: 'absolute',
+                                left: `${inMarkerPct}%`,
+                                width: `${Math.max(0.5, outMarkerPct - inMarkerPct)}%`,
+                                top: 0,
+                                bottom: 0,
+                                background: 'rgba(250, 250, 250, 0.08)',
+                                borderTop: '1px solid rgba(250, 250, 250, 0.5)',
+                                borderBottom: '1px solid rgba(250, 250, 250, 0.5)',
+                                pointerEvents: 'none',
+                                zIndex: 5,
+                              }}
+                            />
+                            <div
+                              onMouseDown={(e) => {
+                                if (isRazorMode) return;
+                                e.stopPropagation();
+                                setDraggingHandle('in');
+                              }}
+                              style={{
+                                position: 'absolute',
+                                left: `${inMarkerPct}%`,
+                                top: 0,
+                                bottom: 0,
+                                width: 8,
+                                transform: 'translateX(-50%)',
+                                cursor: 'ew-resize',
+                                zIndex: 12,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                              }}
+                            >
+                              <div style={{ flex: 1, width: 2, background: '#e4e4e7' }} />
+                            </div>
+                            <div
+                              onMouseDown={(e) => {
+                                if (isRazorMode) return;
+                                e.stopPropagation();
+                                setDraggingHandle('out');
+                              }}
+                              style={{
+                                position: 'absolute',
+                                left: `${outMarkerPct}%`,
+                                top: 0,
+                                bottom: 0,
+                                width: 8,
+                                transform: 'translateX(-50%)',
+                                cursor: 'ew-resize',
+                                zIndex: 12,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                              }}
+                            >
+                              <div style={{ flex: 1, width: 2, background: '#e4e4e7' }} />
+                            </div>
+                          </>
+                        )}
 
                       {/* Playhead Needle */}
                       <div
@@ -7438,6 +7669,12 @@ export const App: React.FC = () => {
                     </div>
                     <div
                       className="nle-layer-track"
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'row',
+                        alignItems: 'stretch',
+                        flexWrap: 'nowrap',
+                      }}
                       onMouseDown={(e) => {
                         setSelectedLayerTrack('a1-audio');
                         updateTimelineDragAtClientX(e.clientX, 'playhead');
@@ -7455,7 +7692,7 @@ export const App: React.FC = () => {
                           />
                         </div>
                       ) : (
-                        activeClip.subCuts.map((cut) => {
+                        activeClip.subCuts.map((cut, idx) => {
                           const cutDur = Math.max(0.1, cut.timelineEnd - cut.timelineStart);
                           const widthPct = (cutDur / Math.max(0.5, activeClip.duration)) * 100;
                           const totalBuckets = activeSource.waveformPeaks.length;
@@ -7476,11 +7713,16 @@ export const App: React.FC = () => {
                               style={{
                                 width: `${widthPct}%`,
                                 height: '100%',
+                                flexShrink: 0,
                                 display: 'flex',
                                 alignItems: 'flex-end',
                                 gap: 1,
                                 padding: '0 2px',
                                 opacity: isMuted ? 0.3 : 1,
+                                borderRight:
+                                  idx < activeClip.subCuts.length - 1
+                                    ? '1px solid rgba(16, 185, 129, 0.45)'
+                                    : 'none',
                               }}
                             >
                               {slicePeaks.map((pk, pIdx) => (
@@ -7491,7 +7733,7 @@ export const App: React.FC = () => {
                                     height: `${Math.max(12, Math.round(pk * 82))}%`,
                                     background: isMuted
                                       ? 'rgba(239, 68, 68, 0.35)'
-                                      : 'rgba(16, 185, 129, 0.48)',
+                                      : 'rgba(16, 185, 129, 0.55)',
                                     pointerEvents: 'none',
                                   }}
                                 />

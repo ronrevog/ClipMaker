@@ -17,6 +17,7 @@ import {
   SourceVideoAsset,
   SubCut,
 } from '../types/editor';
+import { recalculateClipTimeline } from './clipGenerator';
 
 // ============================================================================
 // 1. MP4BOX.JS CONTAINER & GOP KEYFRAME INSPECTOR
@@ -444,8 +445,15 @@ export async function detectSingleVsTwoSpeakerLayoutCuts(
         label: mode === 'split-screen' ? 'Split-Screen (2 Subj)' : 'Full-Screen (1 Subj)',
       };
     });
+    const recalcFallback = recalculateClipTimeline(nextCuts);
     return {
-      updatedClip: { ...clip, subCuts: nextCuts },
+      updatedClip: {
+        ...clip,
+        subCuts: recalcFallback.subCuts,
+        duration: recalcFallback.duration,
+        sourceStart: recalcFallback.sourceStart,
+        sourceEnd: recalcFallback.sourceEnd,
+      },
       splitCount,
       fullCount,
     };
@@ -512,10 +520,14 @@ export async function detectSingleVsTwoSpeakerLayoutCuts(
     });
   }
 
+  const recalc = recalculateClipTimeline(nextCuts);
   return {
     updatedClip: {
       ...clip,
-      subCuts: nextCuts,
+      subCuts: recalc.subCuts,
+      duration: recalc.duration,
+      sourceStart: recalc.sourceStart,
+      sourceEnd: recalc.sourceEnd,
     },
     splitCount,
     fullCount,

@@ -38,7 +38,7 @@ export function recalculateClipTimeline(subCuts: SubCut[]): {
 } {
   let tlCursor = 0;
   const normalized = subCuts.map((cut, idx) => {
-    const segDur = Math.max(0.25, Number((cut.sourceEnd - cut.sourceStart).toFixed(2)));
+    const segDur = Math.max(0.1, Number((cut.sourceEnd - cut.sourceStart).toFixed(2)));
     const tlStart = Number(tlCursor.toFixed(2));
     const tlEnd = Number((tlCursor + segDur).toFixed(2));
     tlCursor = tlEnd;
