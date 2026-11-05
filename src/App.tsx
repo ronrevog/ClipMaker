@@ -1148,46 +1148,50 @@ export const App: React.FC = () => {
         setLiveTrackedAnchor(pt);
       }
 
+      const patchFocusOnClip = (c: GeneratedClip): GeneratedClip => ({
+        ...c,
+        subjectFocus: focusConfig,
+        trackingOffsetX: 0,
+        manualKeyframes: [],
+        backgroundFillStyle:
+          c.backgroundFillStyle === 'split-screen'
+            ? 'blurred'
+            : c.backgroundFillStyle || 'blurred',
+        subCuts: c.subCuts.map((sc) =>
+          sc.layoutMode === 'split-screen' ? { ...sc, layoutMode: 'full-single' } : sc
+        ),
+      });
+
       if (applyFocusToAllClips) {
-        setFullVideoClip((prev) =>
-          prev
-            ? {
-                ...prev,
-                subjectFocus: focusConfig,
-                trackingOffsetX: 0,
-                manualKeyframes: [],
-              }
-            : prev
-        );
-        setGeneratedClips((prev) =>
-          prev.map((c) => ({
-            ...c,
-            subjectFocus: focusConfig,
-            trackingOffsetX: 0,
-            manualKeyframes: [],
-          }))
-        );
+        setFullVideoClip((prev) => (prev ? patchFocusOnClip(prev) : prev));
+        setGeneratedClips((prev) => prev.map(patchFocusOnClip));
       } else {
-        updateActiveTimelineClip((c) => ({
-          ...c,
-          subjectFocus: focusConfig,
-          trackingOffsetX: 0,
-          manualKeyframes: [],
-        }));
+        updateActiveTimelineClip(patchFocusOnClip);
       }
     },
     [applyFocusToAllClips, updateActiveTimelineClip]
   );
 
-  // Quick Subject Focus Preset Selector (Auto Face/Speaker, Left Subject, Center, Right Subject, Action Motion)
+  // Quick Subject Focus Preset Selector (Auto Target, Lock Subject, Center Lock, Auto Face, Left Speaker, Right Speaker, Motion)
   const handleSelectSubjectFocusStrategy = useCallback(
     (strategy: SubjectFocusStrategy) => {
       const isVerticalSource = nativeDims.width < nativeDims.height;
       let anchorX = 0.5;
       let anchorY = isVerticalSource ? 0.41 : 0.48;
-      let label = 'Auto Salient Subject';
+      let label = 'Auto Target Subject';
 
-      if (strategy === 'left-subject') {
+      if (strategy === 'auto-salient') {
+        anchorX = currentTrack.cropX ?? 0.5;
+        anchorY = currentTrack.cropY ?? (isVerticalSource ? 0.41 : 0.48);
+        label = 'Auto Target Subject';
+      } else if (strategy === 'click-track') {
+        anchorX = activeClip?.subjectFocus?.anchorX ?? currentTrack.cropX ?? 0.5;
+        anchorY = activeClip?.subjectFocus?.anchorY ?? currentTrack.cropY ?? 0.46;
+        label =
+          userFocusAnchorsRef.current.length > 0
+            ? `Tracked Subject (${userFocusAnchorsRef.current.length} Locks)`
+            : 'Lock Subject (Click Video)';
+      } else if (strategy === 'left-subject') {
         anchorX = 0.26;
         anchorY = isVerticalSource ? 0.41 : 0.46;
         label = 'Left Speaker Focus';
@@ -1209,20 +1213,36 @@ export const App: React.FC = () => {
         label = 'Center 9:16 Lock';
       }
 
+      if (strategy === 'static-lock') {
+        setClickPickMode('static');
+      } else {
+        setClickPickMode('track');
+      }
+
       if (strategy !== 'click-track') {
         userFocusAnchorsRef.current = [];
         liveTrackedAnchorRef.current = null;
+        setLiveTrackedAnchor({ x: anchorX, y: anchorY });
+      } else {
+        const pt = { x: anchorX, y: anchorY };
+        liveTrackedAnchorRef.current = pt;
+        setLiveTrackedAnchor(pt);
       }
 
-      applySubjectFocusConfig({
+      const newFocusConfig: SubjectFocusConfig = {
         strategy,
         anchorX,
         anchorY,
         anchorTime: playheadTime,
+        trackedPath:
+          strategy === 'click-track' ? activeClip?.subjectFocus?.trackedPath : undefined,
+        templateSignature:
+          strategy === 'click-track' ? activeClip?.subjectFocus?.templateSignature : undefined,
+        targetColorRgb:
+          strategy === 'click-track' ? activeClip?.subjectFocus?.targetColorRgb : undefined,
         label,
-      });
+      };
 
-      // When the video has been split into multiple cuts, apply Left/Right/Center focus to the selected cut!
       const targetIdx = activeClip
         ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
         : 0;
@@ -1233,66 +1253,87 @@ export const App: React.FC = () => {
             ? 'full-speaker-b'
             : 'full-single';
 
-      // On vertical 2-speaker videos (e.g. 720x1280), isolating Left Speaker or Right Speaker requires ~1.85x zoom
-      if (isVerticalSource && (strategy === 'left-subject' || strategy === 'right-subject')) {
-        const speakerZoom = Math.max(1.85, currentZoom);
-        updateActiveTimelineClip((c) => ({
+      const patchClipForFocus = (c: GeneratedClip): GeneratedClip => {
+        const wasTwoSpeaker =
+          c.backgroundFillStyle === 'split-screen' ||
+          c.subjectFocus?.label === '2-Speaker Auto-Switch';
+        const speakerZoom =
+          isVerticalSource && (strategy === 'left-subject' || strategy === 'right-subject')
+            ? Math.max(1.85, currentZoom)
+            : c.zoomScale;
+        const targetBiasX =
+          isVerticalSource && strategy === 'left-subject'
+            ? -0.24
+            : isVerticalSource && strategy === 'right-subject'
+              ? 0.24
+              : 0;
+
+        return {
           ...c,
+          subjectFocus: newFocusConfig,
+          trackingOffsetX: 0,
+          manualKeyframes: [],
           backgroundFillStyle:
-            c.subCuts.length === 1 && c.backgroundFillStyle === 'split-screen'
+            c.backgroundFillStyle === 'split-screen'
               ? 'blurred'
-              : c.backgroundFillStyle,
-          zoomScale: c.subCuts.length === 1 ? speakerZoom : c.zoomScale,
-          subCuts: c.subCuts.map((sc, idx) =>
-            c.subCuts.length === 1 || idx === targetIdx
-              ? {
-                  ...sc,
-                  zoom: speakerZoom,
-                  cropBiasX: strategy === 'left-subject' ? -0.24 : 0.24,
-                  layoutMode: c.subCuts.length > 1 ? targetCutLayout : sc.layoutMode,
-                }
-              : sc
-          ),
-        }));
+              : c.backgroundFillStyle || 'blurred',
+          zoomScale:
+            c.subCuts.length === 1
+              ? wasTwoSpeaker && strategy !== 'left-subject' && strategy !== 'right-subject'
+                ? 1.0
+                : speakerZoom
+              : c.zoomScale,
+          subCuts: c.subCuts.map((sc, idx) => {
+            const shouldUpdateCut =
+              c.subCuts.length === 1 || wasTwoSpeaker || idx === targetIdx;
+            if (!shouldUpdateCut) return sc;
+            return {
+              ...sc,
+              zoom:
+                wasTwoSpeaker && strategy !== 'left-subject' && strategy !== 'right-subject'
+                  ? 1.0
+                  : isVerticalSource &&
+                      (strategy === 'left-subject' || strategy === 'right-subject')
+                    ? speakerZoom
+                    : sc.zoom,
+              cropBiasX: targetBiasX,
+              layoutMode: c.subCuts.length > 1 ? targetCutLayout : 'inherit',
+            };
+          }),
+        };
+      };
+
+      recordUndoSnapshot(false);
+      if (applyFocusToAllClips) {
+        setFullVideoClip((prev) => (prev ? patchClipForFocus(prev) : prev));
+        setGeneratedClips((prev) => prev.map(patchClipForFocus));
       } else {
-        updateActiveTimelineClip((c) => ({
-          ...c,
-          backgroundFillStyle:
-            c.subCuts.length === 1 && c.backgroundFillStyle === 'split-screen'
-              ? 'blurred'
-              : c.backgroundFillStyle,
-          subCuts: c.subCuts.map((sc, idx) =>
-            c.subCuts.length === 1 || idx === targetIdx
-              ? {
-                  ...sc,
-                  cropBiasX: 0,
-                  layoutMode: c.subCuts.length > 1 ? targetCutLayout : sc.layoutMode,
-                }
-              : sc
-          ),
-        }));
+        updateActiveTimelineClip(patchClipForFocus);
       }
 
       setMarkerNotice(
-        activeClip && activeClip.subCuts.length > 1
-          ? `Cut #${targetIdx + 1} set to: ${label}`
-          : `9:16 Subject Focus set to: ${label}`
+        strategy === 'click-track'
+          ? 'Lock Subject active — click any person or object on the Input Video to lock & track'
+          : activeClip && activeClip.subCuts.length > 1
+            ? `Cut #${targetIdx + 1} set to: ${label}`
+            : `9:16 Subject Focus set to: ${label}`
       );
-      setTimeout(() => setMarkerNotice(null), 2400);
+      setTimeout(() => setMarkerNotice(null), 2600);
     },
     [
       currentTrack,
       playheadTime,
-      applySubjectFocusConfig,
       nativeDims,
       currentZoom,
+      applyFocusToAllClips,
+      recordUndoSnapshot,
       updateActiveTimelineClip,
       activeClip,
       selectedCutIndex,
     ]
   );
 
-  // Dedicated 2-Speaker Podcast Director (Split-Screen OR Auto-Switch Speaker Cuts)
+  // Dedicated 2-Speaker Podcast Director (Toggles Split-Screen OR Auto-Switch Speaker Cuts ON and OFF)
   const handleTwoSpeakerMode = useCallback(
     (mode: 'split-screen' | 'auto-switch') => {
       if (!activeClip || !activeSource) return;
@@ -1300,37 +1341,105 @@ export const App: React.FC = () => {
       liveTrackedAnchorRef.current = null;
       setLiveTrackedAnchor(null);
 
-      if (mode === 'split-screen' && activeClip.subCuts.length > 1) {
-        const targetIdx = Math.min(selectedCutIndex, activeClip.subCuts.length - 1);
-        const isVerticalSource = (activeSource.width || 1920) < (activeSource.height || 1080);
-        const defaultY = isVerticalSource ? 0.39 : 0.44;
-        updateActiveTimelineClip((clip) => ({
-          ...clip,
-          speakerAX: clip.speakerAX ?? 0.26,
-          speakerAY: clip.speakerAY ?? defaultY,
-          speakerBX: clip.speakerBX ?? 0.74,
-          speakerBY: clip.speakerBY ?? defaultY,
-          subCuts: clip.subCuts.map((sc, idx) =>
-            idx === targetIdx ? { ...sc, layoutMode: 'split-screen' } : sc
-          ),
-        }));
-        setMarkerNotice(
-          `Cut #${targetIdx + 1} set to 2-Speaker Split-Screen (other cuts preserved)`
-        );
+      const isVerticalSource = (activeSource.width || 1920) < (activeSource.height || 1080);
+      const defaultY = isVerticalSource ? 0.39 : 0.44;
+      const targetIdx = Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1));
+      const targetCut = activeClip.subCuts[targetIdx];
+
+      if (mode === 'split-screen') {
+        const isCutCurrentlySplit =
+          targetCut?.layoutMode === 'split-screen' ||
+          ((targetCut?.layoutMode || 'inherit') === 'inherit' &&
+            activeClip.backgroundFillStyle === 'split-screen');
+
+        // TOGGLE OFF if already in 2-Speaker Split-Screen!
+        if (isCutCurrentlySplit) {
+          updateActiveTimelineClip((clip) => ({
+            ...clip,
+            backgroundFillStyle: 'blurred',
+            subjectFocus:
+              clip.subjectFocus?.label === '2-Speaker Auto-Switch' || !clip.subjectFocus
+                ? {
+                    strategy: 'auto-salient',
+                    anchorX: 0.5,
+                    anchorY: isVerticalSource ? 0.41 : 0.48,
+                    anchorTime: playheadTime,
+                    label: 'Auto Target Subject',
+                  }
+                : clip.subjectFocus,
+            subCuts: clip.subCuts.map((sc, idx) =>
+              clip.subCuts.length === 1 || idx === targetIdx || sc.layoutMode === 'split-screen'
+                ? { ...sc, layoutMode: 'full-single' }
+                : sc
+            ),
+          }));
+          setMarkerNotice('2-Speaker Split-Screen: OFF (Returned to Single-Subject 9:16)');
+          setTimeout(() => setMarkerNotice(null), 2600);
+          return;
+        }
+
+        // TOGGLE ON 2-Speaker Split-Screen!
+        if (activeClip.subCuts.length > 1) {
+          updateActiveTimelineClip((clip) => ({
+            ...clip,
+            backgroundFillStyle: 'split-screen',
+            speakerAX: clip.speakerAX ?? 0.26,
+            speakerAY: clip.speakerAY ?? defaultY,
+            speakerBX: clip.speakerBX ?? 0.74,
+            speakerBY: clip.speakerBY ?? defaultY,
+            subCuts: clip.subCuts.map((sc, idx) =>
+              idx === targetIdx || !sc.layoutMode || sc.layoutMode === 'inherit'
+                ? { ...sc, layoutMode: 'split-screen' }
+                : sc
+            ),
+          }));
+          setMarkerNotice(
+            `2-Speaker Split-Screen: ON for Cut #${targetIdx + 1} (Click again to toggle OFF)`
+          );
+          setTimeout(() => setMarkerNotice(null), 2800);
+          return;
+        }
+
+        updateActiveTimelineClip((clip) => applyTwoSpeakerEditMode(clip, activeSource, 'split-screen'));
+        setMarkerNotice('2-Speaker Split-Screen: ON (Top: Speaker A · Bottom: Speaker B)');
         setTimeout(() => setMarkerNotice(null), 2800);
         return;
       }
 
-      updateActiveTimelineClip((clip) => applyTwoSpeakerEditMode(clip, activeSource, mode));
+      // mode === 'auto-switch': TOGGLE OFF if already in 2-Speaker Auto-Switch!
+      const isCurrentlyAutoSwitch =
+        activeClip.backgroundFillStyle !== 'split-screen' &&
+        activeClip.subjectFocus?.label === '2-Speaker Auto-Switch';
 
-      if (mode === 'split-screen') {
-        setMarkerNotice('2-Speaker Split-Screen active (Top: Speaker A · Bottom: Speaker B)');
-      } else {
-        setMarkerNotice('2-Speaker Auto-Switch active (alternating Speaker A & Speaker B cuts)');
+      if (isCurrentlyAutoSwitch) {
+        updateActiveTimelineClip((clip) => ({
+          ...clip,
+          backgroundFillStyle: 'blurred',
+          zoomScale: 1.0,
+          subjectFocus: {
+            strategy: 'auto-salient',
+            anchorX: 0.5,
+            anchorY: isVerticalSource ? 0.41 : 0.48,
+            anchorTime: playheadTime,
+            label: 'Auto Target Subject',
+          },
+          subCuts: clip.subCuts.map((sc) => ({
+            ...sc,
+            zoom: 1.0,
+            cropBiasX: 0,
+            layoutMode: 'full-single',
+          })),
+        }));
+        setMarkerNotice('2-Speaker Auto-Switch: OFF (Returned to Single-Subject 9:16)');
+        setTimeout(() => setMarkerNotice(null), 2600);
+        return;
       }
+
+      updateActiveTimelineClip((clip) => applyTwoSpeakerEditMode(clip, activeSource, 'auto-switch'));
+      setMarkerNotice('2-Speaker Auto-Switch: ON (Alternating Speaker A & Speaker B cuts)');
       setTimeout(() => setMarkerNotice(null), 3000);
     },
-    [activeClip, activeSource, selectedCutIndex, updateActiveTimelineClip]
+    [activeClip, activeSource, selectedCutIndex, playheadTime, updateActiveTimelineClip]
   );
 
   // Programmatically or interactively place a Focus Lock Point at normalized (0..1) coordinates on the source video
@@ -1597,9 +1706,17 @@ export const App: React.FC = () => {
     const normX = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
     const normY = Math.max(0.06, Math.min(0.94, (e.clientY - rect.top) / rect.height));
 
+    const targetIdx = Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1));
+    const curCut = activeClip.subCuts[targetIdx];
+    const isCurrentCutSplit =
+      curCut?.layoutMode === 'split-screen' ||
+      ((curCut?.layoutMode || 'inherit') === 'inherit' &&
+        activeClip.backgroundFillStyle === 'split-screen');
     const isTwoSpeakerActive =
-      activeClip.backgroundFillStyle === 'split-screen' ||
-      activeClip.subjectFocus?.label === '2-Speaker Auto-Switch';
+      isCurrentCutSplit ||
+      (!isCurrentCutSplit &&
+        (curCut?.layoutMode || 'inherit') === 'inherit' &&
+        activeClip.subjectFocus?.label === '2-Speaker Auto-Switch');
 
     if (isTwoSpeakerActive) {
       const targetSpk = draggingSpeaker || selectedSpeakerTarget;
@@ -4616,6 +4733,19 @@ export const App: React.FC = () => {
   const activeFocusStrategy: SubjectFocusStrategy =
     activeClip?.subjectFocus?.strategy || 'auto-salient';
 
+  const isCurrentCutSplitScreen = Boolean(
+    activeClip &&
+      (inspectedCut?.layoutMode === 'split-screen' ||
+        ((inspectedCut?.layoutMode || 'inherit') === 'inherit' &&
+          activeClip.backgroundFillStyle === 'split-screen'))
+  );
+  const isTwoSpeakerAutoSwitch = Boolean(
+    !isCurrentCutSplitScreen &&
+      (inspectedCut?.layoutMode || 'inherit') === 'inherit' &&
+      activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+  );
+  const isTwoSpeakerModeActive = isCurrentCutSplitScreen || isTwoSpeakerAutoSwitch;
+
   const timelineGaps = activeClip
     ? findTimelineGaps(activeClip.subCuts, activeClip.duration)
     : [];
@@ -5875,8 +6005,7 @@ export const App: React.FC = () => {
                         )}
                       </div>
 
-                      {activeClip?.backgroundFillStyle === 'split-screen' ||
-                      activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
+                      {isTwoSpeakerModeActive ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <div className="seg-group">
                             <button
@@ -6048,8 +6177,7 @@ export const App: React.FC = () => {
                         setIsDraggingCrop(false);
                       }}
                       title={
-                        activeClip?.backgroundFillStyle === 'split-screen' ||
-                        activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
+                        isTwoSpeakerModeActive
                           ? 'Drag Speaker A or Speaker B box freely or drag its bottom-right corner handle to scale'
                           : 'Click any subject to lock 9:16 crop'
                       }
@@ -6144,8 +6272,7 @@ export const App: React.FC = () => {
                         })}
 
                       {/* Freely Draggable & Scalable Speaker A & Speaker B Selectors OR Single 9:16 Crop Guide */}
-                      {activeClip?.backgroundFillStyle === 'split-screen' ||
-                      activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch' ? (
+                      {isTwoSpeakerModeActive ? (
                         (() => {
                           const isVert = nativeDims.width < nativeDims.height;
                           const defaultY = isVert ? 0.39 : 0.44;
@@ -6352,36 +6479,74 @@ export const App: React.FC = () => {
                           );
                         })()
                       ) : (
-                        <div
-                          style={{
-                            position: 'absolute',
-                            left: `${currentCrop.normX * 100}%`,
-                            top: `${currentCrop.normY * 100}%`,
-                            width: `${currentCrop.normW * 100}%`,
-                            height: `${currentCrop.normH * 100}%`,
-                            border: '1.5px solid rgba(250, 250, 250, 0.85)',
-                            boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.55)',
-                            pointerEvents: 'none',
-                          }}
-                        >
+                        <>
                           <div
                             style={{
                               position: 'absolute',
-                              top: 4,
-                              left: 4,
-                              background: 'rgba(9, 9, 11, 0.78)',
-                              border: '1px solid rgba(255,255,255,0.18)',
-                              color: '#fafafa',
-                              fontSize: 9.5,
-                              fontFamily: 'var(--font-mono)',
-                              padding: '1px 5px',
-                              borderRadius: 3,
-                              whiteSpace: 'nowrap',
+                              left: `${currentCrop.normX * 100}%`,
+                              top: `${currentCrop.normY * 100}%`,
+                              width: `${currentCrop.normW * 100}%`,
+                              height: `${currentCrop.normH * 100}%`,
+                              border: '1.5px solid rgba(250, 250, 250, 0.85)',
+                              boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.55)',
+                              pointerEvents: 'none',
                             }}
                           >
-                            {currentZoom.toFixed(2)}x
+                            <div
+                              style={{
+                                position: 'absolute',
+                                top: 4,
+                                left: 4,
+                                background: 'rgba(9, 9, 11, 0.84)',
+                                border: '1px solid rgba(255,255,255,0.2)',
+                                color: '#fafafa',
+                                fontSize: 9.5,
+                                fontFamily: 'var(--font-mono)',
+                                padding: '1px 5px',
+                                borderRadius: 3,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {currentZoom.toFixed(2)}x ·{' '}
+                              {activeClip?.subjectFocus?.label || 'Auto Target'}
+                            </div>
                           </div>
-                        </div>
+                          {/* Live Locked Subject Target Reticle on Source Video */}
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: `${Math.max(2, Math.min(98, currentTrack.cropX * 100))}%`,
+                              top: `${Math.max(4, Math.min(96, currentTrack.cropY * 100))}%`,
+                              transform: 'translate(-50%, -50%)',
+                              width: 18,
+                              height: 18,
+                              borderRadius: '50%',
+                              border:
+                                activeFocusStrategy === 'click-track'
+                                  ? '2px solid #34d399'
+                                  : '1.5px solid rgba(250, 250, 250, 0.85)',
+                              background:
+                                activeFocusStrategy === 'click-track'
+                                  ? 'rgba(16, 185, 129, 0.25)'
+                                  : 'rgba(9, 9, 11, 0.55)',
+                              pointerEvents: 'none',
+                              zIndex: 5,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: 4,
+                                height: 4,
+                                borderRadius: '50%',
+                                background:
+                                  activeFocusStrategy === 'click-track' ? '#34d399' : '#fafafa',
+                              }}
+                            />
+                          </div>
+                        </>
                       )}
                       </div>
                     </div>
@@ -6829,9 +6994,322 @@ export const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* SHADCN/UI UNIFIED STUDIO COMMAND DECK (Consolidates Framing, 2-Speaker, AI/Audio & Layers into clean tabs) */}
+                {/* ALWAYS-VISIBLE CAMERA, SUBJECT FOCUS, TARGET LOCK & 2-SPEAKER BAR */}
+                <div
+                  style={{
+                    padding: '6px 10px',
+                    background: 'var(--bg-panel-header)',
+                    borderTop: '1px solid var(--border-subtle)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: 8,
+                    flexShrink: 0,
+                  }}
+                >
+                  {/* Left: Subject Focus Modes (Auto Target, Lock Subject, Center Lock, Auto Face, Left, Right, Motion) + 2-Speaker Toggles */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span className="section-label">Subject Focus</span>
+                    <div className="shadcn-tabs-list">
+                      <button
+                        type="button"
+                        className="shadcn-tabs-trigger"
+                        data-state={
+                          !isTwoSpeakerModeActive && activeFocusStrategy === 'auto-salient'
+                            ? 'active'
+                            : 'inactive'
+                        }
+                        onClick={() => handleSelectSubjectFocusStrategy('auto-salient')}
+                        title="Auto Target: Automatically frame the primary salient subject in 9:16"
+                      >
+                        <Sparkles size={11} />
+                        Auto Target
+                      </button>
+                      <button
+                        type="button"
+                        className="shadcn-tabs-trigger"
+                        data-state={
+                          !isTwoSpeakerModeActive && activeFocusStrategy === 'click-track'
+                            ? 'active'
+                            : 'inactive'
+                        }
+                        onClick={() => handleSelectSubjectFocusStrategy('click-track')}
+                        title="Lock Subject: Click any person or moving object on the Source Video to lock & track it"
+                      >
+                        <Crosshair size={11} />
+                        Lock Subject
+                      </button>
+                      <button
+                        type="button"
+                        className="shadcn-tabs-trigger"
+                        data-state={
+                          !isTwoSpeakerModeActive && activeFocusStrategy === 'static-lock'
+                            ? 'active'
+                            : 'inactive'
+                        }
+                        onClick={() => handleSelectSubjectFocusStrategy('static-lock')}
+                        title="Center Lock: Lock static 9:16 frame (or click video to lock static position)"
+                      >
+                        <Lock size={11} />
+                        Center Lock
+                      </button>
+                      <button
+                        type="button"
+                        className="shadcn-tabs-trigger"
+                        data-state={
+                          !isTwoSpeakerModeActive && activeFocusStrategy === 'face-speaker'
+                            ? 'active'
+                            : 'inactive'
+                        }
+                        onClick={() => handleSelectSubjectFocusStrategy('face-speaker')}
+                        title="Auto Face: Track detected speaker face"
+                      >
+                        <UserCheck size={11} />
+                        Auto Face
+                      </button>
+                      <button
+                        type="button"
+                        className="shadcn-tabs-trigger"
+                        data-state={
+                          !isTwoSpeakerModeActive && activeFocusStrategy === 'left-subject'
+                            ? 'active'
+                            : 'inactive'
+                        }
+                        onClick={() => handleSelectSubjectFocusStrategy('left-subject')}
+                        title="Isolate Left Speaker in 9:16 frame"
+                      >
+                        Left Speaker
+                      </button>
+                      <button
+                        type="button"
+                        className="shadcn-tabs-trigger"
+                        data-state={
+                          !isTwoSpeakerModeActive && activeFocusStrategy === 'right-subject'
+                            ? 'active'
+                            : 'inactive'
+                        }
+                        onClick={() => handleSelectSubjectFocusStrategy('right-subject')}
+                        title="Isolate Right Speaker in 9:16 frame"
+                      >
+                        Right Speaker
+                      </button>
+                      <button
+                        type="button"
+                        className="shadcn-tabs-trigger"
+                        data-state={
+                          !isTwoSpeakerModeActive && activeFocusStrategy === 'action-motion'
+                            ? 'active'
+                            : 'inactive'
+                        }
+                        onClick={() => handleSelectSubjectFocusStrategy('action-motion')}
+                        title="Motion: Follow highest motion energy in frame"
+                      >
+                        Motion
+                      </button>
+                    </div>
+
+                    {/* Focus Lock Keyframe Pills + Step +2s & Clear Locks */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                      {userFocusAnchors.map((pt, idx) => (
+                        <span
+                          key={`lock-pill-${pt.time}-${idx}`}
+                          className="badge-subtle"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            cursor: 'pointer',
+                          }}
+                          onClick={() => handleSeekSourceTime(pt.time)}
+                          title="Click to jump playhead to this Focus Lock point"
+                        >
+                          #{idx + 1} {pt.time.toFixed(1)}s
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteFocusLockPoint(pt.time);
+                            }}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: 'var(--text-muted)',
+                              cursor: 'pointer',
+                              padding: 0,
+                            }}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => {
+                          if (!activeSource) return;
+                          if (videoRef.current && !videoRef.current.paused) {
+                            videoRef.current.pause();
+                            setIsPlaying(false);
+                          }
+                          const nextTime = Math.min(
+                            activeSource.duration - 0.05,
+                            playheadTime + 2.0
+                          );
+                          handleSeekSourceTime(nextTime);
+                          handleSelectSubjectFocusStrategy('click-track');
+                          setMarkerNotice(
+                            `Stepped to ${nextTime.toFixed(1)}s — click subject on Source Video to add Lock #${userFocusAnchors.length + 1}`
+                          );
+                          setTimeout(() => setMarkerNotice(null), 3200);
+                        }}
+                        title="Step forward 2 seconds and arm Lock Subject to place another Focus Lock keyframe"
+                      >
+                        +2s Add Lock
+                      </button>
+
+                      {userFocusAnchors.length > 0 && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => {
+                            userFocusAnchorsRef.current = [];
+                            liveTrackedAnchorRef.current = null;
+                            handleSelectSubjectFocusStrategy('auto-salient');
+                          }}
+                        >
+                          Clear Locks
+                        </button>
+                      )}
+                    </div>
+
+                    <ShadcnSeparator orientation="vertical" />
+
+                    {/* 1-Click 2-Speaker ON/OFF Toggle Pills right alongside Subject Focus */}
+                    <TogglePill
+                      checked={isCurrentCutSplitScreen}
+                      onCheckedChange={() => handleTwoSpeakerMode('split-screen')}
+                      icon={<Layers size={11} />}
+                      label="2-Speaker Split"
+                      activeColor="amber"
+                      title="Click to toggle 2-Speaker Split-Screen ON or OFF (Top: Speaker A · Bottom: Speaker B)"
+                    />
+
+                    <TogglePill
+                      checked={isTwoSpeakerAutoSwitch}
+                      onCheckedChange={() => handleTwoSpeakerMode('auto-switch')}
+                      icon={<UserCheck size={11} />}
+                      label="Auto-Switch 2-Spk"
+                      activeColor="blue"
+                      title="Click to toggle 2-Speaker Active Speaker Auto-Switch ON or OFF"
+                    />
+                  </div>
+
+                  {/* Right: Zoom Slider + 1:1 / Fit + Fine X Offset + All Clips Toggle */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span className="section-label">Zoom</span>
+                      <input
+                        type="range"
+                        min={0.56}
+                        max={2.2}
+                        step={0.02}
+                        value={currentZoom}
+                        onChange={(e) =>
+                          applyZoomAcrossStudio(
+                            parseFloat(e.target.value),
+                            applyFocusToAllClips
+                          )
+                        }
+                        style={{ width: 64 }}
+                      />
+                      <span className="badge-subtle" style={{ minWidth: 38, textAlign: 'center' }}>
+                        {currentZoom.toFixed(2)}x
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => applyZoomAcrossStudio(1.0, true)}
+                      >
+                        1.0x
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => applyZoomAcrossStudio(0.56, true)}
+                        title="Zoom out to fit wide frame inside 9:16"
+                      >
+                        Fit 16:9
+                      </button>
+                    </div>
+
+                    <ShadcnSeparator orientation="vertical" />
+
+                    {/* Fine X Offset Slider */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <span className="section-label">Fine X</span>
+                      <input
+                        type="range"
+                        min={-0.4}
+                        max={0.4}
+                        step={0.01}
+                        value={activeClip?.trackingOffsetX || 0}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          if (applyFocusToAllClips) {
+                            setFullVideoClip((prev) =>
+                              prev ? { ...prev, trackingOffsetX: val } : prev
+                            );
+                            setGeneratedClips((prev) =>
+                              prev.map((c) => ({ ...c, trackingOffsetX: val }))
+                            );
+                          } else {
+                            updateActiveTimelineClip((c) => ({
+                              ...c,
+                              trackingOffsetX: val,
+                            }));
+                          }
+                        }}
+                        onDoubleClick={() =>
+                          updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: 0 }))
+                        }
+                        style={{ width: 52 }}
+                        title="Fine horizontal crop offset (double-click to reset to 0)"
+                      />
+                      <span className="badge-subtle" style={{ minWidth: 32, textAlign: 'center' }}>
+                        {((activeClip?.trackingOffsetX || 0) * 100).toFixed(0)}%
+                      </span>
+                    </div>
+
+                    <ShadcnSeparator orientation="vertical" />
+
+                    <label
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        fontSize: 11,
+                        color: 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        userSelect: 'none',
+                      }}
+                      title="Apply subject focus & zoom changes across all clips"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={applyFocusToAllClips}
+                        onChange={(e) => setApplyFocusToAllClips(e.target.checked)}
+                        style={{ accentColor: '#fafafa', width: 12, height: 12 }}
+                      />
+                      All Clips
+                    </label>
+                  </div>
+                </div>
+
+                {/* SHADCN/UI UNIFIED STUDIO COMMAND DECK (2-Speaker & Cut Layout, AI Tools & Audio, Captions & Overlays) */}
                 <ShadcnTabs
-                  value={studioDeckTab}
+                  value={studioDeckTab === 'framing' ? 'speakers' : studioDeckTab}
                   onValueChange={(v) => {
                     setStudioDeckTab(v as 'framing' | 'speakers' | 'ai-audio' | 'layers');
                     setIsStudioDeckCollapsed(false);
@@ -6841,34 +7319,36 @@ export const App: React.FC = () => {
                   <div className="shadcn-command-deck-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <ShadcnTabsList>
-                        <ShadcnTabsTrigger value="framing" title="Subject Focus, Tracking Locks, Zoom, Fine X & 9:16 Fill">
-                          <Crosshair size={11} />
-                          <span>1. Framing & Crop</span>
-                        </ShadcnTabsTrigger>
                         <ShadcnTabsTrigger value="speakers" title="2-Speaker Split-Screen, Lip-Sync Switch & Per-Cut Layouts">
                           <Layers size={11} />
-                          <span>2. 2-Speaker & Split</span>
+                          <span>2-Speaker & Cut Layout</span>
                         </ShadcnTabsTrigger>
                         <ShadcnTabsTrigger value="ai-audio" title="RNNoise Voice Isolation, Strip Dead Air, Beat-Sync, FX & Speed">
                           <Wand2 size={11} />
-                          <span>3. AI Tools & Audio</span>
+                          <span>AI Tools & Voice Isolation</span>
                         </ShadcnTabsTrigger>
                         <ShadcnTabsTrigger value="layers" title="Captions (V3), Text/Lottie Overlays (V4) & Transcript Editor">
                           <Type size={11} />
-                          <span>4. Captions & Overlays</span>
+                          <span>Captions (V3) & Overlays (V4)</span>
                         </ShadcnTabsTrigger>
                       </ShadcnTabsList>
 
                       {/* Live Status Summary Pills */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                        <ShadcnBadge variant="secondary">{currentZoom.toFixed(2)}x</ShadcnBadge>
+                        <ShadcnBadge variant="secondary">
+                          {isCurrentCutSplitScreen
+                            ? '2-Speaker Split'
+                            : isTwoSpeakerAutoSwitch
+                              ? '2-Speaker Auto-Switch'
+                              : activeClip?.subjectFocus?.label || 'Auto Target'}
+                        </ShadcnBadge>
                         {activeClip?.audioMasteringPreset === 'rnnoise-isolate' && (
                           <ShadcnBadge variant="emerald">RNNoise Isolated</ShadcnBadge>
                         )}
                         {inspectedCut && activeClip && activeClip.subCuts.length > 1 && (
                           <ShadcnBadge variant="blue">
                             Cut #{inspectedCut.index} ·{' '}
-                            {inspectedCut.layoutMode === 'split-screen'
+                            {isCurrentCutSplitScreen
                               ? 'Split'
                               : inspectedCut.layoutMode === 'full-speaker-a'
                                 ? 'Spk A'
@@ -6880,7 +7360,7 @@ export const App: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* Right Quick Access: Transcript, Fill Mode & Deck Collapse Toggle */}
+                    {/* Right Quick Access: 9:16 Fill Mode & Deck Collapse Toggle */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       {/* 9:16 Fill Mode Quick Switcher */}
                       <div className="shadcn-tabs-list">
@@ -6922,27 +7402,21 @@ export const App: React.FC = () => {
                                     : 0;
                                   updateActiveTimelineClip((c) => ({
                                     ...c,
-                                    backgroundFillStyle:
-                                      c.subCuts.length === 1
-                                        ? opt.id
-                                        : c.backgroundFillStyle === 'split-screen'
-                                          ? 'split-screen'
-                                          : opt.id,
-                                    subCuts:
-                                      c.subCuts.length > 1
-                                        ? c.subCuts.map((sc, idx) =>
-                                            idx === targetIdx
-                                              ? {
-                                                  ...sc,
-                                                  layoutMode:
-                                                    sc.layoutMode === 'full-speaker-a' ||
-                                                    sc.layoutMode === 'full-speaker-b'
-                                                      ? sc.layoutMode
-                                                      : 'full-single',
-                                                }
-                                              : sc
-                                          )
-                                        : c.subCuts,
+                                    backgroundFillStyle: opt.id,
+                                    subCuts: c.subCuts.map((sc, idx) =>
+                                      c.subCuts.length === 1 ||
+                                      idx === targetIdx ||
+                                      sc.layoutMode === 'split-screen'
+                                        ? {
+                                            ...sc,
+                                            layoutMode:
+                                              sc.layoutMode === 'full-speaker-a' ||
+                                              sc.layoutMode === 'full-speaker-b'
+                                                ? sc.layoutMode
+                                                : 'full-single',
+                                          }
+                                        : sc
+                                    ),
                                   }));
                                 }
                               }}
@@ -6971,317 +7445,36 @@ export const App: React.FC = () => {
 
                   {!isStudioDeckCollapsed && (
                     <>
-                      {/* TAB 1: FRAMING, SUBJECT FOCUS, LOCKS, ZOOM & FINE X */}
-                      <ShadcnTabsContent value="framing" className="shadcn-command-deck-body">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                          <span className="section-label">Subject Focus</span>
-                          <div className="shadcn-tabs-list">
-                            <button
-                              type="button"
-                              className="shadcn-tabs-trigger"
-                              data-state={
-                                activeClip?.backgroundFillStyle !== 'split-screen' &&
-                                activeFocusStrategy === 'click-track'
-                                  ? 'active'
-                                  : 'inactive'
-                              }
-                              onClick={() => {
-                                setClickPickMode('track');
-                                if (activeClip?.subjectFocus) {
-                                  applySubjectFocusConfig({
-                                    ...activeClip.subjectFocus,
-                                    strategy: 'click-track',
-                                    label: 'Tracked Subject',
-                                  });
-                                }
-                              }}
-                              title="Click any moving person or object on the Source Video to track it"
-                            >
-                              <Crosshair size={11} />
-                              Track Subject
-                            </button>
-                            <button
-                              type="button"
-                              className="shadcn-tabs-trigger"
-                              data-state={
-                                activeClip?.backgroundFillStyle !== 'split-screen' &&
-                                activeFocusStrategy === 'static-lock' &&
-                                activeClip?.subjectFocus?.label !== '2-Speaker Auto-Switch'
-                                  ? 'active'
-                                  : 'inactive'
-                              }
-                              onClick={() => {
-                                setClickPickMode('static');
-                                handleSelectSubjectFocusStrategy('static-lock');
-                              }}
-                              title="Lock static 9:16 center frame"
-                            >
-                              <Lock size={11} />
-                              Center Lock
-                            </button>
-                            <button
-                              type="button"
-                              className="shadcn-tabs-trigger"
-                              data-state={
-                                activeClip?.backgroundFillStyle !== 'split-screen' &&
-                                activeFocusStrategy === 'face-speaker'
-                                  ? 'active'
-                                  : 'inactive'
-                              }
-                              onClick={() => handleSelectSubjectFocusStrategy('face-speaker')}
-                            >
-                              <UserCheck size={11} />
-                              Auto Face
-                            </button>
-                            <button
-                              type="button"
-                              className="shadcn-tabs-trigger"
-                              data-state={
-                                activeClip?.backgroundFillStyle !== 'split-screen' &&
-                                activeFocusStrategy === 'left-subject'
-                                  ? 'active'
-                                  : 'inactive'
-                              }
-                              onClick={() => handleSelectSubjectFocusStrategy('left-subject')}
-                              title="Isolate Left Speaker in 9:16 frame"
-                            >
-                              Left Speaker
-                            </button>
-                            <button
-                              type="button"
-                              className="shadcn-tabs-trigger"
-                              data-state={
-                                activeClip?.backgroundFillStyle !== 'split-screen' &&
-                                activeFocusStrategy === 'right-subject'
-                                  ? 'active'
-                                  : 'inactive'
-                              }
-                              onClick={() => handleSelectSubjectFocusStrategy('right-subject')}
-                              title="Isolate Right Speaker in 9:16 frame"
-                            >
-                              Right Speaker
-                            </button>
-                            <button
-                              type="button"
-                              className="shadcn-tabs-trigger"
-                              data-state={
-                                activeClip?.backgroundFillStyle !== 'split-screen' &&
-                                activeFocusStrategy === 'action-motion'
-                                  ? 'active'
-                                  : 'inactive'
-                              }
-                              onClick={() => handleSelectSubjectFocusStrategy('action-motion')}
-                            >
-                              Motion
-                            </button>
-                          </div>
-
-                          {/* Focus Lock Pills + Step +2s & Reset */}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                            {userFocusAnchors.map((pt, idx) => (
-                              <span
-                                key={`lock-pill-${pt.time}-${idx}`}
-                                className="badge-subtle"
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: 4,
-                                  cursor: 'pointer',
-                                }}
-                                onClick={() => handleSeekSourceTime(pt.time)}
-                                title="Click to jump playhead to this Focus Lock point"
-                              >
-                                #{idx + 1} {pt.time.toFixed(1)}s
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleDeleteFocusLockPoint(pt.time);
-                                  }}
-                                  style={{
-                                    background: 'none',
-                                    border: 'none',
-                                    color: 'var(--text-muted)',
-                                    cursor: 'pointer',
-                                    padding: 0,
-                                  }}
-                                >
-                                  ×
-                                </button>
-                              </span>
-                            ))}
-
-                            <button
-                              type="button"
-                              className="btn btn-sm"
-                              onClick={() => {
-                                if (!activeSource) return;
-                                if (videoRef.current && !videoRef.current.paused) {
-                                  videoRef.current.pause();
-                                  setIsPlaying(false);
-                                }
-                                const nextTime = Math.min(
-                                  activeSource.duration - 0.05,
-                                  playheadTime + 2.0
-                                );
-                                handleSeekSourceTime(nextTime);
-                                setClickPickMode('track');
-                                setMarkerNotice(
-                                  `Stepped to ${nextTime.toFixed(1)}s — click subject on Source Video to add Lock #${userFocusAnchors.length + 1}`
-                                );
-                                setTimeout(() => setMarkerNotice(null), 3200);
-                              }}
-                              title="Step forward 2 seconds to place another Focus Lock point"
-                            >
-                              +2s Add Lock
-                            </button>
-
-                            {userFocusAnchors.length > 0 && (
-                              <button
-                                type="button"
-                                className="btn btn-sm"
-                                onClick={() => {
-                                  userFocusAnchorsRef.current = [];
-                                  liveTrackedAnchorRef.current = null;
-                                  handleSelectSubjectFocusStrategy('auto-salient');
-                                }}
-                              >
-                                Clear Locks
-                              </button>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Right: Zoom Slider + 1:1 / Fit + Fine X Offset + All Clips Toggle */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                            <span className="section-label">Zoom</span>
-                            <input
-                              type="range"
-                              min={0.56}
-                              max={2.2}
-                              step={0.02}
-                              value={currentZoom}
-                              onChange={(e) =>
-                                applyZoomAcrossStudio(
-                                  parseFloat(e.target.value),
-                                  applyFocusToAllClips
-                                )
-                              }
-                              style={{ width: 68 }}
-                            />
-                            <span className="badge-subtle" style={{ minWidth: 38, textAlign: 'center' }}>
-                              {currentZoom.toFixed(2)}x
-                            </span>
-                            <button
-                              type="button"
-                              className="btn btn-sm"
-                              onClick={() => applyZoomAcrossStudio(1.0, true)}
-                            >
-                              1.0x
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-sm"
-                              onClick={() => applyZoomAcrossStudio(0.56, true)}
-                              title="Zoom out to fit wide frame inside 9:16"
-                            >
-                              Fit 16:9
-                            </button>
-                          </div>
-
-                          <ShadcnSeparator orientation="vertical" />
-
-                          {/* Fine X Offset Slider */}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                            <span className="section-label">Fine X</span>
-                            <input
-                              type="range"
-                              min={-0.4}
-                              max={0.4}
-                              step={0.01}
-                              value={activeClip?.trackingOffsetX || 0}
-                              onChange={(e) => {
-                                const val = parseFloat(e.target.value);
-                                if (applyFocusToAllClips) {
-                                  setFullVideoClip((prev) =>
-                                    prev ? { ...prev, trackingOffsetX: val } : prev
-                                  );
-                                  setGeneratedClips((prev) =>
-                                    prev.map((c) => ({ ...c, trackingOffsetX: val }))
-                                  );
-                                } else {
-                                  updateActiveTimelineClip((c) => ({
-                                    ...c,
-                                    trackingOffsetX: val,
-                                  }));
-                                }
-                              }}
-                              onDoubleClick={() =>
-                                updateActiveTimelineClip((c) => ({ ...c, trackingOffsetX: 0 }))
-                              }
-                              style={{ width: 54 }}
-                              title="Fine horizontal crop offset (double-click to reset to 0)"
-                            />
-                            <span className="badge-subtle" style={{ minWidth: 32, textAlign: 'center' }}>
-                              {((activeClip?.trackingOffsetX || 0) * 100).toFixed(0)}%
-                            </span>
-                          </div>
-
-                          <ShadcnSeparator orientation="vertical" />
-
-                          <label
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: 4,
-                              fontSize: 11,
-                              color: 'var(--text-secondary)',
-                              cursor: 'pointer',
-                              userSelect: 'none',
-                            }}
-                            title="Apply subject focus & zoom changes across all clips"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={applyFocusToAllClips}
-                              onChange={(e) => setApplyFocusToAllClips(e.target.checked)}
-                              style={{ accentColor: '#fafafa', width: 12, height: 12 }}
-                            />
-                            All Clips
-                          </label>
-                        </div>
-                      </ShadcnTabsContent>
-
-                      {/* TAB 2: 2-SPEAKER PODCAST SPLIT-SCREEN, AUTO-SWITCH & PER-CUT LAYOUTS */}
+                      {/* TAB 1: 2-SPEAKER PODCAST SPLIT-SCREEN, AUTO-SWITCH & PER-CUT LAYOUTS */}
                       <ShadcnTabsContent value="speakers" className="shadcn-command-deck-body">
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <span className="section-label">2-Speaker Modes</span>
                           <button
                             type="button"
                             className={`btn btn-sm ${
-                              activeClip?.backgroundFillStyle === 'split-screen' ? 'btn-active' : ''
+                              isCurrentCutSplitScreen ? 'btn-active' : ''
                             }`}
                             onClick={() => handleTwoSpeakerMode('split-screen')}
-                            title="Stack Speaker A (Top) and Speaker B (Bottom) in a 9:16 Dual Split-Screen"
+                            title="Click to toggle 2-Speaker Split-Screen ON or OFF (Top: Speaker A · Bottom: Speaker B)"
                           >
                             <Layers size={11} />
-                            2-Speaker Split-Screen
+                            {isCurrentCutSplitScreen
+                              ? '2-Speaker Split: ON (Click to Turn Off)'
+                              : '2-Speaker Split-Screen'}
                           </button>
 
                           <button
                             type="button"
                             className={`btn btn-sm ${
-                              activeClip?.backgroundFillStyle !== 'split-screen' &&
-                              activeClip?.subjectFocus?.label === '2-Speaker Auto-Switch'
-                                ? 'btn-active'
-                                : ''
+                              isTwoSpeakerAutoSwitch ? 'btn-active' : ''
                             }`}
                             onClick={() => handleTwoSpeakerMode('auto-switch')}
-                            title="Automatically cut back and forth between Speaker A (Left) and Speaker B (Right)"
+                            title="Click to toggle 2-Speaker Auto-Switch ON or OFF (alternates Speaker A & Speaker B cuts)"
                           >
                             <UserCheck size={11} />
-                            Auto-Switch Speakers
+                            {isTwoSpeakerAutoSwitch
+                              ? 'Auto-Switch: ON (Click to Turn Off)'
+                              : 'Auto-Switch Speakers'}
                           </button>
 
                           <button
@@ -7320,7 +7513,7 @@ export const App: React.FC = () => {
                                   data-state={
                                     (inspectedCut.layoutMode || 'inherit') === 'full-single' ||
                                     ((inspectedCut.layoutMode || 'inherit') === 'inherit' &&
-                                      activeClip?.backgroundFillStyle !== 'split-screen')
+                                      !isCurrentCutSplitScreen)
                                       ? 'active'
                                       : 'inactive'
                                   }
@@ -7331,14 +7524,8 @@ export const App: React.FC = () => {
                                 <button
                                   type="button"
                                   className="shadcn-tabs-trigger"
-                                  data-state={
-                                    inspectedCut.layoutMode === 'split-screen' ||
-                                    ((inspectedCut.layoutMode || 'inherit') === 'inherit' &&
-                                      activeClip?.backgroundFillStyle === 'split-screen')
-                                      ? 'active'
-                                      : 'inactive'
-                                  }
-                                  onClick={() => handleSetSelectedCutLayoutMode('split-screen')}
+                                  data-state={isCurrentCutSplitScreen ? 'active' : 'inactive'}
+                                  onClick={() => handleTwoSpeakerMode('split-screen')}
                                 >
                                   Split [2]
                                 </button>
