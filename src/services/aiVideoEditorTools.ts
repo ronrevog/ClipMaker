@@ -1061,7 +1061,7 @@ export function renderComposite9x16Frame(params: {
     ? evaluateCutTransitionTransform(activeClip, clipPlayheadTime)
     : { offsetX: 0, extraScale: 1, flashAlpha: 0, chromaticShiftPx: 0 };
   const lutFilterStr = getColorGradeLutCanvasFilter(activeClip?.colorGradeLut);
-  const effectiveClipZoom = Math.max(0.5, Math.min(3.2, zoom * (trans.extraScale || 1.0)));
+  const effectiveClipZoom = Math.max(0.45, Math.min(4.5, zoom * (trans.extraScale || 1.0)));
 
   // Per-Cut Layout Override: allows switching between Split-Screen (2 subjects) and Full-Screen (1 subject)
   const activeCutAtPlayhead = activeClip?.subCuts?.find(

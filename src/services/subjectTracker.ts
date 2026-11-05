@@ -1875,13 +1875,25 @@ export function getTrackingStateAtTime(
       };
     }
 
+    if (strategy === 'auto-salient') {
+      const targetY =
+        typeof anchorY === 'number' && Number.isFinite(anchorY) ? anchorY : baseSample.cropY;
+      return {
+        ...baseSample,
+        cropX: clampX(baseSample.cropX + extraOffsetX),
+        cropY: clampY(targetY),
+      };
+    }
+
     if (strategy === 'left-subject') {
       const lx = baseSample.leftSubjectX ?? 0.3;
+      const targetY =
+        typeof anchorY === 'number' && Number.isFinite(anchorY) ? anchorY : baseSample.cropY;
       return {
         ...baseSample,
         rawX: lx,
         cropX: clampX(lx + extraOffsetX),
-        cropY: clampY(baseSample.cropY),
+        cropY: clampY(targetY),
         confidence: 0.96,
         subjectLabel: 'Left Subject Focus',
       };
@@ -1889,11 +1901,13 @@ export function getTrackingStateAtTime(
 
     if (strategy === 'right-subject') {
       const rx = baseSample.rightSubjectX ?? 0.7;
+      const targetY =
+        typeof anchorY === 'number' && Number.isFinite(anchorY) ? anchorY : baseSample.cropY;
       return {
         ...baseSample,
         rawX: rx,
         cropX: clampX(rx + extraOffsetX),
-        cropY: clampY(baseSample.cropY),
+        cropY: clampY(targetY),
         confidence: 0.96,
         subjectLabel: 'Right Subject Focus',
       };
@@ -1901,7 +1915,10 @@ export function getTrackingStateAtTime(
 
     if (strategy === 'face-speaker') {
       const fx = baseSample.faceX ?? baseSample.cropX;
-      const fy = baseSample.faceY ?? baseSample.cropY;
+      const fy =
+        typeof anchorY === 'number' && Number.isFinite(anchorY)
+          ? anchorY
+          : (baseSample.faceY ?? baseSample.cropY);
       return {
         ...baseSample,
         rawX: fx,
@@ -1915,7 +1932,10 @@ export function getTrackingStateAtTime(
 
     if (strategy === 'action-motion') {
       const mx = baseSample.motionX ?? baseSample.cropX;
-      const my = baseSample.motionY ?? baseSample.cropY;
+      const my =
+        typeof anchorY === 'number' && Number.isFinite(anchorY)
+          ? anchorY
+          : (baseSample.motionY ?? baseSample.cropY);
       return {
         ...baseSample,
         rawX: mx,
@@ -2019,7 +2039,7 @@ export function computeDistortionFree9x16Crop(
 } {
   const vw = Math.max(1, videoWidth || 1920);
   const vh = Math.max(1, videoHeight || 1080);
-  const safeZoom = Math.max(0.55, Math.min(2.5, zoom || 1.0));
+  const safeZoom = Math.max(0.45, Math.min(4.5, zoom || 1.0));
   const targetAspect = 9 / 16;
   const sourceAspect = vw / vh;
 

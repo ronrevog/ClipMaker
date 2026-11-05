@@ -381,6 +381,20 @@ export const App: React.FC = () => {
   const [draggingSpeaker, setDraggingSpeaker] = useState<'A' | 'B' | null>(null);
   const [scalingSpeaker, setScalingSpeaker] = useState<'A' | 'B' | null>(null);
   const [selectedSpeakerTarget, setSelectedSpeakerTarget] = useState<'A' | 'B'>('A');
+  const [scalingSingleCrop, setScalingSingleCrop] = useState<{
+    startZoom: number;
+    startDist: number;
+    centerClientX: number;
+    centerClientY: number;
+  } | null>(null);
+  const [draggingAutoTargetPan, setDraggingAutoTargetPan] = useState<{
+    startClientX: number;
+    startClientY: number;
+    initOffsetX: number;
+    initAnchorY: number;
+  } | null>(null);
+  const [timelineZoom, setTimelineZoom] = useState<number>(1);
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
 
   // Resizable Workspace Panel Windows & Multi-Track NLE Layer State (MacBook & compact screen aware)
   const [leftPanelWidth, setLeftPanelWidth] = useState<number>(() =>
@@ -1201,7 +1215,7 @@ export const App: React.FC = () => {
   // Apply a target zoom level to the selected cut (when split into multiple cuts) or the clip
   const applyZoomAcrossStudio = useCallback(
     (rawZoom: number, applyToAllClips = false) => {
-      const z = Number(Math.max(0.55, Math.min(2.2, rawZoom || 1.0)).toFixed(2));
+      const z = Number(Math.max(0.5, Math.min(4.0, rawZoom || 1.0)).toFixed(2));
       const setAllCutsZoom = (clip: GeneratedClip): GeneratedClip => ({
         ...clip,
         zoomScale: z,
@@ -1231,6 +1245,100 @@ export const App: React.FC = () => {
       }));
     },
     [activeClip, selectedCutIndex, updateActiveTimelineClip]
+  );
+
+  // Pan the Auto Target / Single-Subject crop box horizontally and vertically without losing Auto Target mode
+  const updateSingleSubjectPanOnClip = useCallback(
+    (nextOffsetX: number, nextAnchorY: number) => {
+      const targetIdx = activeClip
+        ? Math.min(selectedCutIndex, Math.max(0, activeClip.subCuts.length - 1))
+        : 0;
+
+      const patchPan = (c: GeneratedClip): GeneratedClip => {
+        const fallbackFocus: SubjectFocusConfig = c.subjectFocus || {
+          strategy: 'auto-salient',
+          anchorX: 0.5,
+          anchorY: nextAnchorY,
+          anchorTime: playheadTime,
+          label: 'Auto Target Subject',
+        };
+        if (c.subCuts.length > 1) {
+          return {
+            ...c,
+            subCuts: c.subCuts.map((sc, idx) => {
+              const mat = materializeSubCutState(sc, c);
+              if (idx !== targetIdx) return mat;
+              const baseFocus = mat.subjectFocus || fallbackFocus;
+              return {
+                ...mat,
+                trackingOffsetX: nextOffsetX,
+                subjectFocus: {
+                  ...baseFocus,
+                  anchorY: nextAnchorY,
+                },
+              };
+            }),
+          };
+        }
+        return {
+          ...c,
+          trackingOffsetX: nextOffsetX,
+          subjectFocus: {
+            ...fallbackFocus,
+            anchorY: nextAnchorY,
+          },
+          subCuts: c.subCuts.map((sc) => ({
+            ...sc,
+            trackingOffsetX: nextOffsetX,
+            subjectFocus: {
+              ...(sc.subjectFocus || fallbackFocus),
+              anchorY: nextAnchorY,
+            },
+          })),
+        };
+      };
+
+      if (applyFocusToAllClips) {
+        setFullVideoClip((prev) => (prev ? patchPan(prev) : prev));
+        setGeneratedClips((prev) => prev.map(patchPan));
+      } else {
+        updateActiveTimelineClip(patchPan);
+      }
+    },
+    [
+      activeClip,
+      selectedCutIndex,
+      playheadTime,
+      applyFocusToAllClips,
+      materializeSubCutState,
+      updateActiveTimelineClip,
+    ]
+  );
+
+  // Adjust Timeline Horizontal Zoom (1x .. 20x) and center scroll viewport around the playhead
+  const handleChangeTimelineZoom = useCallback(
+    (rawNextZoom: number) => {
+      const clamped = Number(Math.max(1, Math.min(20, rawNextZoom)).toFixed(1));
+      setTimelineZoom(clamped);
+      requestAnimationFrame(() => {
+        const container = timelineScrollRef.current;
+        if (!container || !activeClip) return;
+        if (clamped <= 1.02) {
+          container.scrollLeft = 0;
+          return;
+        }
+        const headerW = window.innerWidth <= 1440 ? 112 : 146;
+        const viewportTrackW = Math.max(100, container.clientWidth - headerW);
+        const totalTrackW = viewportTrackW * clamped;
+        const ratio = Math.max(
+          0,
+          Math.min(1, clipPlayheadTimeRef.current / Math.max(0.1, activeClip.duration))
+        );
+        const playheadPxInTrack = ratio * totalTrackW;
+        container.scrollLeft = Math.max(0, playheadPxInTrack - viewportTrackW * 0.5);
+      });
+    },
+    [activeClip]
   );
 
   // Apply a SubjectFocusConfig isolated to the selected cut (when split) or active clip
@@ -6610,17 +6718,116 @@ export const App: React.FC = () => {
                           borderRadius: 6,
                           overflow: 'hidden',
                           border: '1px solid var(--border-subtle)',
-                          cursor: scalingSpeaker
-                            ? 'nwse-resize'
-                            : draggingSpeaker
-                              ? 'grabbing'
-                              : 'crosshair',
+                          cursor:
+                            scalingSpeaker || scalingSingleCrop
+                              ? 'nwse-resize'
+                              : draggingSpeaker || draggingAutoTargetPan
+                                ? 'grabbing'
+                                : activeFocusStrategy === 'click-track' ||
+                                    activeFocusStrategy === 'static-lock'
+                                  ? 'crosshair'
+                                  : 'grab',
                         }}
+                      onWheel={(e) => {
+                        e.preventDefault();
+                        const step = e.deltaY < 0 ? 0.08 : -0.08;
+                        if (isTwoSpeakerModeActive && activeClip) {
+                          const curScale =
+                            selectedSpeakerTarget === 'A'
+                              ? inspectedCut?.speakerAScale ?? activeClip.speakerAScale ?? 1.0
+                              : inspectedCut?.speakerBScale ?? activeClip.speakerBScale ?? 1.0;
+                          const nextScale = Number(
+                            Math.max(0.5, Math.min(2.4, curScale + step)).toFixed(2)
+                          );
+                          const targetIdx = Math.min(
+                            selectedCutIndex,
+                            Math.max(0, activeClip.subCuts.length - 1)
+                          );
+                          updateActiveTimelineClip((c) => ({
+                            ...c,
+                            ...(c.subCuts.length <= 1
+                              ? selectedSpeakerTarget === 'A'
+                                ? { speakerAScale: nextScale }
+                                : { speakerBScale: nextScale }
+                              : {}),
+                            subCuts: c.subCuts.map((sc, idx) =>
+                              c.subCuts.length <= 1 || idx === targetIdx
+                                ? selectedSpeakerTarget === 'A'
+                                  ? { ...sc, speakerAScale: nextScale }
+                                  : { ...sc, speakerBScale: nextScale }
+                                : sc
+                            ),
+                          }));
+                        } else {
+                          applyZoomAcrossStudio(currentZoom + step, applyFocusToAllClips);
+                        }
+                      }}
                       onMouseDown={(e) => {
+                        if (
+                          !isTwoSpeakerModeActive &&
+                          activeFocusStrategy !== 'click-track' &&
+                          activeFocusStrategy !== 'static-lock'
+                        ) {
+                          const initOffsetX =
+                            inspectedCut?.trackingOffsetX ?? activeClip?.trackingOffsetX ?? 0;
+                          const initAnchorY =
+                            inspectedCutFocus?.anchorY ?? currentTrack.cropY ?? 0.45;
+                          setDraggingAutoTargetPan({
+                            startClientX: e.clientX,
+                            startClientY: e.clientY,
+                            initOffsetX,
+                            initAnchorY,
+                          });
+                          return;
+                        }
                         setIsDraggingCrop(true);
                         handlePointerOnSourceVideo(e, false);
                       }}
                       onMouseMove={(e) => {
+                        if (scalingSingleCrop) {
+                          const curDist = Math.max(
+                            12,
+                            Math.hypot(
+                              e.clientX - scalingSingleCrop.centerClientX,
+                              e.clientY - scalingSingleCrop.centerClientY
+                            )
+                          );
+                          const computedZoom = Number(
+                            Math.max(
+                              0.5,
+                              Math.min(
+                                4.0,
+                                scalingSingleCrop.startZoom *
+                                  (scalingSingleCrop.startDist / curDist)
+                              )
+                            ).toFixed(2)
+                          );
+                          applyZoomAcrossStudio(computedZoom, applyFocusToAllClips);
+                          return;
+                        }
+                        if (draggingAutoTargetPan && sourceOverlayWrapRef.current) {
+                          const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
+                          const dx =
+                            (e.clientX - draggingAutoTargetPan.startClientX) /
+                            Math.max(1, rect.width);
+                          const dy =
+                            (e.clientY - draggingAutoTargetPan.startClientY) /
+                            Math.max(1, rect.height);
+                          const nextOffsetX = Number(
+                            Math.max(
+                              -0.48,
+                              Math.min(0.48, draggingAutoTargetPan.initOffsetX + dx)
+                            ).toFixed(3)
+                          );
+                          const nextAnchorY = Number(
+                            Math.max(
+                              0.06,
+                              Math.min(0.94, draggingAutoTargetPan.initAnchorY + dy)
+                            ).toFixed(3)
+                          );
+                          updateSingleSubjectPanOnClip(nextOffsetX, nextAnchorY);
+                          return;
+                        }
                         if (scalingSpeaker && sourceOverlayWrapRef.current && activeClip) {
                           const rect = sourceOverlayWrapRef.current.getBoundingClientRect();
                           const nx = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
@@ -6666,7 +6873,14 @@ export const App: React.FC = () => {
                         if (isDraggingCrop) handlePointerOnSourceVideo(e, false);
                       }}
                       onMouseUp={(e) => {
-                        if (scalingSpeaker || draggingSpeaker) {
+                        if (
+                          scalingSingleCrop ||
+                          draggingAutoTargetPan ||
+                          scalingSpeaker ||
+                          draggingSpeaker
+                        ) {
+                          setScalingSingleCrop(null);
+                          setDraggingAutoTargetPan(null);
                           setScalingSpeaker(null);
                           setDraggingSpeaker(null);
                           setIsDraggingCrop(false);
@@ -6678,6 +6892,8 @@ export const App: React.FC = () => {
                         }
                       }}
                       onMouseLeave={() => {
+                        setScalingSingleCrop(null);
+                        setDraggingAutoTargetPan(null);
                         setScalingSpeaker(null);
                         setDraggingSpeaker(null);
                         setIsDraggingCrop(false);
@@ -6685,7 +6901,10 @@ export const App: React.FC = () => {
                       title={
                         isTwoSpeakerModeActive
                           ? 'Drag Speaker A or Speaker B box freely or drag its bottom-right corner handle to scale'
-                          : 'Click any subject to lock 9:16 crop'
+                          : activeFocusStrategy === 'click-track' ||
+                              activeFocusStrategy === 'static-lock'
+                            ? 'Click any subject to lock 9:16 crop · Drag corner handles or scroll wheel to scale'
+                            : 'Drag corner handles or scroll wheel to freely scale Auto Target · Drag box to pan framing'
                       }
                     >
                       <video
@@ -7006,29 +7225,115 @@ export const App: React.FC = () => {
                               top: `${currentCrop.normY * 100}%`,
                               width: `${currentCrop.normW * 100}%`,
                               height: `${currentCrop.normH * 100}%`,
-                              border: '1.5px solid rgba(250, 250, 250, 0.85)',
+                              border:
+                                scalingSingleCrop || draggingAutoTargetPan
+                                  ? '2px solid #fafafa'
+                                  : '1.5px solid rgba(250, 250, 250, 0.88)',
                               boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.55)',
                               pointerEvents: 'none',
+                              zIndex: 6,
                             }}
                           >
                             <div
+                              onMouseDown={(e) => {
+                                e.stopPropagation();
+                                const initOffsetX =
+                                  inspectedCut?.trackingOffsetX ??
+                                  activeClip?.trackingOffsetX ??
+                                  0;
+                                const initAnchorY =
+                                  inspectedCutFocus?.anchorY ?? currentTrack.cropY ?? 0.45;
+                                setDraggingAutoTargetPan({
+                                  startClientX: e.clientX,
+                                  startClientY: e.clientY,
+                                  initOffsetX,
+                                  initAnchorY,
+                                });
+                              }}
                               style={{
                                 position: 'absolute',
                                 top: 4,
                                 left: 4,
-                                background: 'rgba(9, 9, 11, 0.84)',
-                                border: '1px solid rgba(255,255,255,0.2)',
-                                color: '#fafafa',
+                                background:
+                                  scalingSingleCrop || draggingAutoTargetPan
+                                    ? '#fafafa'
+                                    : 'rgba(9, 9, 11, 0.88)',
+                                border: '1px solid rgba(255,255,255,0.25)',
+                                color:
+                                  scalingSingleCrop || draggingAutoTargetPan
+                                    ? '#09090b'
+                                    : '#fafafa',
                                 fontSize: 9.5,
+                                fontWeight: 700,
                                 fontFamily: 'var(--font-mono)',
-                                padding: '1px 5px',
+                                padding: '1px 6px',
                                 borderRadius: 3,
                                 whiteSpace: 'nowrap',
+                                pointerEvents: 'auto',
+                                cursor: draggingAutoTargetPan ? 'grabbing' : 'grab',
+                                userSelect: 'none',
                               }}
+                              title="Drag to pan Auto Target framing · Drag any corner handle to scale"
                             >
                               {currentZoom.toFixed(2)}x ·{' '}
                               {inspectedCutFocus?.label || 'Auto Target'}
                             </div>
+
+                            {/* 4 Interactive Corner Scale Handles for Single-Subject / Auto Target Crop Box */}
+                            {(
+                              [
+                                { id: 'nw', top: 0, left: 0, cursor: 'nwse-resize' },
+                                { id: 'ne', top: 0, right: 0, cursor: 'nesw-resize' },
+                                { id: 'sw', bottom: 0, left: 0, cursor: 'nesw-resize' },
+                                { id: 'se', bottom: 0, right: 0, cursor: 'nwse-resize' },
+                              ] as const
+                            ).map((handle) => (
+                              <div
+                                key={`single-crop-scale-${handle.id}`}
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  if (!sourceOverlayWrapRef.current) return;
+                                  const rect =
+                                    sourceOverlayWrapRef.current.getBoundingClientRect();
+                                  const centerClientX =
+                                    rect.left +
+                                    (currentCrop.normX + currentCrop.normW / 2) * rect.width;
+                                  const centerClientY =
+                                    rect.top +
+                                    (currentCrop.normY + currentCrop.normH / 2) * rect.height;
+                                  const startDist = Math.max(
+                                    16,
+                                    Math.hypot(
+                                      e.clientX - centerClientX,
+                                      e.clientY - centerClientY
+                                    )
+                                  );
+                                  setScalingSingleCrop({
+                                    startZoom: currentZoom,
+                                    startDist,
+                                    centerClientX,
+                                    centerClientY,
+                                  });
+                                }}
+                                style={{
+                                  position: 'absolute',
+                                  ...('top' in handle ? { top: handle.top } : {}),
+                                  ...('bottom' in handle ? { bottom: handle.bottom } : {}),
+                                  ...('left' in handle ? { left: handle.left } : {}),
+                                  ...('right' in handle ? { right: handle.right } : {}),
+                                  width: 12,
+                                  height: 12,
+                                  background: '#fafafa',
+                                  border: '1.5px solid #09090b',
+                                  borderRadius: 2,
+                                  cursor: handle.cursor,
+                                  pointerEvents: 'auto',
+                                  zIndex: 12,
+                                  boxShadow: '0 1px 4px rgba(0, 0, 0, 0.65)',
+                                }}
+                                title="Drag corner handle to freely scale Auto Target crop box (0.50x – 4.00x)"
+                              />
+                            ))}
                           </div>
                           {/* Live Locked Subject Target Reticle on Source Video */}
                           <div
@@ -7793,8 +8098,8 @@ export const App: React.FC = () => {
                       <span className="section-label">Zoom</span>
                       <input
                         type="range"
-                        min={0.56}
-                        max={2.2}
+                        min={0.5}
+                        max={4.0}
                         step={0.02}
                         value={currentZoom}
                         onChange={(e) =>
@@ -7803,7 +8108,7 @@ export const App: React.FC = () => {
                             applyFocusToAllClips
                           )
                         }
-                        style={{ width: 60 }}
+                        style={{ width: 64 }}
                       />
                       <span className="badge-subtle" style={{ minWidth: 38, textAlign: 'center' }}>
                         {currentZoom.toFixed(2)}x
@@ -8960,8 +9265,94 @@ export const App: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Right: Quick Layer Add + In / Out Range Bar */}
+                  {/* Right: Timeline Zoom + Quick Layer Add + In / Out Range Bar */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+                    {/* Timeline Horizontal Zoom for Precise Cutting */}
+                    <div
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        background: 'rgba(24, 24, 27, 0.85)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: 5,
+                        padding: '1px 5px',
+                      }}
+                      title="Zoom in horizontally on the timeline (1x – 20x) to make precise frame-accurate cuts [Ctrl/Alt + Scroll Wheel on timeline]"
+                    >
+                      <span
+                        style={{
+                          fontSize: 9.5,
+                          fontWeight: 600,
+                          color: 'var(--text-secondary)',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Timeline Zoom
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        style={{ height: 19, padding: '0 5px', minWidth: 20 }}
+                        disabled={timelineZoom <= 1}
+                        onClick={() =>
+                          handleChangeTimelineZoom(
+                            Math.max(1, timelineZoom - (timelineZoom >= 4 ? 1 : 0.5))
+                          )
+                        }
+                        title="Zoom Out Timeline"
+                      >
+                        -
+                      </button>
+                      <input
+                        type="range"
+                        min={1}
+                        max={20}
+                        step={0.5}
+                        value={timelineZoom}
+                        onChange={(e) => handleChangeTimelineZoom(parseFloat(e.target.value))}
+                        style={{ width: 64 }}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        style={{ height: 19, padding: '0 5px', minWidth: 20 }}
+                        disabled={timelineZoom >= 20}
+                        onClick={() =>
+                          handleChangeTimelineZoom(
+                            Math.min(20, timelineZoom + (timelineZoom >= 4 ? 1 : 0.5))
+                          )
+                        }
+                        title="Zoom In Timeline for Precise Cuts"
+                      >
+                        +
+                      </button>
+                      <span
+                        className="badge-subtle"
+                        style={{
+                          minWidth: 34,
+                          textAlign: 'center',
+                          padding: '1px 4px',
+                          color: timelineZoom > 1 ? '#93c5fd' : undefined,
+                        }}
+                      >
+                        {timelineZoom.toFixed(1)}x
+                      </span>
+                      {timelineZoom > 1 && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          style={{ height: 19, padding: '0 5px', fontSize: 9.5 }}
+                          onClick={() => handleChangeTimelineZoom(1)}
+                          title="Reset timeline zoom to fit entire clip (1.0x)"
+                        >
+                          Fit
+                        </button>
+                      )}
+                    </div>
+
+                    <ShadcnSeparator orientation="vertical" />
+
                     <button
                       type="button"
                       className="btn btn-sm"
@@ -9101,8 +9492,16 @@ export const App: React.FC = () => {
 
                 {/* MULTI-TRACK NLE VIDEO LAYER STACK (V4 Overlays, V3 Captions, V2 Speaker B, V1 Video Cuts, A1 Audio) */}
                 <div
+                  ref={timelineScrollRef}
                   className="nle-layer-stack"
                   style={{ position: 'relative' }}
+                  onWheel={(e) => {
+                    if (e.ctrlKey || e.metaKey || e.altKey) {
+                      e.preventDefault();
+                      const delta = e.deltaY < 0 ? (timelineZoom >= 4 ? 1 : 0.5) : -(timelineZoom >= 4 ? 1 : 0.5);
+                      handleChangeTimelineZoom(timelineZoom + delta);
+                    }
+                  }}
                   onMouseMove={(e) => {
                     if (!isPreviewAxis || !timelineBarRef.current || !activeClip) return;
                     const rect = timelineBarRef.current.getBoundingClientRect();
@@ -9129,6 +9528,146 @@ export const App: React.FC = () => {
                       style={{ display: 'none' }}
                     />
                   )}
+
+                  <div
+                    className="nle-layer-zoom-inner"
+                    style={{ '--timeline-zoom': timelineZoom } as React.CSSProperties}
+                  >
+                    {/* TIMECODE RULER BAR (Scales with Timeline Zoom for Frame-Accurate Cutting) */}
+                    <div
+                      className="nle-layer-row"
+                      style={{
+                        height: 20,
+                        minHeight: 20,
+                        background: '#09090c',
+                      }}
+                    >
+                      <div
+                        className="nle-layer-header"
+                        style={{
+                          fontSize: 9.5,
+                          color: 'var(--text-muted)',
+                          cursor: 'default',
+                        }}
+                      >
+                        <span style={{ fontFamily: 'var(--font-mono)' }}>
+                          {clipPlayheadTime.toFixed(2)}s / {activeClip.duration.toFixed(1)}s
+                        </span>
+                        {timelineZoom > 1 && (
+                          <span style={{ color: '#60a5fa', fontFamily: 'var(--font-mono)' }}>
+                            {timelineZoom.toFixed(1)}x
+                          </span>
+                        )}
+                      </div>
+                      <div
+                        className="nle-layer-track"
+                        style={{
+                          height: 20,
+                          minHeight: 20,
+                          background: '#08080b',
+                          cursor: isRazorMode ? 'crosshair' : 'pointer',
+                        }}
+                        onMouseDown={(e) => {
+                          if (!timelineBarRef.current || !activeClip) return;
+                          const rect = timelineBarRef.current.getBoundingClientRect();
+                          const ratio = Math.max(
+                            0,
+                            Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width))
+                          );
+                          if (isRazorMode) {
+                            handleRazorSplitAtClipTime(ratio * activeClip.duration);
+                            return;
+                          }
+                          setDraggingHandle('playhead');
+                          updateTimelineDragAtClientX(e.clientX, 'playhead');
+                        }}
+                      >
+                        {(() => {
+                          const dur = Math.max(0.5, activeClip.duration);
+                          const visibleSecApprox = dur / Math.max(1, timelineZoom);
+                          const majorStep =
+                            visibleSecApprox <= 3
+                              ? 0.25
+                              : visibleSecApprox <= 7
+                                ? 0.5
+                                : visibleSecApprox <= 16
+                                  ? 1
+                                  : visibleSecApprox <= 35
+                                    ? 2
+                                    : visibleSecApprox <= 80
+                                      ? 5
+                                      : visibleSecApprox <= 180
+                                        ? 10
+                                        : 30;
+                          const ticks: number[] = [];
+                          for (let t = 0; t <= dur + 0.001; t += majorStep) {
+                            ticks.push(Number(t.toFixed(2)));
+                            if (ticks.length > 240) break;
+                          }
+                          return ticks.map((t) => {
+                            const pct = Math.max(0, Math.min(100, (t / dur) * 100));
+                            return (
+                              <div
+                                key={`ruler-tick-${t}`}
+                                style={{
+                                  position: 'absolute',
+                                  left: `${pct}%`,
+                                  top: 0,
+                                  bottom: 0,
+                                  borderLeft: '1px solid rgba(255, 255, 255, 0.16)',
+                                  paddingLeft: 3,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  pointerEvents: 'none',
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    fontSize: 8.5,
+                                    fontFamily: 'var(--font-mono)',
+                                    color: 'rgba(161, 161, 170, 0.85)',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {majorStep < 1 ? `${t.toFixed(2)}s` : `${t.toFixed(0)}s`}
+                                </span>
+                              </div>
+                            );
+                          });
+                        })()}
+                        {/* Playhead handle on Ruler */}
+                        <div
+                          style={{
+                            position: 'absolute',
+                            left: `${Math.max(
+                              0,
+                              Math.min(
+                                100,
+                                (clipPlayheadTime / Math.max(0.1, activeClip.duration)) * 100
+                              )
+                            )}%`,
+                            top: 0,
+                            bottom: 0,
+                            width: 2,
+                            background: '#fafafa',
+                            pointerEvents: 'none',
+                            zIndex: 18,
+                          }}
+                        >
+                          <div
+                            style={{
+                              position: 'absolute',
+                              top: 0,
+                              left: -4,
+                              width: 10,
+                              height: 7,
+                              background: '#fafafa',
+                              borderRadius: '1px 1px 4px 4px',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
 
                   {/* Floating Preview Axis Thumbnail Scrub Card & Snap Badge */}
                   {isPreviewAxis && previewAxisClipTime !== null && previewAxisPct !== null && (
@@ -10304,6 +10843,7 @@ export const App: React.FC = () => {
                         }}
                       />
                     </div>
+                  </div>
                   </div>
                 </div>
 
