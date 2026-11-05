@@ -549,16 +549,16 @@ export const App: React.FC = () => {
     []
   );
 
-  // Determine active sub-cut from clipPlayheadTime
+  // Determine active sub-cut from clipPlayheadTime (honoring selectedCutIndex at cut boundaries so Input & Output monitors are 100% locked to the same cut)
   const mappedAtPlayhead = activeClip
-    ? clipTimeToSourceTime(activeClip, clipPlayheadTime)
+    ? clipTimeToSourceTime(activeClip, clipPlayheadTime, selectedCutIndex)
     : { sourceTime: playheadTime, activeCut: undefined, cutIndex: 0 };
 
   const activeCut =
     mappedAtPlayhead.activeCut ||
-    activeClip?.subCuts.find(
-      (c) => playheadTime >= c.sourceStart - 0.05 && playheadTime <= c.sourceEnd + 0.05
-    ) ||
+    activeClip?.subCuts[
+      Math.min(selectedCutIndex, Math.max(0, (activeClip?.subCuts.length || 1) - 1))
+    ] ||
     activeClip?.subCuts[0];
 
   const currentZoom = activeCut ? activeCut.zoom : activeClip?.zoomScale ?? 1.0;
@@ -650,6 +650,7 @@ export const App: React.FC = () => {
       backgroundFillStyle:
         activeCut?.backgroundFillStyle ?? activeClip?.backgroundFillStyle ?? 'blurred',
       activeClip,
+      activeCut,
       clipPlayheadTime,
     });
   }, [
@@ -659,7 +660,7 @@ export const App: React.FC = () => {
     currentTrack.leftSubjectX,
     currentTrack.rightSubjectX,
     currentZoom,
-    activeCut?.backgroundFillStyle,
+    activeCut,
     activeClip,
     clipPlayheadTime,
   ]);
@@ -727,10 +728,14 @@ export const App: React.FC = () => {
 
   // Seek to a specific time on the active timeline (0 .. activeClip.duration)
   const handleSeekClipTime = useCallback(
-    (targetClipTime: number) => {
+    (targetClipTime: number, preferredCutIdx?: number) => {
       if (!activeSource || !activeClip) return;
       const clampedClipTime = Math.max(0, Math.min(activeClip.duration, targetClipTime));
-      const { sourceTime, cutIndex } = clipTimeToSourceTime(activeClip, clampedClipTime);
+      const { sourceTime, cutIndex } = clipTimeToSourceTime(
+        activeClip,
+        clampedClipTime,
+        preferredCutIdx
+      );
       if (cutIndex >= 0) {
         activeCutIdxRef.current = cutIndex;
         setSelectedCutIndex(cutIndex);
@@ -2199,6 +2204,7 @@ export const App: React.FC = () => {
         isMainTrackMagnet,
         activeClip.duration
       );
+      const newCutStartTl = recalc.subCuts[newCutIdx]?.timelineStart ?? targetClipTime;
       updateActiveTimelineClip((clip) => ({
         ...clip,
         subCuts: recalc.subCuts,
@@ -2210,7 +2216,8 @@ export const App: React.FC = () => {
       setSelectedLayerTrack('v1-video');
       setSelectedCutIndex(newCutIdx);
       activeCutIdxRef.current = newCutIdx;
-      setClipPlayheadTime(targetClipTime);
+      clipPlayheadTimeRef.current = newCutStartTl;
+      setClipPlayheadTime(newCutStartTl);
       setPlayheadTime(splitSrcTime);
       if (videoRef.current) {
         videoRef.current.currentTime = splitSrcTime;
@@ -5256,7 +5263,8 @@ export const App: React.FC = () => {
   // Pointer drag handler on the Timeline Bar (with Auto Snapping support)
   const updateTimelineDragAtClientX = (
     clientX: number,
-    handle: 'playhead' | 'in' | 'out'
+    handle: 'playhead' | 'in' | 'out',
+    preferredCutIdx?: number
   ) => {
     if (!timelineBarRef.current || !activeClip || !activeSource) return;
     const rect = timelineBarRef.current.getBoundingClientRect();
@@ -5287,8 +5295,22 @@ export const App: React.FC = () => {
       setActiveSnapLabel(null);
     }
 
+    // When clicking directly on a specific cut block (`preferredCutIdx`), clamp inside that cut so snapping never lands 1ms into the previous cut
+    if (
+      handle === 'playhead' &&
+      typeof preferredCutIdx === 'number' &&
+      preferredCutIdx >= 0 &&
+      preferredCutIdx < activeClip.subCuts.length
+    ) {
+      const targetCut = activeClip.subCuts[preferredCutIdx];
+      timelineSec = Math.max(
+        targetCut.timelineStart,
+        Math.min(Math.max(targetCut.timelineStart, targetCut.timelineEnd - 0.001), timelineSec)
+      );
+    }
+
     const mappedSourceSec = Number(
-      clipTimeToSourceTime(activeClip, timelineSec).sourceTime.toFixed(2)
+      clipTimeToSourceTime(activeClip, timelineSec, preferredCutIdx).sourceTime.toFixed(2)
     );
 
     if (handle === 'in') {
@@ -5304,14 +5326,12 @@ export const App: React.FC = () => {
       setOutMarker(Number(nextOut.toFixed(2)));
       handleSeekSourceTime(nextOut);
     } else {
-      handleSeekClipTime(timelineSec);
+      handleSeekClipTime(timelineSec, preferredCutIdx);
     }
   };
 
   const currentClipMode: ClipCreationMode = activeScheme.clipCreationMode || 'clip-segment';
-  const inspectedCut =
-    activeClip?.subCuts[Math.min(selectedCutIndex, (activeClip?.subCuts.length || 1) - 1)] ||
-    activeCut;
+  const inspectedCut = activeCut;
   const inspectedCutFocus = inspectedCut?.subjectFocus || activeClip?.subjectFocus;
 
   const activeFocusStrategy: SubjectFocusStrategy =
@@ -5407,7 +5427,7 @@ export const App: React.FC = () => {
                 <Scissors size={13} strokeWidth={2.2} />
               </div>
               <span style={{ fontWeight: 600, fontSize: 13, letterSpacing: '-0.02em' }}>
-                ClipMaker
+                Complex Clip Maker
               </span>
               {activeSource && (
                 <>
@@ -10071,7 +10091,7 @@ export const App: React.FC = () => {
                                 setSelectedCutIndex(idx);
                                 activeCutIdxRef.current = idx;
                                 setSelectedLayerTrack('v2-speaker');
-                                updateTimelineDragAtClientX(e.clientX, 'playhead');
+                                updateTimelineDragAtClientX(e.clientX, 'playhead', idx);
                               }}
                               style={{
                                 position: 'absolute',
@@ -10340,7 +10360,7 @@ export const App: React.FC = () => {
                               } else {
                                 setDraggingHandle('playhead');
                               }
-                              updateTimelineDragAtClientX(e.clientX, 'playhead');
+                              updateTimelineDragAtClientX(e.clientX, 'playhead', idx);
                             }}
                             style={{
                               position: 'absolute',
@@ -10680,7 +10700,7 @@ export const App: React.FC = () => {
                                 handleRazorSplitAtClipTime(ratio * Math.max(0.1, activeClip.duration));
                                 return;
                               }
-                              updateTimelineDragAtClientX(e.clientX, 'playhead');
+                              updateTimelineDragAtClientX(e.clientX, 'playhead', idx);
                             }}
                             title={
                               isDeletedAudio

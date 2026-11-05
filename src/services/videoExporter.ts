@@ -260,6 +260,7 @@ export async function exportClipTo9x16Video(
       backgroundFillStyle:
         activeCut?.backgroundFillStyle ?? clip.backgroundFillStyle ?? 'blurred',
       activeClip: clip,
+      activeCut,
       clipPlayheadTime: clipRelTime,
     });
   };

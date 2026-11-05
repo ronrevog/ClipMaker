@@ -46,10 +46,10 @@ export function recalculateClipTimeline(
     const sorted = [...subCuts].sort((a, b) => a.timelineStart - b.timelineStart);
     let minCursor = 0;
     const preserved = sorted.map((cut, idx) => {
-      const segDur = Math.max(0.1, Number((cut.sourceEnd - cut.sourceStart).toFixed(2)));
+      const segDur = Math.max(0.05, Number((cut.sourceEnd - cut.sourceStart).toFixed(4)));
       const desiredStart = Number.isFinite(cut.timelineStart) ? Math.max(0, cut.timelineStart) : minCursor;
-      const tlStart = Number(Math.max(minCursor, desiredStart).toFixed(2));
-      const tlEnd = Number((tlStart + segDur).toFixed(2));
+      const tlStart = Number(Math.max(minCursor, desiredStart).toFixed(4));
+      const tlEnd = Number((tlStart + segDur).toFixed(4));
       minCursor = tlEnd;
       return {
         ...cut,
@@ -62,7 +62,7 @@ export function recalculateClipTimeline(
     const firstStart = preserved[0]?.sourceStart ?? 0;
     const lastEnd = preserved[preserved.length - 1]?.sourceEnd ?? firstStart;
     const computedDur = Number(
-      Math.max(minCursor, minTotalDuration ?? 0, 0.5).toFixed(2)
+      Math.max(minCursor, minTotalDuration ?? 0, 0.5).toFixed(4)
     );
 
     return {
@@ -75,9 +75,9 @@ export function recalculateClipTimeline(
 
   let tlCursor = 0;
   const normalized = subCuts.map((cut, idx) => {
-    const segDur = Math.max(0.1, Number((cut.sourceEnd - cut.sourceStart).toFixed(2)));
-    const tlStart = Number(tlCursor.toFixed(2));
-    const tlEnd = Number((tlCursor + segDur).toFixed(2));
+    const segDur = Math.max(0.05, Number((cut.sourceEnd - cut.sourceStart).toFixed(4)));
+    const tlStart = Number(tlCursor.toFixed(4));
+    const tlEnd = Number((tlCursor + segDur).toFixed(4));
     tlCursor = tlEnd;
     return {
       ...cut,
@@ -92,7 +92,7 @@ export function recalculateClipTimeline(
 
   return {
     subCuts: normalized,
-    duration: Number(tlCursor.toFixed(2)),
+    duration: Number(tlCursor.toFixed(4)),
     sourceStart: firstStart,
     sourceEnd: lastEnd,
   };
@@ -201,14 +201,14 @@ export function computeAutoSnapTime(params: {
 
   if (bestCandidate) {
     return {
-      snappedTime: Number(bestCandidate.time.toFixed(2)),
-      snapTargetTime: Number(bestCandidate.time.toFixed(2)),
+      snappedTime: Number(bestCandidate.time.toFixed(4)),
+      snapTargetTime: Number(bestCandidate.time.toFixed(4)),
       snapLabel: bestCandidate.label,
     };
   }
 
   return {
-    snappedTime: Number(rawClipTime.toFixed(2)),
+    snappedTime: Number(rawClipTime.toFixed(4)),
     snapTargetTime: null,
     snapLabel: null,
   };
@@ -221,7 +221,8 @@ export function computeAutoSnapTime(params: {
  */
 export function clipTimeToSourceTime(
   clip: GeneratedClip,
-  clipTime: number
+  clipTime: number,
+  preferredCutIndex?: number
 ): { sourceTime: number; activeCut: SubCut | undefined; cutIndex: number; isInGap?: boolean } {
   const clampedClipTime = Math.max(0, Math.min(clip.duration, clipTime));
   if (!clip.subCuts || clip.subCuts.length === 0) {
@@ -233,41 +234,70 @@ export function clipTimeToSourceTime(
     };
   }
 
+  const resolveCutResult = (cut: SubCut, idx: number) => {
+    const offsetInCut = Math.max(
+      0,
+      Math.min(cut.sourceEnd - cut.sourceStart, clampedClipTime - cut.timelineStart)
+    );
+    if (cut.isCompoundClip && cut.compoundSubCuts && cut.compoundSubCuts.length > 0) {
+      let localCursor = 0;
+      for (const child of cut.compoundSubCuts) {
+        const childDur = Math.max(0.05, child.sourceEnd - child.sourceStart);
+        if (offsetInCut <= localCursor + childDur + 0.001) {
+          const childOffset = Math.max(0, Math.min(childDur, offsetInCut - localCursor));
+          return {
+            sourceTime: Number((child.sourceStart + childOffset).toFixed(4)),
+            activeCut: cut,
+            cutIndex: idx,
+            isInGap: false,
+          };
+        }
+        localCursor += childDur;
+      }
+    }
+    return {
+      sourceTime: Number((cut.sourceStart + offsetInCut).toFixed(4)),
+      activeCut: cut,
+      cutIndex: idx,
+      isInGap: false,
+    };
+  };
+
+  // If caller specifies `preferredCutIndex` and `clampedClipTime` is inside or right at its start boundary, honor it!
+  if (
+    typeof preferredCutIndex === 'number' &&
+    preferredCutIndex >= 0 &&
+    preferredCutIndex < clip.subCuts.length
+  ) {
+    const prefCut = clip.subCuts[preferredCutIndex];
+    const isPrefLast = preferredCutIndex === clip.subCuts.length - 1;
+    if (
+      clampedClipTime >= prefCut.timelineStart - 0.005 &&
+      (isPrefLast
+        ? clampedClipTime <= prefCut.timelineEnd + 0.02
+        : clampedClipTime < prefCut.timelineEnd - 0.0005)
+    ) {
+      return resolveCutResult(prefCut, preferredCutIndex);
+    }
+  }
+
   for (let i = 0; i < clip.subCuts.length; i++) {
     const cut = clip.subCuts[i];
     const isLast = i === clip.subCuts.length - 1;
+    const nextCut = !isLast ? clip.subCuts[i + 1] : undefined;
+    // Strict half-open interval [timelineStart, timelineEnd) so the start of Cut #(i+1) NEVER falls into Cut #i
+    const cutEndBoundary =
+      nextCut && Math.abs(nextCut.timelineStart - cut.timelineEnd) <= 0.01
+        ? nextCut.timelineStart - 0.0005
+        : cut.timelineEnd;
+
     if (
-      (clampedClipTime >= cut.timelineStart - 0.02 && clampedClipTime < cut.timelineEnd) ||
+      (clampedClipTime >= cut.timelineStart - 0.002 && clampedClipTime < cutEndBoundary) ||
       (isLast &&
-        clampedClipTime >= cut.timelineStart - 0.02 &&
+        clampedClipTime >= cut.timelineStart - 0.002 &&
         clampedClipTime <= cut.timelineEnd + 0.05)
     ) {
-      const offsetInCut = Math.max(
-        0,
-        Math.min(cut.sourceEnd - cut.sourceStart, clampedClipTime - cut.timelineStart)
-      );
-      if (cut.isCompoundClip && cut.compoundSubCuts && cut.compoundSubCuts.length > 0) {
-        let localCursor = 0;
-        for (const child of cut.compoundSubCuts) {
-          const childDur = Math.max(0.05, child.sourceEnd - child.sourceStart);
-          if (offsetInCut <= localCursor + childDur + 0.02) {
-            const childOffset = Math.max(0, Math.min(childDur, offsetInCut - localCursor));
-            return {
-              sourceTime: Number((child.sourceStart + childOffset).toFixed(4)),
-              activeCut: cut,
-              cutIndex: i,
-              isInGap: false,
-            };
-          }
-          localCursor += childDur;
-        }
-      }
-      return {
-        sourceTime: Number((cut.sourceStart + offsetInCut).toFixed(4)),
-        activeCut: cut,
-        cutIndex: i,
-        isInGap: false,
-      };
+      return resolveCutResult(cut, i);
     }
   }
 
@@ -296,13 +326,37 @@ export function clipTimeToSourceTime(
 /**
  * Converts a source video timestamp into its corresponding position on the elected clip's timeline (`0 .. clip.duration`).
  */
-export function sourceTimeToClipTime(clip: GeneratedClip, sourceTime: number): number {
+export function sourceTimeToClipTime(
+  clip: GeneratedClip,
+  sourceTime: number,
+  preferredCutIndex?: number
+): number {
   if (!clip.subCuts || clip.subCuts.length === 0) {
     return Math.max(0, Math.min(clip.duration, sourceTime - clip.sourceStart));
   }
 
-  for (const cut of clip.subCuts) {
-    if (sourceTime >= cut.sourceStart - 0.05 && sourceTime <= cut.sourceEnd + 0.05) {
+  if (
+    typeof preferredCutIndex === 'number' &&
+    preferredCutIndex >= 0 &&
+    preferredCutIndex < clip.subCuts.length
+  ) {
+    const pref = clip.subCuts[preferredCutIndex];
+    if (sourceTime >= pref.sourceStart - 0.01 && sourceTime <= pref.sourceEnd + 0.01) {
+      const offset = Math.max(
+        0,
+        Math.min(pref.sourceEnd - pref.sourceStart, sourceTime - pref.sourceStart)
+      );
+      return Number((pref.timelineStart + offset).toFixed(4));
+    }
+  }
+
+  for (let i = 0; i < clip.subCuts.length; i++) {
+    const cut = clip.subCuts[i];
+    const isLast = i === clip.subCuts.length - 1;
+    if (
+      (sourceTime >= cut.sourceStart - 0.002 && sourceTime < cut.sourceEnd - 0.0005) ||
+      (isLast && sourceTime >= cut.sourceStart - 0.002 && sourceTime <= cut.sourceEnd + 0.05)
+    ) {
       const offset = Math.max(
         0,
         Math.min(cut.sourceEnd - cut.sourceStart, sourceTime - cut.sourceStart)

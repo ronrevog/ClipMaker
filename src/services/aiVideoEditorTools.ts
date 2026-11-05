@@ -1034,6 +1034,7 @@ export function renderComposite9x16Frame(params: {
   zoom: number;
   backgroundFillStyle?: BackgroundFillStyle;
   activeClip: GeneratedClip | null;
+  activeCut?: SubCut;
   clipPlayheadTime: number;
 }) {
   const {
@@ -1050,6 +1051,7 @@ export function renderComposite9x16Frame(params: {
     zoom,
     backgroundFillStyle = 'blurred',
     activeClip,
+    activeCut: explicitActiveCut,
     clipPlayheadTime,
   } = params;
 
@@ -1063,10 +1065,21 @@ export function renderComposite9x16Frame(params: {
   const lutFilterStr = getColorGradeLutCanvasFilter(activeClip?.colorGradeLut);
   const effectiveClipZoom = Math.max(0.45, Math.min(4.5, zoom * (trans.extraScale || 1.0)));
 
-  // Per-Cut Layout Override: allows switching between Split-Screen (2 subjects) and Full-Screen (1 subject)
-  const activeCutAtPlayhead = activeClip?.subCuts?.find(
-    (c) => clipPlayheadTime >= c.timelineStart - 0.03 && clipPlayheadTime <= c.timelineEnd + 0.03
-  );
+  // Per-Cut Layout Override: strictly isolated to the active cut (half-open interval [timelineStart, timelineEnd) so Cut #(k-1) never bleeds into the start of Cut #k)
+  const activeCutAtPlayhead =
+    explicitActiveCut ??
+    activeClip?.subCuts?.find((c, idx, arr) => {
+      const isLast = idx === arr.length - 1;
+      const nextCut = !isLast ? arr[idx + 1] : undefined;
+      const endBound =
+        nextCut && Math.abs(nextCut.timelineStart - c.timelineEnd) <= 0.01
+          ? nextCut.timelineStart - 0.0005
+          : c.timelineEnd;
+      return (
+        clipPlayheadTime >= c.timelineStart - 0.002 &&
+        (isLast ? clipPlayheadTime <= c.timelineEnd + 0.03 : clipPlayheadTime < endBound)
+      );
+    });
   const isTimelineGap =
     Boolean(activeClip?.subCuts && activeClip.subCuts.length > 0) && !activeCutAtPlayhead;
   const cutLayout = activeCutAtPlayhead?.layoutMode || 'inherit';
