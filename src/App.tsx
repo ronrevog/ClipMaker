@@ -150,6 +150,7 @@ import { ProjectsModal } from './components/ProjectsModal';
 import { TranscriptEditorModal } from './components/TranscriptEditorModal';
 import { WavesurferAudioTrack } from './components/WavesurferAudioTrack';
 import {
+  captureThumbnailFromVideoElement,
   ComplexAuthUser,
   getLastActiveProjectId,
   loadSavedAuthUser,
@@ -3178,12 +3179,14 @@ export const App: React.FC = () => {
       setCurrentProjectName(targetName);
       setIsSavingProject(true);
       try {
+        const liveThumb = captureThumbnailFromVideoElement(videoRef.current);
         await saveStudioProject({
           projectId: targetId,
           projectName: targetName,
           user: authUser,
           source: activeSource,
           videoBlob: uploadedVideoBlobRef.current,
+          thumbnailDataUrl: liveThumb,
           fullVideoClip,
           generatedClips,
           activeClipId,

@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   deleteStudioProject,
+  ensureProjectThumbnail,
   listSavedStudioProjects,
   SavedProjectSummary,
 } from '../services/projectStorage';
@@ -52,6 +53,19 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
     try {
       const list = await listSavedStudioProjects();
       setProjects(list);
+
+      // Automatically generate & cache thumbnails for any existing projects that don't have one yet
+      for (const item of list) {
+        if (!item.thumbnailDataUrl) {
+          ensureProjectThumbnail(item.id).then((thumb) => {
+            if (thumb) {
+              setProjects((prev) =>
+                prev.map((p) => (p.id === item.id ? { ...p, thumbnailDataUrl: thumb } : p))
+              );
+            }
+          });
+        }
+      }
     } finally {
       setIsLoadingList(false);
     }
@@ -230,18 +244,96 @@ export const ProjectsModal: React.FC<ProjectsModalProps> = ({
                 <div
                   key={proj.id}
                   style={{
-                    padding: '12px 14px',
+                    padding: '10px 14px',
                     borderRadius: 8,
                     background: isCurrent ? 'rgba(45, 140, 235, 0.14)' : '#1c202b',
                     border: isCurrent ? '1.5px solid #3b82f6' : '1px solid #2b3140',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    gap: 12,
+                    gap: 14,
                     flexWrap: 'wrap',
                   }}
                 >
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 220, flex: 1 }}>
+                  {/* Video Project Thumbnail Preview */}
+                  <div
+                    onClick={async () => {
+                      if (recallingId === proj.id) return;
+                      setRecallingId(proj.id);
+                      try {
+                        await onRecallProject(proj.id);
+                        onClose();
+                      } finally {
+                        setRecallingId(null);
+                      }
+                    }}
+                    title={`Click to recall "${proj.name}"`}
+                    style={{
+                      width: 112,
+                      height: 64,
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      background: '#09090d',
+                      border: isCurrent
+                        ? '1.5px solid rgba(96, 165, 250, 0.85)'
+                        : '1px solid rgba(255, 255, 255, 0.14)',
+                      position: 'relative',
+                      flexShrink: 0,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.45)',
+                    }}
+                  >
+                    {proj.thumbnailDataUrl ? (
+                      <img
+                        src={proj.thumbnailDataUrl}
+                        alt={proj.name}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'cover',
+                          display: 'block',
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 3,
+                          color: '#64748b',
+                          fontSize: 9.5,
+                        }}
+                      >
+                        <Video size={18} color="#60a5fa" />
+                        <span>Video</span>
+                      </div>
+                    )}
+                    <span
+                      style={{
+                        position: 'absolute',
+                        right: 4,
+                        bottom: 4,
+                        background: 'rgba(9, 9, 13, 0.86)',
+                        border: '1px solid rgba(255, 255, 255, 0.16)',
+                        color: '#f8fafc',
+                        fontSize: 9.5,
+                        fontWeight: 600,
+                        fontFamily: 'var(--font-mono)',
+                        padding: '1px 5px',
+                        borderRadius: 3,
+                        lineHeight: 1.2,
+                      }}
+                    >
+                      {Number(proj.sourceDuration || 0).toFixed(1)}s
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 200, flex: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span style={{ fontWeight: 700, fontSize: 13.5, color: '#f8fafc' }}>
                         {proj.name}

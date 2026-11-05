@@ -37,6 +37,7 @@ export interface SavedProjectSummary {
   sourceDuration: number;
   clipsCount: number;
   focusLocksCount: number;
+  thumbnailDataUrl?: string;
   storageLocation?: 'vercel-cloud' | 'local-indexeddb';
   projectState?: ClipMakerProjectState;
 }
@@ -342,6 +343,141 @@ export async function tryUploadVideoToVercelBlob(
 }
 
 /**
+ * Captures a compact 192×108 JPEG thumbnail from a live HTMLVideoElement (preserving aspect ratio over a dark/blurred backdrop).
+ */
+export function captureThumbnailFromVideoElement(
+  videoEl: HTMLVideoElement | null
+): string | undefined {
+  try {
+    if (!videoEl || videoEl.readyState < 2 || !videoEl.videoWidth || !videoEl.videoHeight) {
+      return undefined;
+    }
+    const vw = videoEl.videoWidth;
+    const vh = videoEl.videoHeight;
+    const outW = 192;
+    const outH = 108;
+    const canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return undefined;
+
+    ctx.fillStyle = '#09090d';
+    ctx.fillRect(0, 0, outW, outH);
+
+    // Draw subtle blurred background fill for vertical 9:16 or non-16:9 sources
+    ctx.save();
+    ctx.filter = 'blur(10px) brightness(0.42)';
+    ctx.drawImage(videoEl, -12, -12, outW + 24, outH + 24);
+    ctx.restore();
+
+    const scale = Math.min(outW / vw, outH / vh);
+    const dw = Math.round(vw * scale);
+    const dh = Math.round(vh * scale);
+    const dx = Math.round((outW - dw) / 2);
+    const dy = Math.round((outH - dh) / 2);
+    ctx.drawImage(videoEl, 0, 0, vw, vh, dx, dy, dw, dh);
+
+    return canvas.toDataURL('image/jpeg', 0.78);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Generates a 192×108 JPEG thumbnail asynchronously from a stored Video Blob or URL.
+ */
+export function generateThumbnailFromVideoBlob(
+  videoBlobOrUrl: Blob | string
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let tempUrl = '';
+    const isBlob = typeof videoBlobOrUrl !== 'string';
+    try {
+      tempUrl = isBlob ? URL.createObjectURL(videoBlobOrUrl) : videoBlobOrUrl;
+    } catch {
+      resolve(undefined);
+      return;
+    }
+
+    const vid = document.createElement('video');
+    vid.muted = true;
+    vid.playsInline = true;
+    if (!isBlob) {
+      vid.crossOrigin = 'anonymous';
+    }
+    vid.preload = 'metadata';
+
+    let settled = false;
+    const finish = (result?: string) => {
+      if (settled) return;
+      settled = true;
+      if (isBlob && tempUrl) {
+        try {
+          URL.revokeObjectURL(tempUrl);
+        } catch {}
+      }
+      vid.removeAttribute('src');
+      vid.load();
+      resolve(result);
+    };
+
+    const timeoutId = window.setTimeout(() => finish(undefined), 4500);
+
+    vid.onloadedmetadata = () => {
+      const dur = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : 4;
+      const targetTime = Math.min(1.8, Math.max(0.15, dur * 0.15));
+      try {
+        vid.currentTime = targetTime;
+      } catch {
+        const snap = captureThumbnailFromVideoElement(vid);
+        window.clearTimeout(timeoutId);
+        finish(snap);
+      }
+    };
+
+    vid.onseeked = () => {
+      const snap = captureThumbnailFromVideoElement(vid);
+      window.clearTimeout(timeoutId);
+      finish(snap);
+    };
+
+    vid.onerror = () => {
+      window.clearTimeout(timeoutId);
+      finish(undefined);
+    };
+
+    vid.src = tempUrl;
+  });
+}
+
+/**
+ * Ensures a saved project has a cached thumbnailDataUrl (generating and saving it from its stored IndexedDB videoBlob if missing).
+ */
+export async function ensureProjectThumbnail(
+  projectId: string
+): Promise<string | undefined> {
+  try {
+    const { record, videoBlob } = await getProjectFromIDB(projectId);
+    if (record?.thumbnailDataUrl) {
+      return record.thumbnailDataUrl;
+    }
+    const sourceForThumb =
+      videoBlob || record?.projectState?.sourceAsset?.cloudVideoUrl;
+    if (!sourceForThumb) return undefined;
+
+    const thumb = await generateThumbnailFromVideoBlob(sourceForThumb);
+    if (thumb && record) {
+      record.thumbnailDataUrl = thumb;
+      await saveProjectToIDB(record, null);
+    }
+    return thumb;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Saves a project to both IndexedDB (with the full native video File/Blob) AND the Vercel `/api/projects` API.
  */
 export async function saveStudioProject(params: {
@@ -350,6 +486,7 @@ export async function saveStudioProject(params: {
   user: ComplexAuthUser;
   source: SourceVideoAsset;
   videoBlob?: Blob | null;
+  thumbnailDataUrl?: string;
   fullVideoClip: GeneratedClip | null;
   generatedClips: GeneratedClip[];
   activeClipId: string | null;
@@ -365,6 +502,16 @@ export async function saveStudioProject(params: {
     params.generatedClips[0]?.subjectFocus?.trackedPath ||
     []
   ).filter((p) => p.isUserAnchor).length;
+
+  let thumbnailDataUrl = params.thumbnailDataUrl;
+  if (!thumbnailDataUrl) {
+    const existing = await getProjectFromIDB(params.projectId);
+    if (existing.record?.thumbnailDataUrl) {
+      thumbnailDataUrl = existing.record.thumbnailDataUrl;
+    } else if (params.videoBlob) {
+      thumbnailDataUrl = await generateThumbnailFromVideoBlob(params.videoBlob);
+    }
+  }
 
   const { url: _ignoreObjectUrl, ...serializableSource } = params.source;
 
@@ -391,6 +538,7 @@ export async function saveStudioProject(params: {
     sourceDuration: params.source.duration,
     clipsCount: params.generatedClips.length,
     focusLocksCount,
+    thumbnailDataUrl,
     storageLocation: 'local-indexeddb',
     projectState,
   };
@@ -438,10 +586,14 @@ export async function listSavedStudioProjects(): Promise<SavedProjectSummary[]> 
           if (!existing || (remote.updatedAt || '') > (existing.updatedAt || '')) {
             byId.set(remote.id, {
               ...remote,
+              thumbnailDataUrl: remote.thumbnailDataUrl || existing?.thumbnailDataUrl,
               storageLocation: 'vercel-cloud',
             });
           } else if (existing) {
             existing.storageLocation = 'vercel-cloud';
+            if (!existing.thumbnailDataUrl && remote.thumbnailDataUrl) {
+              existing.thumbnailDataUrl = remote.thumbnailDataUrl;
+            }
           }
         }
       }
