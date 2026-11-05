@@ -3050,6 +3050,130 @@ export const App: React.FC = () => {
     outMarker,
   ]);
 
+  // Reset the currently active clip (or Full Uploaded Video) back to scratch without any changes
+  const handleResetCurrentClip = useCallback(() => {
+    if (!activeSource || !activeClip) return;
+
+    // Save an undo snapshot first so the user can still press Ctrl+Z if they want to undo the reset
+    recordUndoSnapshot(true);
+
+    if (videoRef.current) {
+      videoRef.current.pause();
+    }
+    setIsPlaying(false);
+    setIsLoopingInOut(false);
+    setIsRazorMode(false);
+
+    // Clear all subject focus locks, live tracker anchors, and active drag handles
+    userFocusAnchorsRef.current = [];
+    liveTrackedAnchorRef.current = null;
+    setLiveTrackedAnchor(null);
+    resetLiveObjectTrackerState();
+    setDraggingSpeaker(null);
+    setScalingSpeaker(null);
+    setDraggingOutputLayer(null);
+    setScalingOutputLayer(null);
+    setSelectedLayerTrack('v1-video');
+    setSelectedOverlayLayerId(null);
+    setSelectedCaptionId(null);
+
+    if (timelineMode === 'full-source') {
+      const freshFull = createInitialFullVideoClip(activeSource, activeScheme);
+      setFullVideoClip(freshFull);
+      setInMarker(0);
+      setOutMarker(Number(activeSource.duration.toFixed(2)));
+      activeCutIdxRef.current = 0;
+      setSelectedCutIndex(0);
+      clipPlayheadTimeRef.current = 0;
+      setClipPlayheadTime(0);
+      setPlayheadTime(0);
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0;
+      }
+      setMarkerNotice('Reset clip to original unedited video (Ctrl+Z to Undo)');
+      setTimeout(() => setMarkerNotice(null), 2800);
+      return;
+    }
+
+    if (selectedClipObj) {
+      const origStart = Math.max(0, Math.min(activeSource.duration - 0.5, selectedClipObj.sourceStart));
+      const origEnd = Math.min(
+        activeSource.duration,
+        Math.max(origStart + 0.5, selectedClipObj.sourceEnd)
+      );
+      const cleanDur = Number(Math.max(0.5, origEnd - origStart).toFixed(2));
+      const cleanCut: SubCut = {
+        id: `reset-cut-${Date.now()}`,
+        index: 1,
+        sourceStart: Number(origStart.toFixed(2)),
+        sourceEnd: Number(origEnd.toFixed(2)),
+        timelineStart: 0,
+        timelineEnd: cleanDur,
+        label: `Full Segment (${formatSMPTETimecode(origStart).slice(3, 8)}–${formatSMPTETimecode(origEnd).slice(3, 8)})`,
+        zoom: 1.0,
+        cropBiasX: 0,
+        layoutMode: 'full-single',
+        speed: 1.0,
+      };
+
+      setGeneratedClips((prev) =>
+        prev.map((c): GeneratedClip =>
+          c.id === selectedClipObj.id
+            ? {
+                ...c,
+                sourceStart: cleanCut.sourceStart,
+                sourceEnd: cleanCut.sourceEnd,
+                duration: cleanDur,
+                subCuts: [cleanCut],
+                zoomScale: 1.0,
+                trackingOffsetX: 0,
+                subjectFocus: undefined,
+                backgroundFillStyle: 'blurred',
+                speakerAX: undefined,
+                speakerAY: undefined,
+                speakerAScale: undefined,
+                speakerBX: undefined,
+                speakerBY: undefined,
+                speakerBScale: undefined,
+                splitScreenRatio: undefined,
+                captions: [],
+                captionText: '',
+                hideCaptions: false,
+                overlayLayers: [],
+                overlayBannerText: '',
+                hideBannerLayer: false,
+                videoFilter: undefined,
+                colorGradeLut: 'none',
+                audioMasteringPreset: 'off',
+                playbackSpeed: 1.0,
+                transitionStyle: 'none',
+                manualKeyframes: [],
+              }
+            : c
+        )
+      );
+
+      activeCutIdxRef.current = 0;
+      setSelectedCutIndex(0);
+      clipPlayheadTimeRef.current = 0;
+      setClipPlayheadTime(0);
+      setPlayheadTime(cleanCut.sourceStart);
+      if (videoRef.current) {
+        videoRef.current.currentTime = cleanCut.sourceStart;
+      }
+      setMarkerNotice(`Reset "${selectedClipObj.name}" to scratch (Ctrl+Z to Undo)`);
+      setTimeout(() => setMarkerNotice(null), 2800);
+    }
+  }, [
+    activeSource,
+    activeClip,
+    recordUndoSnapshot,
+    timelineMode,
+    createInitialFullVideoClip,
+    activeScheme,
+    selectedClipObj,
+  ]);
+
   // Clear the currently loaded video and reset the workspace
   const handleClearVideo = useCallback(
     (e?: React.MouseEvent) => {
@@ -4950,6 +5074,15 @@ export const App: React.FC = () => {
                     <Redo2 size={12} />
                     Redo{redoStack.length > 0 ? ` (${redoStack.length})` : ''}
                   </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={handleResetCurrentClip}
+                    title="Reset the current clip back to scratch without any changes (cuts, 2-speaker, zoom, focus locks, captions, overlays, and filters)"
+                  >
+                    <RotateCcw size={12} />
+                    Reset Clip
+                  </button>
                 </div>
               </>
             )}
@@ -5060,6 +5193,16 @@ export const App: React.FC = () => {
                   </DropdownMenu.Item>
                   <DropdownMenu.Separator className="rx-dropdown-separator" />
                   <div className="rx-dropdown-label">Workspace Cleanup</div>
+                  <DropdownMenu.Item
+                    className="rx-dropdown-item"
+                    disabled={!activeSource || !activeClip}
+                    onSelect={() => handleResetCurrentClip()}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <RotateCcw size={12} />
+                      Reset Current Clip to Scratch
+                    </span>
+                  </DropdownMenu.Item>
                   <DropdownMenu.Item
                     className="rx-dropdown-item"
                     disabled={generatedClips.length === 0 || isGeneratingClips}
@@ -5857,24 +6000,17 @@ export const App: React.FC = () => {
                     Full Video
                   </button>
                 )}
-                {activeSource &&
-                  timelineMode === 'full-source' &&
-                  fullVideoClip &&
-                  fullVideoClip.subCuts.length > 1 && (
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => {
-                        setFullVideoClip(createInitialFullVideoClip(activeSource, activeScheme));
-                        setSelectedCutIndex(0);
-                        activeCutIdxRef.current = 0;
-                        setMarkerNotice('Reset full video timeline.');
-                        setTimeout(() => setMarkerNotice(null), 2200);
-                      }}
-                    >
-                      <RotateCcw size={11} />
-                      Reset Cuts
-                    </button>
-                  )}
+                {activeSource && activeClip && (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={handleResetCurrentClip}
+                    title="Reset the current clip back to scratch without any changes (cuts, 2-speaker, zoom, focus locks, captions, overlays, and filters)"
+                  >
+                    <RotateCcw size={11} />
+                    Reset Clip
+                  </button>
+                )}
                 {activeClip?.backgroundFillStyle === 'split-screen' && (
                   <span className="badge-subtle">2-Speaker Split-Screen</span>
                 )}
@@ -8272,6 +8408,17 @@ export const App: React.FC = () => {
                     >
                       <Square size={10} />
                       Stop
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      style={{ height: 26 }}
+                      onClick={handleResetCurrentClip}
+                      title="Reset the current clip back to scratch without any changes"
+                    >
+                      <RotateCcw size={11} />
+                      Reset Clip
                     </button>
 
                     <ShadcnSeparator orientation="vertical" />
